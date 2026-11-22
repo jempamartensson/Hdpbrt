@@ -203,6 +203,13 @@ HdAovDescriptor HdPbrtRenderDelegate::GetDefaultAovDescriptor(TfToken const &nam
 {
     if (name == HdAovTokens->color)
         return HdAovDescriptor(HdFormatFloat32Vec4, false, VtValue(GfVec4f(0, 0, 0, 1)));
+    // Houdini's viewport composites the delegate image using its depth AOV and
+    // draws nothing without one; selection uses the id AOVs.
+    if (name == HdAovTokens->depth)
+        return HdAovDescriptor(HdFormatFloat32, false, VtValue(1.0f));
+    if (name == HdAovTokens->primId || name == HdAovTokens->instanceId ||
+        name == HdAovTokens->elementId)
+        return HdAovDescriptor(HdFormatInt32, false, VtValue(-1));
     return HdAovDescriptor();
 }
 

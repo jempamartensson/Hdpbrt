@@ -6,7 +6,10 @@
 #include "pxr/imaging/hd/renderIndex.h"
 #include "pxr/imaging/hd/tokens.h"
 
+#include "pxr/base/tf/stringUtils.h"
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -30,6 +33,24 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
     // Find the color AOV.
     HdPbrtRenderBuffer *color = nullptr;
     HdRenderPassAovBindingVector bindings = state->GetAovBindings();
+    static const bool debug = getenv("HDPBRT_DEBUG") != nullptr;
+    if (debug) {
+        const CameraUtilFraming &fr = state->GetFraming();
+        fprintf(stderr, "hdPbrt execute: %zu bindings, framing valid %d dw %d,%d %dx%d\n",
+                bindings.size(), int(fr.IsValid()), fr.dataWindow.GetMinX(),
+                fr.dataWindow.GetMinY(), fr.dataWindow.GetWidth(), fr.dataWindow.GetHeight());
+        for (auto &b : bindings) {
+            HdRenderBuffer *rb = b.renderBuffer;
+            if (!rb && !b.renderBufferId.IsEmpty())
+                rb = static_cast<HdRenderBuffer *>(GetRenderIndex()->GetBprim(
+                    HdPrimTypeTokens->renderBuffer, b.renderBufferId));
+            fprintf(stderr, "  aov %s id %s rb %p ours %d fmt %d %ux%u clear %s\n",
+                    b.aovName.GetText(), b.renderBufferId.GetText(), (void *)rb,
+                    int(dynamic_cast<HdPbrtRenderBuffer *>(rb) != nullptr),
+                    rb ? int(rb->GetFormat()) : -1, rb ? rb->GetWidth() : 0,
+                    rb ? rb->GetHeight() : 0, TfStringify(b.clearValue).c_str());
+        }
+    }
     for (auto &b : bindings) {
         HdRenderBuffer *rb = b.renderBuffer;
         if (!rb && !b.renderBufferId.IsEmpty())
@@ -42,7 +63,10 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
             color = pb;
         else if (!pb->IsConverged()) {
             // Unsupported AOV: fill it with its clear value once.
-            if (b.clearValue.IsHolding<float>()) {
+            if (b.clearValue.IsHolding<int>()) {
+                float v = float(b.clearValue.UncheckedGet<int>());
+                pb->Clear(&v, 1);
+            } else if (b.clearValue.IsHolding<float>()) {
                 float v = b.clearValue.UncheckedGet<float>();
                 pb->Clear(&v, 1);
             } else if (b.clearValue.IsHolding<GfVec4f>()) {
@@ -101,8 +125,13 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
 
     hdpbrt::PbrtSession &session = _delegate->GetSession();
     int iw = 0, ih = 0;
-    if (session.Snapshot(&_image, &iw, &ih, &_imageVersion) && iw == w && ih == h)
-        color->WriteRGB(_image.data(), iw, ih, dw.GetMinX(), dw.GetMinY());
+    if (session.Snapshot(&_image, &iw, &ih, &_imageVersion)) {
+        if (debug)
+            fprintf(stderr, "hdPbrt snapshot %dx%d (want %dx%d) v%llu\n", iw, ih, w, h,
+                    (unsigned long long)_imageVersion);
+        if (iw == w && ih == h)
+            color->WriteRGB(_image.data(), iw, ih, dw.GetMinX(), dw.GetMinY());
+    }
 
     _converged = !_pending && (!_started || session.IsFinished());
     color->SetConverged(_converged);
