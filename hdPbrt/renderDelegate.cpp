@@ -101,6 +101,7 @@ void HdPbrtRenderDelegate::_Init()
     add("Regularize BSDFs", HdPbrtSettingsTokens->regularize, VtValue(false));
     add("Depth of Field (camera fStop / focusDistance)", HdPbrtSettingsTokens->depthOfField,
         VtValue(true));
+    add("Motion Blur (camera shutter)", HdPbrtSettingsTokens->motionBlur, VtValue(true));
     add("Export .pbrt Scene To", HdPbrtSettingsTokens->exportPath, VtValue(std::string()));
     _PopulateDefaultSettings(_settingDescriptors);
 
@@ -487,9 +488,24 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
         }
     }
     char sw[256];
-    snprintf(sw, sizeof(sw), " \"float screenwindow\" [%.9g %.9g %.9g %.9g]\n", sx0, sx1, sy0,
+    snprintf(sw, sizeof(sw), " \"float screenwindow\" [%.9g %.9g %.9g %.9g]", sx0, sx1, sy0,
              sy1);
     os << sw;
+    // Motion blur: pbrt samples ray times over the camera shutter, and the
+    // prims' animated transforms span the same interval (TransformTimes).
+    const GfVec2f shutter = _shutter;
+    if (shutter[0] < shutter[1]) {
+        char sh[128];
+        snprintf(sh, sizeof(sh), " \"float shutteropen\" %.9g \"float shutterclose\" %.9g",
+                 shutter[0], shutter[1]);
+        os << sh;
+    }
+    os << "\n";
+    if (shutter[0] < shutter[1]) {
+        char tt[96];
+        snprintf(tt, sizeof(tt), "TransformTimes %.9g %.9g\n", shutter[0], shutter[1]);
+        os << tt;
+    }
 
     os << "WorldBegin\n";
     HdPbrtWriteContext ctx;

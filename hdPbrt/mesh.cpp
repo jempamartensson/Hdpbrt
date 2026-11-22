@@ -10,6 +10,7 @@
 #include "pxr/imaging/pxOsd/tokens.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <unistd.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -151,8 +152,21 @@ void HdPbrtMesh::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam
 
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        if (HdChangeTracker::IsTransformDirty(*dirtyBits, id))
-            _xform = sceneDelegate->GetTransform(id);
+        if (HdChangeTracker::IsTransformDirty(*dirtyBits, id)) {
+            // Motion blur: sample over a window around the current time and
+            // resample at the shutter when the scene is written.
+            const float w = HdPbrt_SampleWindow;
+            sceneDelegate->SampleTransform(id, -w, w, &_xform);
+            if (_xform.count == 0) {
+                _xform.Resize(1);
+                _xform.times[0] = 0.f;
+                _xform.values[0] = sceneDelegate->GetTransform(id);
+            }
+            static const bool debug = getenv("HDPBRT_DEBUG") != nullptr;
+            if (debug && _xform.count > 1)
+                fprintf(stderr, "hdPbrt %s: %zu transform samples (%g..%g)\n", id.GetText(),
+                        _xform.count, _xform.times[0], _xform.times[_xform.count - 1]);
+        }
         if (HdChangeTracker::IsVisibilityDirty(*dirtyBits, id))
             _UpdateVisibility(sceneDelegate, dirtyBits);
         _visible = IsVisible();
@@ -171,18 +185,14 @@ void HdPbrtMesh::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam
     HdInstancer::_SyncInstancerAndParents(sceneDelegate->GetRenderIndex(),
                                           GetInstancerId());
     {
-        VtMatrix4dArray xforms;
         bool instanced = !GetInstancerId().IsEmpty();
         if (instanced) {
-            HdInstancer *instancer =
-                sceneDelegate->GetRenderIndex().GetInstancer(GetInstancerId());
-            if (instancer)
-                xforms = static_cast<HdPbrtInstancer *>(instancer)
-                             ->ComputeInstanceTransforms(id);
+            if (HdInstancer *instancer =
+                    sceneDelegate->GetRenderIndex().GetInstancer(GetInstancerId()))
+                static_cast<HdPbrtInstancer *>(instancer)->UpdateInstanceIndices(id);
         }
         std::lock_guard<std::mutex> lock(_mutex);
         _instanced = instanced;
-        _instanceXforms = xforms;
     }
 
     *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
@@ -365,6 +375,16 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
     _numTriangles = writtenTris;
 }
 
+// A pbrt transform, animated between shutter open and close when they differ.
+static std::string _MotionTransform(const GfMatrix4d &open, const GfMatrix4d &close)
+{
+    if (open == close)
+        return "Transform " + HdPbrt_Matrix(open);
+    return "ActiveTransform StartTime Transform " + HdPbrt_Matrix(open) +
+           " ActiveTransform EndTime Transform " + HdPbrt_Matrix(close) +
+           " ActiveTransform All";
+}
+
 void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
                        TfTokenVector const &renderTags, HdPbrtWriteContext &ctx) const
 {
@@ -374,8 +394,22 @@ void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
     if (!renderTags.empty() &&
         std::find(renderTags.begin(), renderTags.end(), GetRenderTag()) == renderTags.end())
         return;
-    if (_instanced && _instanceXforms.empty())
-        return;
+    // Transforms at shutter open and close (equal without motion blur).
+    const GfVec2f shutter = _delegate->GetShutter();
+    const bool blur = shutter[0] != shutter[1];
+    const GfMatrix4d xf0 = _xform.count ? _xform.Resample(shutter[0]) : GfMatrix4d(1.0);
+    const GfMatrix4d xf1 = blur && _xform.count ? _xform.Resample(shutter[1]) : xf0;
+    VtMatrix4dArray inst0, inst1;
+    if (_instanced) {
+        if (auto *pi = static_cast<HdPbrtInstancer *>(index.GetInstancer(GetInstancerId()))) {
+            inst0 = pi->ComputeInstanceTransforms(GetId(), shutter[0]);
+            inst1 = blur ? pi->ComputeInstanceTransforms(GetId(), shutter[1]) : inst0;
+        }
+        if (inst0.empty())
+            return;
+        if (inst1.size() != inst0.size())  // the instance count changes
+            inst1 = inst0;
+    }
 
     HdPbrtMaterialDesc mat = HdPbrt_DefaultMaterial();
     const SdfPath &matId = GetMaterialId();
@@ -404,7 +438,7 @@ void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
 
     os << "# " << GetId().GetString() << "\n";
     if (!_instanced) {
-        os << "AttributeBegin\n  Transform " << HdPbrt_Matrix(_xform) << "\n  " << matLine;
+        os << "AttributeBegin\n  " << _MotionTransform(xf0, xf1) << "\n  " << matLine;
         if (mat.emission[0] > 0 || mat.emission[1] > 0 || mat.emission[2] > 0)
             os << "  AreaLightSource \"diffuse\" \"rgb L\" " << HdPbrt_Rgb(mat.emission)
                << "\n";
@@ -416,11 +450,11 @@ void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
            << shape.str() << "ObjectEnd\n";
         // hdpbrtinstanceid: the instance index Hydra expects in the instanceId
         // AOV (flattened over nested instancers, see HdPbrtInstancer).
-        for (size_t i = 0; i < _instanceXforms.size(); ++i)
-            os << "AttributeBegin Transform " << HdPbrt_Matrix(_xform * _instanceXforms[i])
+        for (size_t i = 0; i < inst0.size(); ++i)
+            os << "AttributeBegin " << _MotionTransform(xf0 * inst0[i], xf1 * inst1[i])
                << " Attribute \"shape\" \"integer hdpbrtinstanceid\" " << i
                << " ObjectInstance " << HdPbrt_Quote(name) << " AttributeEnd\n";
-        ctx.numInstances += _instanceXforms.size();
+        ctx.numInstances += inst0.size();
     }
 }
 

@@ -166,7 +166,14 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
     // already converts focal length to world units; pbrt's thin lens wants
     // the aperture radius, focalLength / (2 fStop).
     HdPbrtLens lens;
+    GfVec2f shutter(0.f, 0.f);
     if (HdCamera const *cam = state->GetCamera()) {
+        // Motion blur over the camera shutter (frames relative to now).
+        const bool blur =
+            _delegate->GetSetting<bool>(HdPbrtSettingsTokens->motionBlur, true) &&
+            !_delegate->GetSetting<bool>(HdRenderSettingsPrimTokens->disableMotionBlur, false);
+        if (blur && cam->GetShutterOpen() < cam->GetShutterClose())
+            shutter = GfVec2f(float(cam->GetShutterOpen()), float(cam->GetShutterClose()));
         const bool ortho = std::fabs(proj[3][3] - 1.0) < 1e-6;
         const bool enabled =
             _delegate->GetSetting<bool>(HdPbrtSettingsTokens->depthOfField, true) &&
@@ -181,11 +188,19 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
                             "lensradius %g\n",
                     cam->GetId().GetText(), cam->GetFStop(), cam->GetFocusDistance(),
                     cam->GetFocalLength(), lens.lensRadius);
+        if (debug)
+            fprintf(stderr, "hdPbrt camera shutter %g..%g -> %g..%g\n", cam->GetShutterOpen(),
+                    cam->GetShutterClose(), shutter[0], shutter[1]);
     }
+    // The prims keep time samples around the current frame; a new shutter
+    // only means writing the scene again.
+    const bool shutterChanged = shutter != _delegate->GetShutter();
+    _delegate->SetShutter(shutter);
 
     const bool changed = sceneVersion != _lastSceneVersion ||
                          settingsVersion != _lastSettingsVersion || view != _view ||
-                         proj != _proj || lens != _lens || dw != _dataWindow ||
+                         proj != _proj || lens != _lens || shutterChanged ||
+                         dw != _dataWindow ||
                          renderTags != _renderTags;
     if (changed) {
         _pending = true;

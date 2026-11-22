@@ -106,8 +106,16 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 
 ## Open items and ideas
 
-- Not translated yet: curves, points, volumes, subdivision refinement, motion blur, light
-  shaping/IES, light linking. Implicit spheres are coarse.
+- Not translated yet: curves, points, volumes, subdivision refinement, deformation and camera
+  motion blur, light shaping/IES, light linking. Implicit spheres are coarse.
+- Motion blur (done 2026-11-22): transform blur over the camera shutter. Prims keep time
+  samples over +-1 frame (`HdPbrt_SampleWindow`) and the scene writer resamples at shutter
+  open/close; instancers cache instance indices in `UpdateInstanceIndices` during the
+  prototype's sync. Don't go back to re-dirtying rprims from the render pass on a shutter
+  change: Houdini's viewport never resynced them. Verified in the live viewport (Python LOP
+  with time samples, camera shutter 0..1) and with `tests/motion_scene.usda` at frame 1.
+  Blender's Hydra sends shutter 0..0. Karma, in a FrameRecorder without RenderSettings,
+  blurs less and doesn't blur instances, so it isn't a reference here.
 - Depth of field (done 2026-11-22): the render pass reads the HdCamera from the pass state.
   Perspective + fStop > 0 + focusDistance > 0 -> pbrt `lensradius` = focalLength / (2 fStop),
   `focaldistance` = focusDistance (HdCamera values are already in world units). Off with

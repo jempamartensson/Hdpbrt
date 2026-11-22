@@ -24,6 +24,7 @@
 #include "pxr/imaging/hd/renderDelegate.h"
 #include "pxr/imaging/hd/renderPass.h"
 #include "pxr/imaging/hd/rendererPlugin.h"
+#include "pxr/imaging/hd/timeSampleArray.h"
 #include "pxr/imaging/hd/vtBufferSource.h"
 
 #include "session.h"
@@ -46,10 +47,15 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((threads, "pbrt:threads"))                 \
     ((regularize, "pbrt:regularize"))           \
     ((depthOfField, "pbrt:depthOfField"))       \
+    ((motionBlur, "pbrt:motionBlur"))           \
     ((exportPath, "pbrt:exportPath"))           \
     ((pbrtExecutable, "pbrt:executable"))
 
 TF_DECLARE_PUBLIC_TOKENS(HdPbrtSettingsTokens, HDPBRT_SETTINGS_TOKENS);
+
+// Instancer primvars and transforms are sampled over this window (frames
+// relative to the current time) and resampled at the shutter times.
+constexpr float HdPbrt_SampleWindow = 1.f;
 
 // Thin-lens parameters for pbrt's perspective camera, in world units.
 // lensRadius 0 = pinhole (no depth of field).
@@ -129,11 +135,19 @@ public:
     ~HdPbrtInstancer() override;
     void Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
               HdDirtyBits *dirtyBits) override;
-    VtMatrix4dArray ComputeInstanceTransforms(SdfPath const &prototypeId);
+    // Fetch and cache the instance indices for a prototype (and up the
+    // parent instancer chain). Call while syncing the prototype.
+    void UpdateInstanceIndices(SdfPath const &prototypeId);
+    // Instance transforms (flattened over parent instancers) at a time
+    // relative to the current frame, within HdPbrt_SampleWindow, from the
+    // cached samples and indices (no scene delegate calls).
+    VtMatrix4dArray ComputeInstanceTransforms(SdfPath const &prototypeId, float time = 0.f);
 
 private:
     std::mutex _mutex;
-    std::map<TfToken, VtValue> _primvars;
+    std::map<SdfPath, VtIntArray> _indices;
+    std::map<TfToken, HdTimeSampleArray<VtValue, 4>> _primvars;
+    HdTimeSampleArray<GfMatrix4d, 4> _xform;
     bool _visible = true;
 };
 
@@ -163,12 +177,13 @@ private:
     mutable std::mutex _mutex;
     std::string _plyPath;
     size_t _numTriangles = 0;
-    GfMatrix4d _xform{1.0};
+    // Transform samples over HdPbrt_SampleWindow, resampled at the shutter
+    // when the scene is written.
+    HdTimeSampleArray<GfMatrix4d, 4> _xform;
     bool _visible = true;
     GfVec3f _displayColor{0.18f, 0.18f, 0.18f};
     bool _hasDisplayColor = false;
     float _displayOpacity = 1.f;
-    VtMatrix4dArray _instanceXforms;
     bool _instanced = false;
     int _plyVersion = 0;
 };
@@ -283,6 +298,12 @@ public:
     template <typename T>
     T GetSetting(TfToken const &key, T const &def) const;
 
+    // Motion blur shutter interval in frames relative to the current time
+    // (open == close: no blur). Set by the render pass from the camera; the
+    // prims sample their transforms over it when they sync.
+    GfVec2f GetShutter() const { return _shutter; }
+    void SetShutter(GfVec2f s) { _shutter = s; }
+
 private:
     void _Init();
     std::string _PbrtExecutable() const;
@@ -298,6 +319,7 @@ private:
     std::map<std::string, std::string> _equiAreaCache;
     hdpbrt::PbrtSession _session;
     int _renderCount = 0;
+    GfVec2f _shutter{0.f, 0.f};
 
     static std::mutex _resourceRegistryMutex;
     static std::atomic_int _counterResourceRegistry;

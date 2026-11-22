@@ -11,8 +11,10 @@ stage = Usd.Stage.Open(sys.argv[3] if len(sys.argv)>3 else 'scene.usda')
 rec = UsdAppUtils.FrameRecorder(sys.argv[1], True)
 rec.SetImageWidth(640); rec.SetColorCorrectionMode('sRGB')
 cam = UsdAppUtils.GetCameraAtPath(stage, Sdf.Path('/World/cam'))
+# optional 4th argument: the frame to render (default: the default time)
+time = Usd.TimeCode(float(sys.argv[4])) if len(sys.argv) > 4 else Usd.TimeCode.Default()
 try:
-    print('record:', rec.Record(stage, cam, Usd.TimeCode.Default(), sys.argv[2]))
+    print('record:', rec.Record(stage, cam, time, sys.argv[2]))
 except Tf.ErrorException as e:
     print('errors:', str(e).count('Error in'), str(e)[-300:])
 print('exists:', os.path.exists(sys.argv[2]))

@@ -22,18 +22,47 @@ void HdPbrtInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *renderParam
 {
     _UpdateInstancer(delegate, dirtyBits);
     std::lock_guard<std::mutex> lock(_mutex);
+    const float w = HdPbrt_SampleWindow;
     if (*dirtyBits & HdChangeTracker::DirtyVisibility)
         _visible = delegate->GetVisible(GetId());
+    if (*dirtyBits & HdChangeTracker::DirtyTransform)
+        delegate->SampleInstancerTransform(GetId(), -w, w, &_xform);
     if (HdChangeTracker::IsAnyPrimvarDirty(*dirtyBits, GetId())) {
         for (const HdPrimvarDescriptor &pv :
              delegate->GetPrimvarDescriptors(GetId(), HdInterpolationInstance)) {
             if (HdChangeTracker::IsPrimvarDirty(*dirtyBits, GetId(), pv.name)) {
-                VtValue v = delegate->Get(GetId(), pv.name);
-                if (!v.IsEmpty())
-                    _primvars[pv.name] = v;
+                HdTimeSampleArray<VtValue, 4> sa;
+                delegate->SamplePrimvar(GetId(), pv.name, -w, w, &sa);
+                if (sa.count > 0 && !sa.values[0].IsEmpty())
+                    _primvars[pv.name] = sa;
             }
         }
     }
+}
+
+// A time-sampled value at time t: interpolated between the neighboring
+// samples, or the nearest sample when they can't be blended (different
+// types or array sizes, e.g. a changing instance count).
+static VtValue _ValueAt(const HdTimeSampleArray<VtValue, 4> &sa, float t)
+{
+    if (sa.count == 0)
+        return VtValue();
+    if (sa.count == 1 || t <= sa.times[0])
+        return sa.values[0];
+    if (t >= sa.times[sa.count - 1])
+        return sa.values[sa.count - 1];
+    size_t i = 0;
+    while (i + 1 < sa.count && sa.times[i + 1] < t)
+        ++i;
+    const VtValue &v0 = sa.values[i], &v1 = sa.values[i + 1];
+    const float t0 = sa.times[i], t1 = sa.times[i + 1];
+    const float a = t1 > t0 ? (t - t0) / (t1 - t0) : 0.f;
+    if (v0.GetType() == v1.GetType() && v0.GetArraySize() == v1.GetArraySize()) {
+        VtValue r = HdResampleNeighbors(a, v0, v1);
+        if (!r.IsEmpty())
+            return r;
+    }
+    return a < 0.5f ? v0 : v1;
 }
 
 template <typename T>
@@ -48,20 +77,40 @@ static bool _Sample(const VtValue &v, int index, T *out)
     return true;
 }
 
-VtMatrix4dArray HdPbrtInstancer::ComputeInstanceTransforms(SdfPath const &prototypeId)
+void HdPbrtInstancer::UpdateInstanceIndices(SdfPath const &prototypeId)
+{
+    VtIntArray indices = GetDelegate()->GetInstanceIndices(GetId(), prototypeId);
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _indices[prototypeId] = indices;
+    }
+    if (GetParentId().IsEmpty())
+        return;
+    if (HdInstancer *parent = GetDelegate()->GetRenderIndex().GetInstancer(GetParentId()))
+        static_cast<HdPbrtInstancer *>(parent)->UpdateInstanceIndices(GetId());
+}
+
+VtMatrix4dArray HdPbrtInstancer::ComputeInstanceTransforms(SdfPath const &prototypeId,
+                                                           float time)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     if (!_visible)
         return {};
-    GfMatrix4d instancerXf = GetDelegate()->GetInstancerTransform(GetId());
-    VtIntArray indices = GetDelegate()->GetInstanceIndices(GetId(), prototypeId);
+    auto it = _indices.find(prototypeId);
+    if (it == _indices.end())
+        return {};
+    const VtIntArray &indices = it->second;
+    GfMatrix4d instancerXf = _xform.count > 0 ? _xform.Resample(time) : GfMatrix4d(1.0);
     VtMatrix4dArray xfs(indices.size());
     for (size_t i = 0; i < indices.size(); ++i)
         xfs[i] = instancerXf;
 
+    std::map<TfToken, VtValue> values;
+    for (auto const &kv : _primvars)
+        values[kv.first] = _ValueAt(kv.second, time);
     auto find = [&](TfToken const &t) -> const VtValue * {
-        auto it = _primvars.find(t);
-        return it == _primvars.end() ? nullptr : &it->second;
+        auto it = values.find(t);
+        return it == values.end() ? nullptr : &it->second;
     };
     if (const VtValue *v = find(HdInstancerTokens->instanceTranslations)) {
         for (size_t i = 0; i < indices.size(); ++i) {
@@ -109,7 +158,7 @@ VtMatrix4dArray HdPbrtInstancer::ComputeInstanceTransforms(SdfPath const &protot
     if (!parent)
         return xfs;
     VtMatrix4dArray parentXfs =
-        static_cast<HdPbrtInstancer *>(parent)->ComputeInstanceTransforms(GetId());
+        static_cast<HdPbrtInstancer *>(parent)->ComputeInstanceTransforms(GetId(), time);
     VtMatrix4dArray result(parentXfs.size() * xfs.size());
     for (size_t i = 0; i < parentXfs.size(); ++i)
         for (size_t j = 0; j < xfs.size(); ++j)

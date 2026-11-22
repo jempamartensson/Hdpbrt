@@ -20,7 +20,7 @@ pieces (render buffer, instancer, implicit-surface scene index plugin) from USD'
 - **Render settings** (Houdini: Render Settings LOP custom attributes or viewport delegate
   options; Blender: the add-on panel): `pbrt:pixelSamples` (256), `pbrt:maxDepth` (5),
   `pbrt:integrator` (volpath), `pbrt:sampler` (zsobol), `pbrt:threads` (0 = all but two),
-  `pbrt:regularize`, `pbrt:depthOfField` (true), `pbrt:exportPath` (also write the .pbrt scene there).
+  `pbrt:regularize`, `pbrt:depthOfField` (true), `pbrt:motionBlur` (true), `pbrt:exportPath` (also write the .pbrt scene there).
 - **Husk:** not testable here: the Apprentice licence refuses third-party delegates in husk.
 
 ## How it works
@@ -58,7 +58,7 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   scheme meshes without normals), UsdGeom implicit shapes (converted to meshes by an
   `HdsiImplicitSurfaceSceneIndex` plugin: coarse tessellation), point instancers and
   nested instancers (pbrt ObjectBegin/ObjectInstance). No curves, points, volumes, subdiv
-  refinement or motion blur yet.
+  refinement, deformation blur or camera motion blur yet.
 - **Materials:** UsdPreviewSurface, MaterialX `ND_standard_surface` and `ND_open_pbr_surface`
   (what Houdini's MtlX nodes and Blender's MaterialX export produce). pbrt has no uber
   material, so: metallic >= 0.5 -> `conductor` (reflectance = base color); transmission >= 0.5
@@ -78,6 +78,19 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   fStop > 0 and focusDistance > 0 give pbrt's thin lens (`lensradius` = focalLength /
   (2 fStop), `focaldistance`; HdCamera values are in world units). Matches Karma's blur.
   Off with `pbrt:depthOfField` false or the render settings' `disableDepthOfField`.
+- **Motion blur (transforms):** the camera's shutter:open/close (frames relative to the current
+  time) become pbrt's `shutteropen`/`shutterclose` and `TransformTimes`. Meshes sample their
+  transform, and instancers their transform and instance primvars, over a fixed window of
+  +-1 frame when they sync (`HdPbrt_SampleWindow`); the scene writer resamples them at shutter
+  open and close (`ActiveTransform StartTime/EndTime`). pbrt interpolates between those two,
+  so a shutter longer than the window, or curved motion within it, is approximated. No
+  deformation blur (pbrt has no moving triangles), no camera motion (the render pass gets a
+  single view matrix), lights don't move. Off with `pbrt:motionBlur` false or the render
+  settings' `disableMotionBlur`. Houdini: needs authored time samples (as Karma does; a LOP
+  network evaluated per frame only has the current one, use a Cache LOP). Blender 5.3's
+  Hydra export sends no shutter (0..0), so no motion blur there.
+  Resampling at write time matters: re-dirtying the rprims from the render pass when the
+  shutter changes worked in hython but never resynced them in Houdini's viewport.
 - **AOVs:** color (pbrt image), depth, primId and instanceId (selection), elementId (-1).
   Ids: each mesh's Shape gets `"integer hdpbrtprimid" <HdRprim::GetPrimId()>`, each
   ObjectInstance is preceded by `Attribute "shape" "integer hdpbrtinstanceid" <i>` (i = index
@@ -136,6 +149,9 @@ Gotchas:
 
 ## Tests (test/)
 
+- `hython tests/hydra_render.py HdPbrtRendererPlugin out.png tests/motion_scene.usda 1`: the
+  test scene with a moving sphere and point instances, shutter 0..1, rendered at frame 1
+  (`docs/images/motion_blur.png`).
 - Live viewport test without touching the user's desktop: `test/viewport/` (vp_test.py,
   run_real.sh). Start a private headless compositor with an X server:
   `dbus-run-session` running `gnome-shell --headless --virtual-monitor 1920x1080 --wayland
