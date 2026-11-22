@@ -172,6 +172,9 @@ protected:
 
 private:
     void _WritePly(HdSceneDelegate *sceneDelegate, HdDirtyBits dirtyBits);
+    // Deformation blur: (re)write the PLYs of the shutter-open and -close
+    // poses when the shutter changed. Called with _mutex held.
+    void _UpdateMotionPlys(GfVec2f shutter) const;
 
     HdPbrtRenderDelegate *_delegate;
     mutable std::mutex _mutex;
@@ -186,6 +189,21 @@ private:
     float _displayOpacity = 1.f;
     bool _instanced = false;
     int _plyVersion = 0;
+
+    // Deformation blur (only for meshes whose points are time-sampled): the
+    // points over HdPbrt_SampleWindow and how to rebuild the PLY from them.
+    struct _Motion {
+        HdTimeSampleArray<VtVec3fArray, 4> points;
+        std::vector<int> source;       // PLY vertex -> point index
+        std::vector<int32_t> indices;  // PLY triangle vertex indices
+        VtVec3fArray normals;          // per PLY vertex: authored (static) normals
+        bool smoothNormals = false;    // recompute vertex normals per pose
+        HdMeshTopology topology;       // for smoothNormals
+        std::vector<GfVec2f> uvs;      // per PLY vertex (empty: none)
+    };
+    std::unique_ptr<_Motion> _motion;
+    mutable GfVec2f _motionShutter{0.f, 0.f};
+    mutable std::string _motionPly0, _motionPly1;
 };
 
 // ---------------------------------------------------------------------------

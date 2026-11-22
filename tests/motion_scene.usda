@@ -1,6 +1,6 @@
 #usda 1.0
-# test_scene.usda with motion: the red sphere and three point instances move
-# between frames 1 and 2; camera shutter 0..1. Render at frame 1:
+# test_scene.usda with motion: the red sphere and three point instances move,
+# and the green quad "flag" deforms (its top edge rises), between frames 1 and 2; camera shutter 0..1. Render at frame 1:
 #   hython hydra_render.py HdPbrtRendererPlugin out.png motion_scene.usda 1
 (
     upAxis = "Y"
@@ -149,6 +149,17 @@ def Xform "World"
         int[] faceVertexIndices = [0, 1, 2, 3]
         rel material:binding = </World/mtl/emit>
         point3f[] points = [(2.5, 0.2, -3), (4.5, 0.2, -3), (4.5, 1.6, -3), (2.5, 1.6, -3)]
+    }
+
+    def Mesh "flag"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points.timeSamples = {
+            1: [(0.6, 0.2, 3.5), (1.6, 0.2, 3.5), (1.6, 0.8, 3.5), (0.6, 0.8, 3.5)],
+            2: [(0.6, 0.2, 3.5), (1.6, 0.2, 3.5), (1.6, 1.8, 3.5), (0.6, 1.8, 3.5)],
+        }
+        color3f[] primvars:displayColor = [(0.1, 0.8, 0.2)]
     }
 
     def PointInstancer "cubes"

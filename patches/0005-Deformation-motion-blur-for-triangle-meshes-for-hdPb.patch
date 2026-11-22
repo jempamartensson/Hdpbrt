@@ -1,0 +1,264 @@
+From d6058365f9672a61682c4bfd2e2e1b9c24af5568 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sun, 22 Nov 2026 18:21:06 +0100
+Subject: [PATCH 5/5] Deformation motion blur for triangle meshes (for hdPbrt)
+
+TriangleMesh can hold a second set of vertex positions (and normals) at the end of a
+time interval; vertices move linearly between the two by ray time. trianglemesh takes
+"point3 P1" / "normal N1", plymesh "string motionfilename" (a PLY with the same
+vertices), both "float motiontimes" [t0 t1]. Triangle bounds cover both poses;
+intersection, hit setup and light sampling use the vertices at the ray time; area and
+solid angle use the start pose.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/shapes.cpp    | 58 +++++++++++++++++++++++++++++++++++++++---
+ src/pbrt/shapes.h      | 25 ++++++++++++------
+ src/pbrt/util/mesh.cpp | 21 +++++++++++++++
+ src/pbrt/util/mesh.h   | 21 +++++++++++++++
+ 4 files changed, 113 insertions(+), 12 deletions(-)
+
+diff --git a/src/pbrt/shapes.cpp b/src/pbrt/shapes.cpp
+index 2385f0c..aff3504 100644
+--- a/src/pbrt/shapes.cpp
++++ b/src/pbrt/shapes.cpp
+@@ -293,7 +293,12 @@ PBRT_CPU_GPU Bounds3f Triangle::Bounds() const {
+     const int *v = &mesh->vertexIndices[3 * triIndex];
+     Point3f p0 = mesh->p[v[0]], p1 = mesh->p[v[1]], p2 = mesh->p[v[2]];
+ 
+-    return Union(Bounds3f(p0, p1), p2);
++    Bounds3f b = Union(Bounds3f(p0, p1), p2);
++    // hdPbrt: a moving triangle covers both of its end poses (linear motion
++    // stays inside their union).
++    if (mesh->p1)
++        b = Union(Union(Union(b, mesh->p1[v[0]]), mesh->p1[v[1]]), mesh->p1[v[2]]);
++    return b;
+ }
+ 
+ PBRT_CPU_GPU DirectionCone Triangle::NormalBounds() const {
+@@ -302,6 +307,8 @@ PBRT_CPU_GPU DirectionCone Triangle::NormalBounds() const {
+     const int *v = &mesh->vertexIndices[3 * triIndex];
+     Point3f p0 = mesh->p[v[0]], p1 = mesh->p[v[1]], p2 = mesh->p[v[2]];
+ 
++    if (mesh->p1)  // hdPbrt: a deforming triangle may turn
++        return DirectionCone::EntireSphere();
+     Normal3f n = Normalize(Normal3f(Cross(p1 - p0, p2 - p0)));
+     // Ensure correct orientation of geometric normal for normal bounds
+     if (mesh->n) {
+@@ -320,7 +327,9 @@ PBRT_CPU_GPU pstd::optional<ShapeIntersection> Triangle::Intersect(const Ray &ra
+     // Get triangle vertices in _p0_, _p1_, and _p2_
+     const TriangleMesh *mesh = GetMesh();
+     const int *v = &mesh->vertexIndices[3 * triIndex];
+-    Point3f p0 = mesh->p[v[0]], p1 = mesh->p[v[1]], p2 = mesh->p[v[2]];
++    // hdPbrt: vertices at the ray's time (deformation blur).
++    const Float mf = mesh->MotionFactor(ray.time);
++    Point3f p0 = mesh->P(v[0], mf), p1 = mesh->P(v[1], mf), p2 = mesh->P(v[2], mf);
+ 
+     pstd::optional<TriangleIntersection> triIsect =
+         IntersectTriangle(ray, tMax, p0, p1, p2);
+@@ -341,7 +350,8 @@ PBRT_CPU_GPU bool Triangle::IntersectP(const Ray &ray, Float tMax) const {
+     // Get triangle vertices in _p0_, _p1_, and _p2_
+     const TriangleMesh *mesh = GetMesh();
+     const int *v = &mesh->vertexIndices[3 * triIndex];
+-    Point3f p0 = mesh->p[v[0]], p1 = mesh->p[v[1]], p2 = mesh->p[v[2]];
++    const Float mf = mesh->MotionFactor(ray.time);  // hdPbrt
++    Point3f p0 = mesh->P(v[0], mf), p1 = mesh->P(v[1], mf), p2 = mesh->P(v[2], mf);
+ 
+     pstd::optional<TriangleIntersection> isect = IntersectTriangle(ray, tMax, p0, p1, p2);
+     if (isect) {
+@@ -432,9 +442,25 @@ TriangleMesh *Triangle::CreateMesh(const Transform *renderFromObject,
+         faceIndices = {};
+     }
+ 
+-    return alloc.new_object<TriangleMesh>(
++    // hdPbrt: deformation motion blur, "point3 P1" (and "normal N1") at the
++    // end of "float motiontimes" [t0 t1].
++    std::vector<Point3f> P1 = parameters.GetPoint3fArray("P1");
++    std::vector<Normal3f> N1 = parameters.GetNormal3fArray("N1");
++    if (!P1.empty() && P1.size() != P.size()) {
++        Error(loc, "Number of \"P1\"s for triangle mesh must match \"P\"s. "
++                   "Discarding motion.");
++        P1 = {};
++    }
++    std::vector<Float> motionTimes = parameters.GetFloatArray("motiontimes");
++
++    TriangleMesh *mesh = alloc.new_object<TriangleMesh>(
+         *renderFromObject, reverseOrientation, std::move(vi), std::move(P), std::move(S),
+         std::move(N), std::move(uvs), std::move(faceIndices), alloc);
++    if (!P1.empty())
++        mesh->SetMotion(*renderFromObject, std::move(P1), std::move(N1),
++                        motionTimes.size() == 2 ? motionTimes[0] : 0.f,
++                        motionTimes.size() == 2 ? motionTimes[1] : 1.f, alloc);
++    return mesh;
+ }
+ 
+ STAT_MEMORY_COUNTER("Memory/Curves", curveBytes);
+@@ -1459,6 +1485,30 @@ pstd::vector<Shape> Shape::Create(
+                 *renderFromObject, reverseOrientation, plyMesh.triIndices, plyMesh.p,
+                 std::vector<Vector3f>(), plyMesh.n, plyMesh.uv, plyMesh.faceIndices,
+                 alloc);
++            // hdPbrt: deformation motion blur. "string motionfilename" is a
++            // PLY with the same vertices (and normals) at the end of
++            // "float motiontimes" [t0 t1]. Triangles only, no displacement.
++            std::string motionFile =
++                ResolveFilename(parameters.GetOneString("motionfilename", ""));
++            if (!motionFile.empty()) {
++                if (!displacementTexName.empty() || !plyMesh.quadIndices.empty())
++                    Warning(loc, "%s: motionfilename is ignored with displacement "
++                                 "or quads.", filename);
++                else {
++                    TriQuadMesh end = TriQuadMesh::ReadPLY(motionFile);
++                    if (end.p.size() != plyMesh.p.size())
++                        Warning(loc, "%s: vertex count differs from %s; no motion.",
++                                motionFile, filename);
++                    else {
++                        std::vector<Float> times =
++                            parameters.GetFloatArray("motiontimes");
++                        mesh->SetMotion(*renderFromObject, std::move(end.p),
++                                        std::move(end.n),
++                                        times.size() == 2 ? times[0] : 0.f,
++                                        times.size() == 2 ? times[1] : 1.f, alloc);
++                    }
++                }
++            }
+             shapes = Triangle::CreateTriangles(mesh, alloc);
+         }
+ 
+diff --git a/src/pbrt/shapes.h b/src/pbrt/shapes.h
+index b931d94..6c76226 100644
+--- a/src/pbrt/shapes.h
++++ b/src/pbrt/shapes.h
+@@ -886,7 +886,13 @@ class Triangle {
+                                                           TriangleIntersection ti,
+                                                           Float time, Vector3f wo) {
+         const int *v = &mesh->vertexIndices[3 * triIndex];
+-        Point3f p0 = mesh->p[v[0]], p1 = mesh->p[v[1]], p2 = mesh->p[v[2]];
++        // hdPbrt: vertices and normals at the ray's time (deformation blur).
++        const Float mf = mesh->MotionFactor(time);
++        Point3f p0 = mesh->P(v[0], mf), p1 = mesh->P(v[1], mf), p2 = mesh->P(v[2], mf);
++        Normal3f nv[3];
++        if (mesh->n)
++            for (int i = 0; i < 3; ++i)
++                nv[i] = mesh->N(v[i], mf);
+         // Compute triangle partial derivatives
+         // Compute deltas and matrix determinant for triangle partial derivatives
+         // Get triangle texture coordinates in _uv_ array
+@@ -943,7 +949,7 @@ class Triangle {
+             Normal3f ns;
+             if (mesh->n) {
+                 ns =
+-                    ti.b0 * mesh->n[v[0]] + ti.b1 * mesh->n[v[1]] + ti.b2 * mesh->n[v[2]];
++                    ti.b0 * nv[0] + ti.b1 * nv[1] + ti.b2 * nv[2];
+                 ns = LengthSquared(ns) > 0 ? Normalize(ns) : isect.n;
+             } else
+                 ns = isect.n;
+@@ -971,8 +977,8 @@ class Triangle {
+                 // Compute deltas for triangle partial derivatives of normal
+                 Vector2f duv02 = uv[0] - uv[2];
+                 Vector2f duv12 = uv[1] - uv[2];
+-                Normal3f dn1 = mesh->n[v[0]] - mesh->n[v[2]];
+-                Normal3f dn2 = mesh->n[v[1]] - mesh->n[v[2]];
++                Normal3f dn1 = nv[0] - nv[2];
++                Normal3f dn2 = nv[1] - nv[2];
+ 
+                 Float determinant =
+                     DifferenceOfProducts(duv02[0], duv12[1], duv02[1], duv12[0]);
+@@ -984,8 +990,8 @@ class Triangle {
+                     // (rather than giving up) so that ray differentials for
+                     // rays reflected from triangles with degenerate
+                     // parameterizations are still reasonable.
+-                    Vector3f dn = Cross(Vector3f(mesh->n[v[2]] - mesh->n[v[0]]),
+-                                        Vector3f(mesh->n[v[1]] - mesh->n[v[0]]));
++                    Vector3f dn = Cross(Vector3f(nv[2] - nv[0]),
++                                        Vector3f(nv[1] - nv[0]));
+ 
+                     if (LengthSquared(dn) == 0)
+                         dndu = dndv = Normal3f(0, 0, 0);
+@@ -1054,7 +1060,9 @@ class Triangle {
+         // Get triangle vertices in _p0_, _p1_, and _p2_
+         const TriangleMesh *mesh = GetMesh();
+         const int *v = &mesh->vertexIndices[3 * triIndex];
+-        Point3f p0 = mesh->p[v[0]], p1 = mesh->p[v[1]], p2 = mesh->p[v[2]];
++        // hdPbrt: at the reference point's time (deformation blur).
++        const Float mf = mesh->MotionFactor(ctx.time);
++        Point3f p0 = mesh->P(v[0], mf), p1 = mesh->P(v[1], mf), p2 = mesh->P(v[2], mf);
+ 
+         // Use uniform area sampling for numerically unstable cases
+         Float solidAngle = SolidAngle(ctx.p());
+@@ -1155,7 +1163,8 @@ class Triangle {
+             // Get triangle vertices in _p0_, _p1_, and _p2_
+             const TriangleMesh *mesh = GetMesh();
+             const int *v = &mesh->vertexIndices[3 * triIndex];
+-            Point3f p0 = mesh->p[v[0]], p1 = mesh->p[v[1]], p2 = mesh->p[v[2]];
++            const Float mf = mesh->MotionFactor(ctx.time);  // hdPbrt
++            Point3f p0 = mesh->P(v[0], mf), p1 = mesh->P(v[1], mf), p2 = mesh->P(v[2], mf);
+ 
+             Point2f u = InvertSphericalTriangleSample({p0, p1, p2}, ctx.p(), wi);
+             // Compute $\cos\theta$-based weights _w_ at sample domain corners
+diff --git a/src/pbrt/util/mesh.cpp b/src/pbrt/util/mesh.cpp
+index 2e107ef..7f14acd 100644
+--- a/src/pbrt/util/mesh.cpp
++++ b/src/pbrt/util/mesh.cpp
+@@ -76,6 +76,27 @@ TriangleMesh::TriangleMesh(const Transform &renderFromObject, bool reverseOrient
+     CHECK_LE(indices.size(), std::numeric_limits<int>::max());
+ }
+ 
++void TriangleMesh::SetMotion(const Transform &renderFromObject, std::vector<Point3f> P1,
++                             std::vector<Normal3f> N1, Float t0, Float t1,
++                             Allocator alloc) {
++    // hdPbrt: deformation motion blur (see mesh.h).
++    if (P1.size() != size_t(nVertices))
++        return;
++    for (Point3f &pt : P1)
++        pt = renderFromObject(pt);
++    p1 = point3BufferCache->LookupOrAdd(P1, alloc);
++    if (n && N1.size() == size_t(nVertices)) {
++        for (Normal3f &nn : N1) {
++            nn = renderFromObject(nn);
++            if (reverseOrientation)
++                nn = -nn;
++        }
++        n1 = normal3BufferCache->LookupOrAdd(N1, alloc);
++    }
++    time0 = t0;
++    time1 = t1;
++}
++
+ std::string TriangleMesh::ToString() const {
+     std::string np = "(nullptr)";
+     return StringPrintf(
+diff --git a/src/pbrt/util/mesh.h b/src/pbrt/util/mesh.h
+index 95d3080..f8efc93 100644
+--- a/src/pbrt/util/mesh.h
++++ b/src/pbrt/util/mesh.h
+@@ -44,6 +44,27 @@ class TriangleMesh {
+     const Point2f *uv = nullptr;
+     const int *faceIndices = nullptr;
+     bool reverseOrientation, transformSwapsHandedness;
++
++    // hdPbrt: deformation motion blur. When p1 is set, the vertex positions
++    // (and normals, when n1 is set) move linearly from p/n at time0 to p1/n1
++    // at time1; ray times outside that range clamp to the end poses.
++    const Point3f *p1 = nullptr;
++    const Normal3f *n1 = nullptr;
++    Float time0 = 0, time1 = 1;
++    // p1/n1 are in object space, like the constructor's p and n. n1 may be empty.
++    void SetMotion(const Transform &renderFromObject, std::vector<Point3f> p1,
++                   std::vector<Normal3f> n1, Float time0, Float time1, Allocator alloc);
++    // Interpolation factor in [0, 1] for a ray time.
++    PBRT_CPU_GPU
++    Float MotionFactor(Float time) const {
++        if (!p1 || time1 <= time0)
++            return 0;
++        return Clamp((time - time0) / (time1 - time0), 0, 1);
++    }
++    PBRT_CPU_GPU
++    Point3f P(int i, Float f) const { return p1 ? p[i] + f * (p1[i] - p[i]) : p[i]; }
++    PBRT_CPU_GPU
++    Normal3f N(int i, Float f) const { return n1 ? n[i] + f * (n1[i] - n[i]) : n[i]; }
+ };
+ 
+ // BilinearPatchMesh Definition
+-- 
+2.43.0
+

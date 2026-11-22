@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (4 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (5 commits, the same as `patches/`;
     regenerate with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o patches`).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
     the Blender flavor.
@@ -41,6 +41,10 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    it only when the scene has no dome (and no fallback white environment); then the color AOV
    gets that alpha and pbrt's color is already premultiplied. Alpha comes only from the stream
    (the final PFM has RGB only; pbrt sends one last update on exit).
+5. Deformation blur: `TriangleMesh` can hold end-pose vertices (`p1`, `n1`) and blends by ray
+   time over `time0..time1`. `trianglemesh` takes `"point3 P1"`/`"normal N1"`, `plymesh` takes
+   `"string motionfilename"` (PLY with the same vertices); both take `"float motiontimes"`.
+   Bounds cover both poses; Area/SolidAngle use the start pose. Not for quads/displacement.
 
 ## Done in the 2026-11-22 session
 
@@ -106,8 +110,15 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 
 ## Open items and ideas
 
-- Not translated yet: curves, points, volumes, subdivision refinement, deformation and camera
-  motion blur, light shaping/IES, light linking. Implicit spheres are coarse.
+- Not translated yet: curves, points, volumes, subdivision refinement, camera motion blur,
+  light shaping/IES, light linking. Implicit spheres are coarse.
+- Deformation blur (done 2026-11-22, pbrt patch 5): a mesh samples `points` over +-1 frame at
+  sync; only when they move (same count) it keeps `_Motion` (samples, PLY vertex -> point
+  map, indices, uvs, authored normals or a topology copy for smooth normals). `Write()`
+  writes the shutter-open and -close PLYs (`_UpdateMotionPlys`, cached per shutter) as
+  `filename` + `motionfilename`. Authored normals are treated as static. Changing point
+  counts (no motion). Verified with `tests/motion_scene.usda` (green "flag") and in the live
+  viewport.
 - Motion blur (done 2026-11-22): transform blur over the camera shutter. Prims keep time
   samples over +-1 frame (`HdPbrt_SampleWindow`) and the scene writer resamples at shutter
   open/close; instancers cache instance indices in `UpdateInstanceIndices` during the

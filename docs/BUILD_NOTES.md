@@ -58,7 +58,7 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   scheme meshes without normals), UsdGeom implicit shapes (converted to meshes by an
   `HdsiImplicitSurfaceSceneIndex` plugin: coarse tessellation), point instancers and
   nested instancers (pbrt ObjectBegin/ObjectInstance). No curves, points, volumes, subdiv
-  refinement, deformation blur or camera motion blur yet.
+  refinement or camera motion blur yet.
 - **Materials:** UsdPreviewSurface, MaterialX `ND_standard_surface` and `ND_open_pbr_surface`
   (what Houdini's MtlX nodes and Blender's MaterialX export produce). pbrt has no uber
   material, so: metallic >= 0.5 -> `conductor` (reflectance = base color); transmission >= 0.5
@@ -84,8 +84,16 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   +-1 frame when they sync (`HdPbrt_SampleWindow`); the scene writer resamples them at shutter
   open and close (`ActiveTransform StartTime/EndTime`). pbrt interpolates between those two,
   so a shutter longer than the window, or curved motion within it, is approximated. No
-  deformation blur (pbrt has no moving triangles), no camera motion (the render pass gets a
-  single view matrix), lights don't move. Off with `pbrt:motionBlur` false or the render
+  camera motion (the render pass gets a single view matrix), lights don't move.
+- **Deformation blur:** stock pbrt-v4 has no moving triangles (motion comes only from
+  animated transforms), so patch 5 adds end-pose vertices to `TriangleMesh`: positions and
+  normals blend linearly by ray time between `"float motiontimes"` [t0 t1]; bounds cover both
+  poses; area and solid angle (light sampling of emissive deforming meshes) use the start
+  pose. Scene syntax: `trianglemesh` `"point3 P1"`/`"normal N1"`, `plymesh`
+  `"string motionfilename"` (a PLY with the same vertices). The delegate samples `points`
+  over +-1 frame at sync; when they move with a constant count it writes PLYs for shutter
+  open and close at scene-write time (smooth normals recomputed per pose, authored normals
+  static, uvs shared). Off with `pbrt:motionBlur` false or the render
   settings' `disableMotionBlur`. Houdini: needs authored time samples (as Karma does; a LOP
   network evaluated per frame only has the current one, use a Cache LOP). Blender 5.3's
   Hydra export sends no shutter (0..0), so no motion blur there.
@@ -111,7 +119,7 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
 
 ## Layout (~/dev/pbrt_hydra)
 
-- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth, id and alpha channels).
+- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth, id and alpha channels, deformation blur).
 - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`: headers for the Blender build.
   `src/usd-blender-generated/pxr/pxr.h`: pxr.h filled in for Blender's USD
   (internal namespace `pxrBlender_v26_08`, version 2608).
@@ -150,7 +158,8 @@ Gotchas:
 ## Tests (test/)
 
 - `hython tests/hydra_render.py HdPbrtRendererPlugin out.png tests/motion_scene.usda 1`: the
-  test scene with a moving sphere and point instances, shutter 0..1, rendered at frame 1
+  test scene with a moving sphere and point instances and a deforming quad, shutter 0..1,
+  rendered at frame 1
   (`docs/images/motion_blur.png`).
 - Live viewport test without touching the user's desktop: `test/viewport/` (vp_test.py,
   run_real.sh). Start a private headless compositor with an X server:

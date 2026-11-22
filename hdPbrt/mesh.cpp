@@ -198,6 +198,68 @@ void HdPbrtMesh::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam
     *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
 }
 
+// Write a binary PLY (positions, optional normals and uvs, triangles).
+static bool _WritePlyFile(const std::string &path, const std::string &comment,
+                          const std::vector<GfVec3f> &p, const std::vector<GfVec3f> &n,
+                          const std::vector<GfVec2f> &uv, const std::vector<int32_t> &indices)
+{
+    FILE *f = fopen(path.c_str(), "wb");
+    if (!f)
+        return false;
+    const bool hasN = !n.empty(), hasUV = !uv.empty();
+    const size_t numTris = indices.size() / 3;
+    fprintf(f, "ply\nformat binary_little_endian 1.0\n");
+    fprintf(f, "comment hdPbrt %s\n", comment.c_str());
+    fprintf(f, "element vertex %zu\n", p.size());
+    fprintf(f, "property float x\nproperty float y\nproperty float z\n");
+    if (hasN)
+        fprintf(f, "property float nx\nproperty float ny\nproperty float nz\n");
+    if (hasUV)
+        fprintf(f, "property float u\nproperty float v\n");
+    fprintf(f, "element face %zu\n", numTris);
+    fprintf(f, "property list uchar int vertex_indices\nend_header\n");
+    std::vector<float> vbuf;
+    vbuf.reserve(p.size() * (3 + (hasN ? 3 : 0) + (hasUV ? 2 : 0)));
+    for (size_t i = 0; i < p.size(); ++i) {
+        vbuf.insert(vbuf.end(), {p[i][0], p[i][1], p[i][2]});
+        if (hasN)
+            vbuf.insert(vbuf.end(), {n[i][0], n[i][1], n[i][2]});
+        if (hasUV)
+            vbuf.insert(vbuf.end(), {uv[i][0], uv[i][1]});
+    }
+    fwrite(vbuf.data(), sizeof(float), vbuf.size(), f);
+    std::vector<uint8_t> fbuf(numTris * 13);
+    for (size_t t = 0; t < numTris; ++t) {
+        uint8_t *d = &fbuf[t * 13];
+        d[0] = 3;
+        memcpy(d + 1, &indices[t * 3], 12);
+    }
+    fwrite(fbuf.data(), 1, fbuf.size(), f);
+    return fclose(f) == 0;
+}
+
+// Points at time t from samples (linear between neighbors; nearest when the
+// sizes differ).
+static VtVec3fArray _PointsAt(const HdTimeSampleArray<VtVec3fArray, 4> &sa, float t)
+{
+    if (sa.count == 1 || t <= sa.times[0])
+        return sa.values[0];
+    if (t >= sa.times[sa.count - 1])
+        return sa.values[sa.count - 1];
+    size_t i = 0;
+    while (i + 1 < sa.count && sa.times[i + 1] < t)
+        ++i;
+    const VtVec3fArray &a = sa.values[i], &b = sa.values[i + 1];
+    const float t0 = sa.times[i], t1 = sa.times[i + 1];
+    const float u = t1 > t0 ? (t - t0) / (t1 - t0) : 0.f;
+    if (a.size() != b.size())
+        return u < 0.5f ? a : b;
+    VtVec3fArray r(a.size());
+    for (size_t k = 0; k < a.size(); ++k)
+        r[k] = a[k] + u * (b[k] - a[k]);
+    return r;
+}
+
 void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
 {
     SdfPath const &id = GetId();
@@ -309,62 +371,88 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
         _displayOpacity = op;
     }
 
+    // PLY vertex arrays. Face-varying data unwelds the mesh into three
+    // vertices per triangle.
+    std::vector<int> source;  // PLY vertex -> point index
+    std::vector<size_t> corner;
+    std::vector<int32_t> indices(numTris * 3);
+    if (unweld) {
+        for (size_t t = 0; t < numTris; ++t)
+            for (int k = 0; k < 3; ++k) {
+                source.push_back(tris[t][k]);
+                corner.push_back(t * 3 + k);
+                indices[t * 3 + k] = int32_t(t * 3 + k);
+            }
+    } else {
+        for (size_t v = 0; v < points.size(); ++v) {
+            source.push_back(int(v));
+            corner.push_back(v);
+        }
+        for (size_t t = 0; t < numTris; ++t)
+            for (int k = 0; k < 3; ++k)
+                indices[t * 3 + k] = tris[t][k];
+    }
+    std::vector<GfVec3f> plyP(source.size()), plyN;
+    std::vector<GfVec2f> plyUV;
+    for (size_t v = 0; v < source.size(); ++v)
+        plyP[v] = points[source[v]];
+    if (hasN) {
+        plyN.resize(source.size());
+        for (size_t v = 0; v < source.size(); ++v)
+            plyN[v] = nFaceVarying ? normals[corner[v]] : normals[source[v]];
+    }
+    if (hasUV) {
+        plyUV.resize(source.size());
+        for (size_t v = 0; v < source.size(); ++v)
+            plyUV[v] = uvFaceVarying ? uvs[corner[v]] : uvs[source[v]];
+    }
+
     std::string path;
     size_t writtenTris = 0;
     if (!tris.empty()) {
         path = _delegate->NewTempPath("mesh", ".ply");
-        FILE *f = fopen(path.c_str(), "wb");
-        if (!f) {
+        if (_WritePlyFile(path, id.GetString(), plyP, plyN, plyUV, indices)) {
+            writtenTris = numTris;
+        } else {
             TF_WARN("hdPbrt: cannot write %s", path.c_str());
             path.clear();
-        } else {
-            const size_t nv = unweld ? numTris * 3 : points.size();
-            fprintf(f, "ply\nformat binary_little_endian 1.0\n");
-            fprintf(f, "comment hdPbrt %s\n", id.GetText());
-            fprintf(f, "element vertex %zu\n", nv);
-            fprintf(f, "property float x\nproperty float y\nproperty float z\n");
-            if (hasN)
-                fprintf(f, "property float nx\nproperty float ny\nproperty float nz\n");
-            if (hasUV)
-                fprintf(f, "property float u\nproperty float v\n");
-            fprintf(f, "element face %zu\n", numTris);
-            fprintf(f, "property list uchar int vertex_indices\nend_header\n");
+        }
+    }
 
-            std::vector<float> vbuf;
-            vbuf.reserve(nv * (3 + (hasN ? 3 : 0) + (hasUV ? 2 : 0)));
-            auto emit = [&](int pi, size_t corner) {
-                const GfVec3f &p = points[pi];
-                vbuf.insert(vbuf.end(), {p[0], p[1], p[2]});
-                if (hasN) {
-                    GfVec3f n = nFaceVarying ? normals[corner] : normals[pi];
-                    vbuf.insert(vbuf.end(), {n[0], n[1], n[2]});
-                }
-                if (hasUV) {
-                    GfVec2f t = uvFaceVarying ? uvs[corner] : uvs[pi];
-                    vbuf.insert(vbuf.end(), {t[0], t[1]});
-                }
-            };
-            if (unweld) {
-                for (size_t t = 0; t < numTris; ++t)
-                    for (int k = 0; k < 3; ++k)
-                        emit(tris[t][k], t * 3 + k);
-            } else {
-                for (size_t i = 0; i < points.size(); ++i)
-                    emit((int)i, i);
+    // Deformation blur: keep the time-sampled points (when they really move
+    // and keep their count) and what's needed to rebuild the PLY from them.
+    std::unique_ptr<_Motion> motion;
+    if (writtenTris) {
+        const float w = HdPbrt_SampleWindow;
+        HdTimeSampleArray<VtValue, 4> sa;
+        sd->SamplePrimvar(id, HdTokens->points, -w, w, &sa);
+        bool moving = false, ok = sa.count > 1;
+        for (size_t k = 0; ok && k < sa.count; ++k) {
+            ok = sa.values[k].IsHolding<VtVec3fArray>() &&
+                 sa.values[k].UncheckedGet<VtVec3fArray>().size() == points.size();
+            if (ok && k > 0)
+                moving |= sa.values[k].UncheckedGet<VtVec3fArray>() !=
+                          sa.values[0].UncheckedGet<VtVec3fArray>();
+        }
+        if (ok && moving) {
+            motion = std::make_unique<_Motion>();
+            motion->points.Resize(sa.count);
+            for (size_t k = 0; k < sa.count; ++k) {
+                motion->points.times[k] = sa.times[k];
+                motion->points.values[k] = sa.values[k].UncheckedGet<VtVec3fArray>();
             }
-            fwrite(vbuf.data(), sizeof(float), vbuf.size(), f);
-            std::vector<uint8_t> fbuf(numTris * 13);
-            for (size_t t = 0; t < numTris; ++t) {
-                uint8_t *d = &fbuf[t * 13];
-                d[0] = 3;
-                int32_t idx[3];
-                for (int k = 0; k < 3; ++k)
-                    idx[k] = unweld ? int32_t(t * 3 + k) : tris[t][k];
-                memcpy(d + 1, idx, 12);
-            }
-            fwrite(fbuf.data(), 1, fbuf.size(), f);
-            fclose(f);
-            writtenTris = numTris;
+            motion->source = source;
+            motion->indices = indices;
+            const bool smooth = hasN && nVertex && !nPv.valid;
+            motion->smoothNormals = smooth;
+            if (smooth)
+                motion->topology = topology;
+            else if (hasN)
+                motion->normals.assign(plyN.begin(), plyN.end());
+            motion->uvs = plyUV;
+            if (debug)
+                fprintf(stderr, "hdPbrt: %s deforms (%zu point samples, %g..%g)\n",
+                        id.GetText(), sa.count, sa.times[0], sa.times[sa.count - 1]);
         }
     }
 
@@ -373,6 +461,58 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
         unlink(_plyPath.c_str());  // a running pbrt keeps its open handle
     _plyPath = path;
     _numTriangles = writtenTris;
+    _motion = std::move(motion);
+    for (std::string *m : {&_motionPly0, &_motionPly1})
+        if (!m->empty()) {
+            unlink(m->c_str());
+            m->clear();
+        }
+    _motionShutter = GfVec2f(0.f, 0.f);
+}
+
+void HdPbrtMesh::_UpdateMotionPlys(GfVec2f shutter) const
+{
+    if (!_motion || shutter[0] == shutter[1]) {
+        return;
+    }
+    if (shutter == _motionShutter && !_motionPly0.empty())
+        return;
+    for (std::string *m : {&_motionPly0, &_motionPly1})
+        if (!m->empty()) {
+            unlink(m->c_str());
+            m->clear();
+        }
+    _motionShutter = shutter;
+    const _Motion &mo = *_motion;
+    std::string paths[2];
+    for (int e = 0; e < 2; ++e) {
+        const VtVec3fArray pts = _PointsAt(mo.points, shutter[e]);
+        std::vector<GfVec3f> p(mo.source.size()), n;
+        for (size_t v = 0; v < mo.source.size(); ++v)
+            p[v] = pts[mo.source[v]];
+        if (mo.smoothNormals) {
+            HdMeshTopology topo = mo.topology;
+            Hd_VertexAdjacency adjacency;
+            adjacency.BuildAdjacencyTable(&topo);
+            VtVec3fArray sn = Hd_SmoothNormals::ComputeSmoothNormals(&adjacency,
+                                                                     (int)pts.size(),
+                                                                     pts.cdata());
+            n.resize(mo.source.size());
+            for (size_t v = 0; v < mo.source.size(); ++v)
+                n[v] = sn[mo.source[v]];
+        } else if (!mo.normals.empty()) {
+            n.assign(mo.normals.begin(), mo.normals.end());
+        }
+        paths[e] = _delegate->NewTempPath(e ? "motion1" : "motion0", ".ply");
+        if (!_WritePlyFile(paths[e], GetId().GetString(), p, n, mo.uvs, mo.indices)) {
+            TF_WARN("hdPbrt: cannot write %s", paths[e].c_str());
+            for (int k = 0; k <= e; ++k)
+                unlink(paths[k].c_str());
+            return;
+        }
+    }
+    _motionPly0 = paths[0];
+    _motionPly1 = paths[1];
 }
 
 // A pbrt transform, animated between shutter open and close when they differ.
@@ -424,11 +564,21 @@ void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
     const std::string matLine =
         HdPbrt_MaterialLine(mat, _hasDisplayColor ? &_displayColor : nullptr);
 
+    // Deformation blur: the shutter-open pose as the mesh, the -close pose as
+    // its motion file (pbrt patch 5).
+    _UpdateMotionPlys(shutter);
+    const bool deforming = blur && _motion && !_motionPly0.empty();
     std::ostringstream shape;
     // hdpbrtprimid: Hydra's prim id, streamed back by pbrt for the primId AOV
     // (selection).
-    shape << "Shape \"plymesh\" \"string filename\" " << HdPbrt_Quote(_plyPath)
-          << " \"integer hdpbrtprimid\" " << GetPrimId();
+    shape << "Shape \"plymesh\" \"string filename\" "
+          << HdPbrt_Quote(deforming ? _motionPly0 : _plyPath) << " \"integer hdpbrtprimid\" "
+          << GetPrimId();
+    if (deforming) {
+        char mt[96];
+        snprintf(mt, sizeof(mt), " \"float motiontimes\" [%.9g %.9g]", shutter[0], shutter[1]);
+        shape << " \"string motionfilename\" " << HdPbrt_Quote(_motionPly1) << mt;
+    }
     float alpha = mat.opacity * _displayOpacity;
     if (!mat.opacityTexture.empty())
         shape << " \"texture alpha\" " << HdPbrt_Quote(mat.opacityTexture);
