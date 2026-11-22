@@ -99,6 +99,8 @@ void HdPbrtRenderDelegate::_Init()
         HdPbrtSettingsTokens->sampler, VtValue(std::string("zsobol")));
     add("Threads (0 = all but two)", HdPbrtSettingsTokens->threads, VtValue(0));
     add("Regularize BSDFs", HdPbrtSettingsTokens->regularize, VtValue(false));
+    add("Depth of Field (camera fStop / focusDistance)", HdPbrtSettingsTokens->depthOfField,
+        VtValue(true));
     add("Export .pbrt Scene To", HdPbrtSettingsTokens->exportPath, VtValue(std::string()));
     _PopulateDefaultSettings(_settingDescriptors);
 
@@ -184,6 +186,11 @@ T HdPbrtRenderDelegate::GetSetting(TfToken const &key, T const &def) const
     }
     return def;
 }
+// Used from the render pass too.
+template bool HdPbrtRenderDelegate::GetSetting<bool>(TfToken const &, bool const &) const;
+template int HdPbrtRenderDelegate::GetSetting<int>(TfToken const &, int const &) const;
+template std::string HdPbrtRenderDelegate::GetSetting<std::string>(TfToken const &,
+                                                                   std::string const &) const;
 
 int HdPbrtRenderDelegate::GetSpp() const
 {
@@ -385,7 +392,8 @@ std::string HdPbrtRenderDelegate::GetEquiAreaTexture(const std::string &latlong)
 
 bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &view,
                                        const GfMatrix4d &proj, int width, int height,
-                                       TfTokenVector const &renderTags)
+                                       TfTokenVector const &renderTags,
+                                       HdPbrtLens const &lens)
 {
     if (width <= 0 || height <= 0 || _tempDir.empty())
         return false;
@@ -471,6 +479,12 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
         sy0 = (-1 + proj[2][1]) / proj[1][1];
         sy1 = (1 + proj[2][1]) / proj[1][1];
         os << "Camera \"perspective\" \"float fov\" 90";
+        if (lens.lensRadius > 0.f && lens.focusDistance > 0.f) {
+            char l[128];
+            snprintf(l, sizeof(l), " \"float lensradius\" %.9g \"float focaldistance\" %.9g",
+                     lens.lensRadius, lens.focusDistance);
+            os << l;
+        }
     }
     char sw[256];
     snprintf(sw, sizeof(sw), " \"float screenwindow\" [%.9g %.9g %.9g %.9g]\n", sx0, sx1, sy0,

@@ -20,7 +20,7 @@ pieces (render buffer, instancer, implicit-surface scene index plugin) from USD'
 - **Render settings** (Houdini: Render Settings LOP custom attributes or viewport delegate
   options; Blender: the add-on panel): `pbrt:pixelSamples` (256), `pbrt:maxDepth` (5),
   `pbrt:integrator` (volpath), `pbrt:sampler` (zsobol), `pbrt:threads` (0 = all but two),
-  `pbrt:regularize`, `pbrt:exportPath` (also write the .pbrt scene there).
+  `pbrt:regularize`, `pbrt:depthOfField` (true), `pbrt:exportPath` (also write the .pbrt scene there).
 - **Husk:** not testable here: the Apprentice licence refuses third-party delegates in husk.
 
 ## How it works
@@ -74,7 +74,10 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   The default lights HdxTaskController adds (GlfSimpleLight camera light at intensity 15000)
   are ignored; a scene without lights gets a uniform white environment.
 - **Camera:** the render pass state's view and projection (so viewport framing and window
-  policy match), perspective and orthographic. No depth of field yet.
+  policy match), perspective and orthographic. Depth of field from the active HdCamera:
+  fStop > 0 and focusDistance > 0 give pbrt's thin lens (`lensradius` = focalLength /
+  (2 fStop), `focaldistance`; HdCamera values are in world units). Matches Karma's blur.
+  Off with `pbrt:depthOfField` false or the render settings' `disableDepthOfField`.
 - **AOVs:** color (pbrt image), depth, primId and instanceId (selection), elementId (-1).
   Ids: each mesh's Shape gets `"integer hdpbrtprimid" <HdRprim::GetPrimId()>`, each
   ObjectInstance is preceded by `Attribute "shape" "integer hdpbrtinstanceid" <i>` (i = index

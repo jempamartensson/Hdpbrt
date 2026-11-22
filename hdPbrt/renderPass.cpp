@@ -2,6 +2,7 @@
 #include "hdPbrt.h"
 #include "renderBuffer.h"
 
+#include "pxr/imaging/hd/camera.h"
 #include "pxr/imaging/hd/renderPassState.h"
 #include "pxr/imaging/hd/renderIndex.h"
 #include "pxr/imaging/hd/tokens.h"
@@ -161,15 +162,38 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
                                  : 0;
     const int settingsVersion = _delegate->GetRenderSettingsVersion();
 
+    // Depth of field from the active camera (USD: fStop 0 = off). HdCamera
+    // already converts focal length to world units; pbrt's thin lens wants
+    // the aperture radius, focalLength / (2 fStop).
+    HdPbrtLens lens;
+    if (HdCamera const *cam = state->GetCamera()) {
+        const bool ortho = std::fabs(proj[3][3] - 1.0) < 1e-6;
+        const bool enabled =
+            _delegate->GetSetting<bool>(HdPbrtSettingsTokens->depthOfField, true) &&
+            !_delegate->GetSetting<bool>(HdRenderSettingsPrimTokens->disableDepthOfField, false);
+        if (enabled && !ortho && cam->GetFStop() > 0.f && cam->GetFocusDistance() > 0.f &&
+            cam->GetFocalLength() > 0.f) {
+            lens.lensRadius = cam->GetFocalLength() / (2.f * cam->GetFStop());
+            lens.focusDistance = cam->GetFocusDistance();
+        }
+        if (debug)
+            fprintf(stderr, "hdPbrt camera %s: fStop %g focusDistance %g focalLength %g -> "
+                            "lensradius %g\n",
+                    cam->GetId().GetText(), cam->GetFStop(), cam->GetFocusDistance(),
+                    cam->GetFocalLength(), lens.lensRadius);
+    }
+
     const bool changed = sceneVersion != _lastSceneVersion ||
                          settingsVersion != _lastSettingsVersion || view != _view ||
-                         proj != _proj || dw != _dataWindow || renderTags != _renderTags;
+                         proj != _proj || lens != _lens || dw != _dataWindow ||
+                         renderTags != _renderTags;
     if (changed) {
         _pending = true;
         _lastSceneVersion = sceneVersion;
         _lastSettingsVersion = settingsVersion;
         _view = view;
         _proj = proj;
+        _lens = lens;
         _dataWindow = dw;
         _renderTags = renderTags;
         _changeTime = _Now();
@@ -179,7 +203,8 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
     // more often than every 100 ms.
     if (_pending && (!_started || _Now() - _lastStart > 0.1)) {
         _pending = false;
-        _started = _delegate->StartRender(GetRenderIndex(), _view, _proj, w, h, _renderTags);
+        _started = _delegate->StartRender(GetRenderIndex(), _view, _proj, w, h, _renderTags,
+                                          _lens);
         _lastStart = _Now();
         _imageVersion = 0;
     }

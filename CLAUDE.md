@@ -106,8 +106,15 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 
 ## Open items and ideas
 
-- Not translated yet: curves, points, volumes, subdivision refinement, motion blur, depth of
-  field, light shaping/IES, light linking. Implicit spheres are coarse.
+- Not translated yet: curves, points, volumes, subdivision refinement, motion blur, light
+  shaping/IES, light linking. Implicit spheres are coarse.
+- Depth of field (done 2026-11-22): the render pass reads the HdCamera from the pass state.
+  Perspective + fStop > 0 + focusDistance > 0 -> pbrt `lensradius` = focalLength / (2 fStop),
+  `focaldistance` = focusDistance (HdCamera values are already in world units). Off with
+  `pbrt:depthOfField` false or `disableDepthOfField`. Blur matches Karma on the test scene.
+  Houdini's free viewport camera has fStop 0. Blender exports focalLength in tenths (50 mm ->
+  5) and multiplies fStop by 100, so the lens radius comes out right in meters. `focusOn`
+  and `dofAspect` are ignored.
 - pbrt's coateddiffuse looks darker and more saturated than Karma's or Cycles' diffuse.
 - Jens's own test scene (a 1×1 rect light about 8 units away, no dome) renders almost black.
   That is the scene, not a bug.

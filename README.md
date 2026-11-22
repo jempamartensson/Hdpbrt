@@ -42,7 +42,7 @@ against Blender's `libusd_ms.so` with OpenUSD v26.08 source headers and the gene
   the Blender build) and choose **Hydra pbrt** as the render engine.
 
 Render settings: `pbrt:pixelSamples`, `pbrt:maxDepth`, `pbrt:integrator`, `pbrt:sampler`,
-`pbrt:threads`, `pbrt:regularize`, `pbrt:exportPath`.
+`pbrt:threads`, `pbrt:regularize`, `pbrt:depthOfField` (default on), `pbrt:exportPath`.
 
 Environment: `HDPBRT_PBRT_EXECUTABLE`, `HDPBRT_TMPDIR`, `HDPBRT_KEEP_TMP=1`,
 `HDPBRT_DEBUG=1` (prints AOV bindings and mesh primvars), `HDPBRT_REVERSED_DEPTH=0/1`
@@ -52,10 +52,11 @@ Environment: `HDPBRT_PBRT_EXECUTABLE`, `HDPBRT_TMPDIR`, `HDPBRT_KEEP_TMP=1`,
 
 Meshes, implicit shapes, point instancers; UsdPreviewSurface and MaterialX standard_surface /
 open_pbr_surface (mapped to pbrt conductor, dielectric or coateddiffuse) with image textures;
-distant, sphere, rect, disk, cylinder and dome lights; perspective and orthographic cameras;
+distant, sphere, rect, disk, cylinder and dome lights; perspective and orthographic cameras,
+depth of field from the camera's fStop and focusDistance (thin lens);
 color, depth, primId and instanceId AOVs (viewport selection, including point instances).
 Without a dome light the background is transparent, so the host's viewport background shows.
-Not yet: curves, points, volumes, subdivision, motion blur, depth of field, light shaping.
+Not yet: curves, points, volumes, subdivision, motion blur, light shaping.
 
 ## Tests
 

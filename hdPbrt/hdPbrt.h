@@ -45,10 +45,21 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((sampler, "pbrt:sampler"))                 \
     ((threads, "pbrt:threads"))                 \
     ((regularize, "pbrt:regularize"))           \
+    ((depthOfField, "pbrt:depthOfField"))       \
     ((exportPath, "pbrt:exportPath"))           \
     ((pbrtExecutable, "pbrt:executable"))
 
 TF_DECLARE_PUBLIC_TOKENS(HdPbrtSettingsTokens, HDPBRT_SETTINGS_TOKENS);
+
+// Thin-lens parameters for pbrt's perspective camera, in world units.
+// lensRadius 0 = pinhole (no depth of field).
+struct HdPbrtLens {
+    float lensRadius = 0.f, focusDistance = 0.f;
+    bool operator==(HdPbrtLens const &o) const {
+        return lensRadius == o.lensRadius && focusDistance == o.focusDistance;
+    }
+    bool operator!=(HdPbrtLens const &o) const { return !(*this == o); }
+};
 
 class HdPbrtRenderDelegate;
 class HdPbrtMesh;
@@ -203,6 +214,7 @@ private:
     int _lastSceneVersion = -1;
     int _lastSettingsVersion = -1;
     GfMatrix4d _view{0.0}, _proj{0.0};
+    HdPbrtLens _lens;
     GfRect2i _dataWindow;
     TfTokenVector _renderTags;
     uint64_t _imageVersion = 0;
@@ -263,7 +275,7 @@ public:
     // Write the full pbrt scene to a file and start rendering it.
     bool StartRender(HdRenderIndex *index, const GfMatrix4d &view,
                      const GfMatrix4d &proj, int width, int height,
-                     TfTokenVector const &renderTags);
+                     TfTokenVector const &renderTags, HdPbrtLens const &lens);
     void StopRender() { _session.Stop(); }
     hdpbrt::PbrtSession &GetSession() { return _session; }
     int GetSpp() const;
