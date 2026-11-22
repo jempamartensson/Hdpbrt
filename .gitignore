@@ -1,3 +1,5 @@
 build/
+_work/
+install/
 blender/hydra_pbrt/plugin
 __pycache__/

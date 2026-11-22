@@ -1,0 +1,134 @@
+From a2f9782032da4376ac60f7a42f51d22c3c10a806 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sun, 22 Nov 2026 15:09:11 +0100
+Subject: [PATCH 2/2] RGBFilm: optional first-hit camera-space depth ("bool
+ hdpbrtdepth"), streamed as display channel Z (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/cpu/integrators.cpp | 17 +++++++++++++++++
+ src/pbrt/film.cpp            | 10 ++++++++--
+ src/pbrt/film.h              | 27 ++++++++++++++++++++++++---
+ 3 files changed, 49 insertions(+), 5 deletions(-)
+
+diff --git a/src/pbrt/cpu/integrators.cpp b/src/pbrt/cpu/integrators.cpp
+index a8c541f..4e91cfa 100644
+--- a/src/pbrt/cpu/integrators.cpp
++++ b/src/pbrt/cpu/integrators.cpp
+@@ -144,6 +144,23 @@ void ImageTileIntegrator::Render() {
+     // Connect to display server if needed
+     if (!Options->displayServer.empty()) {
+         Film film = camera.GetFilm();
++        // hdPbrt: also stream the depth channel when the film records it.
++        RGBFilm *rgbFilm = film.CastOrNullptr<RGBFilm>();
++        if (rgbFilm && rgbFilm->WritesDepth())
++            DisplayDynamic(film.GetFilename(), Point2i(pixelBounds.Diagonal()),
++                           {"R", "G", "B", "Z"},
++                           [&, rgbFilm](Bounds2i b, pstd::span<pstd::span<float>> displayValue) {
++                               int index = 0;
++                               for (Point2i p : b) {
++                                   Point2i pp = pixelBounds.pMin + p;
++                                   RGB rgb = film.GetPixelRGB(pp, 2.f / (waveStart + waveEnd));
++                                   for (int c = 0; c < 3; ++c)
++                                       displayValue[c][index] = rgb[c];
++                                   displayValue[3][index] = rgbFilm->GetPixelDepth(pp);
++                                   ++index;
++                               }
++                           });
++        else
+         DisplayDynamic(film.GetFilename(), Point2i(pixelBounds.Diagonal()),
+                        {"R", "G", "B"},
+                        [&](Bounds2i b, pstd::span<pstd::span<float>> displayValue) {
+diff --git a/src/pbrt/film.cpp b/src/pbrt/film.cpp
+index 5297edc..b464783 100644
+--- a/src/pbrt/film.cpp
++++ b/src/pbrt/film.cpp
+@@ -1071,8 +1071,14 @@ Film Film::Create(const std::string &name, const ParameterDictionary &parameters
+                   Filter filter, const FileLoc *loc, Allocator alloc) {
+     Film film;
+     if (name == "rgb")
+-        film = RGBFilm::Create(parameters, exposureTime, filter, parameters.ColorSpace(),
+-                               loc, alloc);
++    {
++        bool writeDepth = parameters.GetOneBool("hdpbrtdepth", false);
++        RGBFilm *rgbFilm = RGBFilm::Create(parameters, exposureTime, filter,
++                                           parameters.ColorSpace(), loc, alloc);
++        if (writeDepth)
++            rgbFilm->EnableDepth(Inverse(cameraTransform.RenderFromCamera().startTransform));
++        film = rgbFilm;
++    }
+     else if (name == "gbuffer")
+         film = GBufferFilm::Create(parameters, exposureTime, cameraTransform, filter,
+                                    parameters.ColorSpace(), loc, alloc);
+diff --git a/src/pbrt/film.h b/src/pbrt/film.h
+index f274ca2..6e39801 100644
+--- a/src/pbrt/film.h
++++ b/src/pbrt/film.h
+@@ -233,11 +233,11 @@ class RGBFilm : public FilmBase {
+   public:
+     // RGBFilm Public Methods
+     PBRT_CPU_GPU
+-    bool UsesVisibleSurface() const { return false; }
++    bool UsesVisibleSurface() const { return writeDepth; }
+ 
+     PBRT_CPU_GPU
+     void AddSample(Point2i pFilm, SampledSpectrum L, const SampledWavelengths &lambda,
+-                   const VisibleSurface *, Float weight) {
++                   const VisibleSurface *visibleSurface, Float weight) {
+         // Convert sample radiance to _PixelSensor_ RGB
+         RGB rgb = sensor->ToSensorRGB(L, lambda);
+ 
+@@ -252,6 +252,21 @@ class RGBFilm : public FilmBase {
+         for (int c = 0; c < 3; ++c)
+             pixel.rgbSum[c] += weight * rgb[c];
+         pixel.weightSum += weight;
++        // hdPbrt: nearest camera-space depth of the first hit.
++        if (writeDepth && visibleSurface && *visibleSurface) {
++            Float z = cameraFromRender(visibleSurface->p).z;
++            if (z < pixel.depth)
++                pixel.depth = z;
++        }
++    }
++
++    // hdPbrt: camera-space z of the nearest first hit (+inf where nothing was hit).
++    PBRT_CPU_GPU
++    Float GetPixelDepth(Point2i p) const { return pixels[p].depth; }
++    bool WritesDepth() const { return writeDepth; }
++    void EnableDepth(const Transform &camFromRender) {
++        writeDepth = true;
++        cameraFromRender = camFromRender;
+     }
+ 
+     PBRT_CPU_GPU
+@@ -295,7 +310,10 @@ class RGBFilm : public FilmBase {
+         return outputRGBFromSensorRGB * sensorRGB;
+     }
+ 
+-    PBRT_CPU_GPU void ResetPixel(Point2i p) { memset(&pixels[p], 0, sizeof(Pixel)); }
++    PBRT_CPU_GPU void ResetPixel(Point2i p) {
++        memset(&pixels[p], 0, sizeof(Pixel));
++        pixels[p].depth = Infinity;
++    }
+ 
+   private:
+     // RGBFilm::Pixel Definition
+@@ -304,6 +322,7 @@ class RGBFilm : public FilmBase {
+         double rgbSum[3] = {0., 0., 0.};
+         double weightSum = 0.;
+         AtomicDouble rgbSplat[3];
++        Float depth = Infinity;
+     };
+ 
+     // RGBFilm Private Members
+@@ -313,6 +332,8 @@ class RGBFilm : public FilmBase {
+     Float filterIntegral;
+     SquareMatrix<3> outputRGBFromSensorRGB;
+     Array2D<Pixel> pixels;
++    bool writeDepth = false;
++    Transform cameraFromRender;
+ };
+ 
+ // GBufferFilm Definition
+-- 
+2.43.0
+
