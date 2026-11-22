@@ -391,7 +391,10 @@ void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
         HdPbrt_MaterialLine(mat, _hasDisplayColor ? &_displayColor : nullptr);
 
     std::ostringstream shape;
-    shape << "Shape \"plymesh\" \"string filename\" " << HdPbrt_Quote(_plyPath);
+    // hdpbrtprimid: Hydra's prim id, streamed back by pbrt for the primId AOV
+    // (selection).
+    shape << "Shape \"plymesh\" \"string filename\" " << HdPbrt_Quote(_plyPath)
+          << " \"integer hdpbrtprimid\" " << GetPrimId();
     float alpha = mat.opacity * _displayOpacity;
     if (!mat.opacityTexture.empty())
         shape << " \"texture alpha\" " << HdPbrt_Quote(mat.opacityTexture);
@@ -411,8 +414,11 @@ void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
         std::string name = "hdpbrt_obj_" + std::to_string(ctx.objectCounter++);
         os << "ObjectBegin " << HdPbrt_Quote(name) << "\n  Identity\n  " << matLine << "  "
            << shape.str() << "ObjectEnd\n";
-        for (const GfMatrix4d &ix : _instanceXforms)
-            os << "AttributeBegin Transform " << HdPbrt_Matrix(_xform * ix)
+        // hdpbrtinstanceid: the instance index Hydra expects in the instanceId
+        // AOV (flattened over nested instancers, see HdPbrtInstancer).
+        for (size_t i = 0; i < _instanceXforms.size(); ++i)
+            os << "AttributeBegin Transform " << HdPbrt_Matrix(_xform * _instanceXforms[i])
+               << " Attribute \"shape\" \"integer hdpbrtinstanceid\" " << i
                << " ObjectInstance " << HdPbrt_Quote(name) << " AttributeEnd\n";
         ctx.numInstances += _instanceXforms.size();
     }

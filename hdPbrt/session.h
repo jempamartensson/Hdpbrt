@@ -32,8 +32,13 @@ public:
     // changed since *version. Returns true if out was written.
     // depth, if not null, gets pbrt camera-space z per pixel (+inf for no
     // hit), or is cleared when pbrt hasn't sent depth.
+    // primIds/instanceIds, if not null, get the ids of the nearest hit per
+    // pixel (-1 for none, as float values), or are cleared when pbrt hasn't
+    // sent them.
     bool Snapshot(std::vector<float> *out, int *width, int *height,
-                  uint64_t *version, std::vector<float> *depth = nullptr) const;
+                  uint64_t *version, std::vector<float> *depth = nullptr,
+                  std::vector<float> *primIds = nullptr,
+                  std::vector<float> *instanceIds = nullptr) const;
 
     // True once the current pbrt process has exited (and its final image,
     // if any, has been loaded).
@@ -56,8 +61,8 @@ private:
 
     mutable std::mutex _imageMutex;
     std::vector<float> _image;
-    std::vector<float> _depth;
-    bool _hasDepth = false;
+    std::vector<float> _depth, _primIds, _instanceIds;
+    bool _hasDepth = false, _hasIds = false;
     int _width = 0, _height = 0;
     uint64_t _version = 0;
     bool _hasData = false;  // got pixels from the current process

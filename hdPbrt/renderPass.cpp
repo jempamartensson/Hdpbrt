@@ -72,6 +72,7 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
 {
     // Find the color AOV.
     HdPbrtRenderBuffer *color = nullptr, *depth = nullptr;
+    HdPbrtRenderBuffer *primId = nullptr, *instanceId = nullptr;
     HdRenderPassAovBindingVector bindings = state->GetAovBindings();
     static const bool debug = getenv("HDPBRT_DEBUG") != nullptr;
     if (debug) {
@@ -108,6 +109,17 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
             if (!pb->IsConverged()) {
                 float far = HdPbrt_FarDepth();
                 pb->Clear(&far, 1);
+                pb->SetConverged(true);
+            }
+        } else if ((b.aovName == HdAovTokens->primId ||
+                    b.aovName == HdAovTokens->instanceId) &&
+                   HdGetComponentCount(pb->GetFormat()) == 1 &&
+                   HdGetComponentFormat(pb->GetFormat()) == HdFormatInt32) {
+            // Selection: the ids of the nearest hit, streamed back by pbrt.
+            (b.aovName == HdAovTokens->primId ? primId : instanceId) = pb;
+            if (!pb->IsConverged()) {
+                float none = -1.f;
+                pb->Clear(&none, 1);
                 pb->SetConverged(true);
             }
         } else if (!pb->IsConverged()) {
@@ -174,7 +186,9 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
 
     hdpbrt::PbrtSession &session = _delegate->GetSession();
     int iw = 0, ih = 0;
-    if (session.Snapshot(&_image, &iw, &ih, &_imageVersion, depth ? &_depth : nullptr)) {
+    const bool wantIds = primId || instanceId;
+    if (session.Snapshot(&_image, &iw, &ih, &_imageVersion, depth ? &_depth : nullptr,
+                         wantIds ? &_primIds : nullptr, wantIds ? &_instanceIds : nullptr)) {
         if (debug)
             fprintf(stderr, "hdPbrt snapshot %dx%d (want %dx%d) v%llu\n", iw, ih, w, h,
                     (unsigned long long)_imageVersion);
@@ -193,6 +207,19 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
                     fprintf(stderr, "hdPbrt depth: ndc01 %g..%g\n", lo, hi);
                 }
                 depth->WriteFloat(_depth.data(), iw, ih, dw.GetMinX(), dw.GetMinY());
+            }
+            // Ids are exact integers in float (pbrt sends them that way).
+            if (primId && _primIds.size() == size_t(iw) * ih)
+                primId->WriteFloat(_primIds.data(), iw, ih, dw.GetMinX(), dw.GetMinY());
+            if (instanceId && _instanceIds.size() == size_t(iw) * ih)
+                instanceId->WriteFloat(_instanceIds.data(), iw, ih, dw.GetMinX(),
+                                       dw.GetMinY());
+            if (debug && wantIds) {
+                std::set<int> ids;
+                for (float f : _primIds) ids.insert(int(f));
+                fprintf(stderr, "hdPbrt ids: %zu primIds:", _primIds.size());
+                for (int id : ids) fprintf(stderr, " %d", id);
+                fprintf(stderr, "\n");
             }
         }
     }

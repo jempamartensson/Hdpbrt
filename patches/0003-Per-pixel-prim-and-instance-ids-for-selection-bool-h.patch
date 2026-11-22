@@ -1,0 +1,437 @@
+From 74ef20807015ae6757e51c495c9142ebd86deb03 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sun, 22 Nov 2026 17:27:54 +0100
+Subject: [PATCH 3/3] Per-pixel prim and instance ids for selection ("bool
+ hdpbrtids"), streamed as display channels primId and instanceId (for hdPbrt)
+
+Shapes take "integer hdpbrtprimid"; an ObjectInstance takes its id from
+Attribute "shape" "integer hdpbrtinstanceid". RGBFilm keeps the ids of the
+nearest first hit per pixel (like the hdpbrtdepth Z channel).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/cpu/integrators.cpp | 32 +++++++++++++++++-----
+ src/pbrt/cpu/primitive.cpp   |  5 ++++
+ src/pbrt/cpu/primitive.h     |  8 ++++++
+ src/pbrt/film.cpp            |  9 ++++++-
+ src/pbrt/film.h              | 28 ++++++++++++++++----
+ src/pbrt/interaction.h       |  2 ++
+ src/pbrt/scene.cpp           | 51 ++++++++++++++++++++++++++----------
+ src/pbrt/scene.h             |  2 ++
+ src/pbrt/util/transform.cpp  |  4 +++
+ 9 files changed, 114 insertions(+), 27 deletions(-)
+
+diff --git a/src/pbrt/cpu/integrators.cpp b/src/pbrt/cpu/integrators.cpp
+index 4e91cfa..b7e736d 100644
+--- a/src/pbrt/cpu/integrators.cpp
++++ b/src/pbrt/cpu/integrators.cpp
+@@ -144,23 +144,41 @@ void ImageTileIntegrator::Render() {
+     // Connect to display server if needed
+     if (!Options->displayServer.empty()) {
+         Film film = camera.GetFilm();
+-        // hdPbrt: also stream the depth channel when the film records it.
++        // hdPbrt: also stream the depth (Z) and id (primId, instanceId)
++        // channels when the film records them. Ids are sent as float values
++        // (exact up to 2^24).
+         RGBFilm *rgbFilm = film.CastOrNullptr<RGBFilm>();
+-        if (rgbFilm && rgbFilm->WritesDepth())
+-            DisplayDynamic(film.GetFilename(), Point2i(pixelBounds.Diagonal()),
+-                           {"R", "G", "B", "Z"},
+-                           [&, rgbFilm](Bounds2i b, pstd::span<pstd::span<float>> displayValue) {
++        if (rgbFilm && (rgbFilm->WritesDepth() || rgbFilm->WritesIds())) {
++            const bool depth = rgbFilm->WritesDepth(), ids = rgbFilm->WritesIds();
++            std::vector<std::string> channels = {"R", "G", "B"};
++            if (depth)
++                channels.push_back("Z");
++            if (ids) {
++                channels.push_back("primId");
++                channels.push_back("instanceId");
++            }
++            DisplayDynamic(film.GetFilename(), Point2i(pixelBounds.Diagonal()), channels,
++                           [&, rgbFilm, depth, ids](Bounds2i b,
++                                                    pstd::span<pstd::span<float>> displayValue) {
+                                int index = 0;
+                                for (Point2i p : b) {
+                                    Point2i pp = pixelBounds.pMin + p;
+                                    RGB rgb = film.GetPixelRGB(pp, 2.f / (waveStart + waveEnd));
+                                    for (int c = 0; c < 3; ++c)
+                                        displayValue[c][index] = rgb[c];
+-                                   displayValue[3][index] = rgbFilm->GetPixelDepth(pp);
++                                   int c = 3;
++                                   if (depth)
++                                       displayValue[c++][index] = rgbFilm->GetPixelDepth(pp);
++                                   if (ids) {
++                                       displayValue[c++][index] =
++                                           Float(rgbFilm->GetPixelPrimId(pp));
++                                       displayValue[c++][index] =
++                                           Float(rgbFilm->GetPixelInstanceId(pp));
++                                   }
+                                    ++index;
+                                }
+                            });
+-        else
++        } else
+         DisplayDynamic(film.GetFilename(), Point2i(pixelBounds.Diagonal()),
+                        {"R", "G", "B"},
+                        [&](Bounds2i b, pstd::span<pstd::span<float>> displayValue) {
+diff --git a/src/pbrt/cpu/primitive.cpp b/src/pbrt/cpu/primitive.cpp
+index d7b734e..44f258e 100644
+--- a/src/pbrt/cpu/primitive.cpp
++++ b/src/pbrt/cpu/primitive.cpp
+@@ -72,6 +72,7 @@ pstd::optional<ShapeIntersection> GeometricPrimitive::Intersect(const Ray &r,
+ 
+     // Initialize _SurfaceInteraction_ after _Shape_ intersection
+     si->intr.SetIntersectionProperties(material, areaLight, &mediumInterface, r.medium);
++    si->intr.hdpbrtPrimId = hdpbrtPrimId;
+ 
+     return si;
+ }
+@@ -121,6 +122,8 @@ pstd::optional<ShapeIntersection> TransformedPrimitive::Intersect(const Ray &r,
+     // Return transformed instance's intersection information
+     si->intr = (*renderFromPrimitive)(si->intr);
+     CHECK_GE(Dot(si->intr.n, si->intr.shading.n), 0);
++    if (hdpbrtInstanceId >= 0)
++        si->intr.hdpbrtInstanceId = hdpbrtInstanceId;
+     return si;
+ }
+ 
+@@ -149,6 +152,8 @@ pstd::optional<ShapeIntersection> AnimatedPrimitive::Intersect(const Ray &r,
+     // Transform instance's intersection data to rendering space
+     si->intr = interpRenderFromPrimitive(si->intr);
+     CHECK_GE(Dot(si->intr.n, si->intr.shading.n), 0);
++    if (hdpbrtInstanceId >= 0)
++        si->intr.hdpbrtInstanceId = hdpbrtInstanceId;
+     return si;
+ }
+ 
+diff --git a/src/pbrt/cpu/primitive.h b/src/pbrt/cpu/primitive.h
+index b6b1a64..a048a79 100644
+--- a/src/pbrt/cpu/primitive.h
++++ b/src/pbrt/cpu/primitive.h
+@@ -54,6 +54,8 @@ class GeometricPrimitive {
+     Bounds3f Bounds() const;
+     pstd::optional<ShapeIntersection> Intersect(const Ray &r, Float tMax) const;
+     bool IntersectP(const Ray &r, Float tMax) const;
++    // hdPbrt: id reported for hits on this primitive.
++    void SetHdPbrtPrimId(int id) { hdpbrtPrimId = id; }
+ 
+   private:
+     // GeometricPrimitive Private Members
+@@ -62,6 +64,7 @@ class GeometricPrimitive {
+     Light areaLight;
+     MediumInterface mediumInterface;
+     FloatTexture alpha;
++    int hdpbrtPrimId = -1;
+ };
+ 
+ // SimplePrimitive Definition
+@@ -92,11 +95,14 @@ class TransformedPrimitive {
+     bool IntersectP(const Ray &r, Float tMax) const;
+ 
+     Bounds3f Bounds() const { return (*renderFromPrimitive)(primitive.Bounds()); }
++    // hdPbrt: object instance id reported for hits inside this instance.
++    void SetHdPbrtInstanceId(int id) { hdpbrtInstanceId = id; }
+ 
+   private:
+     // TransformedPrimitive Private Members
+     Primitive primitive;
+     const Transform *renderFromPrimitive;
++    int hdpbrtInstanceId = -1;
+ };
+ 
+ // AnimatedPrimitive Definition
+@@ -110,11 +116,13 @@ class AnimatedPrimitive {
+     AnimatedPrimitive(Primitive primitive, const AnimatedTransform &renderFromPrimitive);
+     pstd::optional<ShapeIntersection> Intersect(const Ray &r, Float tMax) const;
+     bool IntersectP(const Ray &r, Float tMax) const;
++    void SetHdPbrtInstanceId(int id) { hdpbrtInstanceId = id; }
+ 
+   private:
+     // AnimatedPrimitive Private Members
+     Primitive primitive;
+     AnimatedTransform renderFromPrimitive;
++    int hdpbrtInstanceId = -1;
+ };
+ 
+ }  // namespace pbrt
+diff --git a/src/pbrt/film.cpp b/src/pbrt/film.cpp
+index b464783..5379f75 100644
+--- a/src/pbrt/film.cpp
++++ b/src/pbrt/film.cpp
+@@ -201,6 +201,8 @@ PBRT_CPU_GPU VisibleSurface::VisibleSurface(const SurfaceInteraction &si, Sample
+     time = si.time;
+     dpdx = si.dpdx;
+     dpdy = si.dpdy;
++    hdpbrtPrimId = si.hdpbrtPrimId;
++    hdpbrtInstanceId = si.hdpbrtInstanceId;
+ }
+ 
+ std::string VisibleSurface::ToString() const {
+@@ -1073,10 +1075,15 @@ Film Film::Create(const std::string &name, const ParameterDictionary &parameters
+     if (name == "rgb")
+     {
+         bool writeDepth = parameters.GetOneBool("hdpbrtdepth", false);
++        bool writeIds = parameters.GetOneBool("hdpbrtids", false);
+         RGBFilm *rgbFilm = RGBFilm::Create(parameters, exposureTime, filter,
+                                            parameters.ColorSpace(), loc, alloc);
++        Transform cameraFromRender =
++            Inverse(cameraTransform.RenderFromCamera().startTransform);
+         if (writeDepth)
+-            rgbFilm->EnableDepth(Inverse(cameraTransform.RenderFromCamera().startTransform));
++            rgbFilm->EnableDepth(cameraFromRender);
++        if (writeIds)
++            rgbFilm->EnableIds(cameraFromRender);
+         film = rgbFilm;
+     }
+     else if (name == "gbuffer")
+diff --git a/src/pbrt/film.h b/src/pbrt/film.h
+index 6e39801..0638dd8 100644
+--- a/src/pbrt/film.h
++++ b/src/pbrt/film.h
+@@ -152,6 +152,7 @@ class VisibleSurface {
+     Float time = 0;
+     Vector3f dpdx, dpdy;
+     SampledSpectrum albedo;
++    int hdpbrtPrimId = -1, hdpbrtInstanceId = -1;  // hdPbrt
+     bool set = false;
+ };
+ 
+@@ -233,7 +234,7 @@ class RGBFilm : public FilmBase {
+   public:
+     // RGBFilm Public Methods
+     PBRT_CPU_GPU
+-    bool UsesVisibleSurface() const { return writeDepth; }
++    bool UsesVisibleSurface() const { return writeDepth || writeIds; }
+ 
+     PBRT_CPU_GPU
+     void AddSample(Point2i pFilm, SampledSpectrum L, const SampledWavelengths &lambda,
+@@ -252,22 +253,37 @@ class RGBFilm : public FilmBase {
+         for (int c = 0; c < 3; ++c)
+             pixel.rgbSum[c] += weight * rgb[c];
+         pixel.weightSum += weight;
+-        // hdPbrt: nearest camera-space depth of the first hit.
+-        if (writeDepth && visibleSurface && *visibleSurface) {
++        // hdPbrt: nearest camera-space depth of the first hit, and the ids of
++        // the primitive and instance hit there.
++        if ((writeDepth || writeIds) && visibleSurface && *visibleSurface) {
+             Float z = cameraFromRender(visibleSurface->p).z;
+-            if (z < pixel.depth)
++            if (z < pixel.depth) {
+                 pixel.depth = z;
++                pixel.primId = visibleSurface->hdpbrtPrimId;
++                pixel.instanceId = visibleSurface->hdpbrtInstanceId;
++            }
+         }
+     }
+ 
+     // hdPbrt: camera-space z of the nearest first hit (+inf where nothing was hit).
+     PBRT_CPU_GPU
+     Float GetPixelDepth(Point2i p) const { return pixels[p].depth; }
++    // hdPbrt: "integer hdpbrtprimid" of the shape and "hdpbrtinstanceid" of
++    // the object instance at the nearest first hit (-1 = none).
++    PBRT_CPU_GPU
++    int GetPixelPrimId(Point2i p) const { return pixels[p].primId; }
++    PBRT_CPU_GPU
++    int GetPixelInstanceId(Point2i p) const { return pixels[p].instanceId; }
+     bool WritesDepth() const { return writeDepth; }
++    bool WritesIds() const { return writeIds; }
+     void EnableDepth(const Transform &camFromRender) {
+         writeDepth = true;
+         cameraFromRender = camFromRender;
+     }
++    void EnableIds(const Transform &camFromRender) {
++        writeIds = true;
++        cameraFromRender = camFromRender;
++    }
+ 
+     PBRT_CPU_GPU
+     RGB GetPixelRGB(Point2i p, Float splatScale = 1) const {
+@@ -313,6 +329,7 @@ class RGBFilm : public FilmBase {
+     PBRT_CPU_GPU void ResetPixel(Point2i p) {
+         memset(&pixels[p], 0, sizeof(Pixel));
+         pixels[p].depth = Infinity;
++        pixels[p].primId = pixels[p].instanceId = -1;
+     }
+ 
+   private:
+@@ -323,6 +340,7 @@ class RGBFilm : public FilmBase {
+         double weightSum = 0.;
+         AtomicDouble rgbSplat[3];
+         Float depth = Infinity;
++        int primId = -1, instanceId = -1;
+     };
+ 
+     // RGBFilm Private Members
+@@ -332,7 +350,7 @@ class RGBFilm : public FilmBase {
+     Float filterIntegral;
+     SquareMatrix<3> outputRGBFromSensorRGB;
+     Array2D<Pixel> pixels;
+-    bool writeDepth = false;
++    bool writeDepth = false, writeIds = false;
+     Transform cameraFromRender;
+ };
+ 
+diff --git a/src/pbrt/interaction.h b/src/pbrt/interaction.h
+index 4be03bc..8cbeee2 100644
+--- a/src/pbrt/interaction.h
++++ b/src/pbrt/interaction.h
+@@ -257,6 +257,8 @@ class SurfaceInteraction : public Interaction {
+         Normal3f dndu, dndv;
+     } shading;
+     int faceIndex = 0;
++    // hdPbrt: ids of the primitive (shape) and object instance that were hit.
++    int hdpbrtPrimId = -1, hdpbrtInstanceId = -1;
+     Material material;
+     Light areaLight;
+     Vector3f dpdx, dpdy;
+diff --git a/src/pbrt/scene.cpp b/src/pbrt/scene.cpp
+index 91ec026..2a35077 100644
+--- a/src/pbrt/scene.cpp
++++ b/src/pbrt/scene.cpp
+@@ -374,6 +374,14 @@ void BasicSceneBuilder::ObjectInstance(const std::string &origName, FileLoc loc)
+ 
+     class Transform worldFromRender = Inverse(renderFromWorld);
+ 
++    // hdPbrt: an instance id given as Attribute "shape" "integer hdpbrtinstanceid".
++    int hdpbrtInstanceId = -1;
++    for (const ParsedParameter *p : graphicsState.shapeAttributes)
++        if (p->name == "hdpbrtinstanceid" && p->type == "integer" && !p->ints.empty()) {
++            hdpbrtInstanceId = p->ints[0];
++            p->lookedUp = true;
++        }
++
+     if (CTMIsAnimated()) {
+         AnimatedTransform animatedRenderFromInstance(
+             RenderFromObject(0) * worldFromRender, graphicsState.transformStartTime,
+@@ -385,6 +393,7 @@ void BasicSceneBuilder::ObjectInstance(const std::string &origName, FileLoc loc)
+         if (animatedRenderFromInstance.IsAnimated()) {
+             instanceUses.push_back(
+                 InstanceSceneEntity(name, loc, animatedRenderFromInstance));
++            instanceUses.back().hdpbrtInstanceId = hdpbrtInstanceId;
+             return;
+         }
+     }
+@@ -392,6 +401,7 @@ void BasicSceneBuilder::ObjectInstance(const std::string &origName, FileLoc loc)
+     const class Transform *renderFromInstance =
+         transformCache.Lookup(RenderFromObject(0) * worldFromRender);
+     instanceUses.push_back(InstanceSceneEntity(name, loc, renderFromInstance));
++    instanceUses.back().hdpbrtInstanceId = hdpbrtInstanceId;
+ }
+ 
+ void BasicSceneBuilder::EndOfFiles() {
+@@ -1404,6 +1414,8 @@ Primitive BasicScene::CreateAggregate(
+                 continue;
+ 
+             FloatTexture alphaTex = getAlphaTexture(sh.parameters, &sh.loc);
++            // hdPbrt: id reported for hits on this shape.
++            const int hdpbrtPrimId = sh.parameters.GetOneInt("hdpbrtprimid", -1);
+             sh.parameters.ReportUnused();  // do now so can grab alpha...
+ 
+             pbrt::Material mtl = nullptr;
+@@ -1429,11 +1441,14 @@ Primitive BasicScene::CreateAggregate(
+                 if (sh.lightIndex != -1 && iter != shapeIndexToAreaLights.end())
+                     area = (*iter->second)[j];
+ 
+-                if (!area && !mi.IsMediumTransition() && !alphaTex)
++                if (!area && !mi.IsMediumTransition() && !alphaTex && hdpbrtPrimId < 0)
+                     primitives.push_back(new SimplePrimitive(shapes[j], mtl));
+-                else
+-                    primitives.push_back(
+-                        new GeometricPrimitive(shapes[j], mtl, area, mi, alphaTex));
++                else {
++                    GeometricPrimitive *gp =
++                        new GeometricPrimitive(shapes[j], mtl, area, mi, alphaTex);
++                    gp->SetHdPbrtPrimId(hdpbrtPrimId);
++                    primitives.push_back(gp);
++                }
+             }
+             sh.parameters.FreeParameters();
+             sh = ShapeSceneEntity();
+@@ -1461,6 +1476,7 @@ Primitive BasicScene::CreateAggregate(
+                 continue;
+ 
+             FloatTexture alphaTex = getAlphaTexture(sh.parameters, &sh.loc);
++            const int hdpbrtPrimId = sh.parameters.GetOneInt("hdpbrtprimid", -1);
+             sh.parameters.ReportUnused();  // do now so can grab alpha...
+ 
+             // Create initial shape or shapes for animated shape
+@@ -1486,11 +1502,14 @@ Primitive BasicScene::CreateAggregate(
+                     ErrorExit(&sh.loc, "Animated area lights are not supported.");
+                 }
+ 
+-                if (!mi.IsMediumTransition() && !alphaTex)
++                if (!mi.IsMediumTransition() && !alphaTex && hdpbrtPrimId < 0)
+                     prims.push_back(new SimplePrimitive(s, mtl));
+-                else
+-                    prims.push_back(new GeometricPrimitive(
+-                        s, mtl, nullptr /* area light */, mi, alphaTex));
++                else {
++                    GeometricPrimitive *gp = new GeometricPrimitive(
++                        s, mtl, nullptr /* area light */, mi, alphaTex);
++                    gp->SetHdPbrtPrimId(hdpbrtPrimId);
++                    prims.push_back(gp);
++                }
+             }
+ 
+             // TODO: could try to be greedy or even segment them according
+@@ -1566,12 +1585,16 @@ Primitive BasicScene::CreateAggregate(
+             // empty instance
+             continue;
+ 
+-        if (inst.renderFromInstance)
+-            primitives.push_back(
+-                new TransformedPrimitive(iter->second, inst.renderFromInstance));
+-        else {
+-            primitives.push_back(
+-                new AnimatedPrimitive(iter->second, *inst.renderFromInstanceAnim));
++        if (inst.renderFromInstance) {
++            TransformedPrimitive *tp =
++                new TransformedPrimitive(iter->second, inst.renderFromInstance);
++            tp->SetHdPbrtInstanceId(inst.hdpbrtInstanceId);
++            primitives.push_back(tp);
++        } else {
++            AnimatedPrimitive *ap =
++                new AnimatedPrimitive(iter->second, *inst.renderFromInstanceAnim);
++            ap->SetHdPbrtInstanceId(inst.hdpbrtInstanceId);
++            primitives.push_back(ap);
+             delete inst.renderFromInstanceAnim;
+         }
+     }
+diff --git a/src/pbrt/scene.h b/src/pbrt/scene.h
+index cd1958d..83992e7 100644
+--- a/src/pbrt/scene.h
++++ b/src/pbrt/scene.h
+@@ -221,6 +221,8 @@ struct InstanceSceneEntity {
+     FileLoc loc;
+     AnimatedTransform *renderFromInstanceAnim = nullptr;
+     const Transform *renderFromInstance = nullptr;
++    // hdPbrt: from Attribute "shape" "integer hdpbrtinstanceid" (-1 = none).
++    int hdpbrtInstanceId = -1;
+ };
+ 
+ // MaxTransforms Definition
+diff --git a/src/pbrt/util/transform.cpp b/src/pbrt/util/transform.cpp
+index 9ebf809..29ff79e 100644
+--- a/src/pbrt/util/transform.cpp
++++ b/src/pbrt/util/transform.cpp
+@@ -256,6 +256,8 @@ PBRT_CPU_GPU SurfaceInteraction Transform::operator()(const SurfaceInteraction &
+     //    ret.n = FaceForward(ret.n, ret.shading.n);
+     ret.shading.n = FaceForward(ret.shading.n, ret.n);
+     ret.faceIndex = si.faceIndex;
++    ret.hdpbrtPrimId = si.hdpbrtPrimId;
++    ret.hdpbrtInstanceId = si.hdpbrtInstanceId;
+ 
+     return ret;
+ }
+@@ -364,6 +366,8 @@ PBRT_CPU_GPU SurfaceInteraction Transform::ApplyInverse(const SurfaceInteraction
+     //    ret.n = FaceForward(ret.n, ret.shading.n);
+     ret.shading.n = FaceForward(ret.shading.n, ret.n);
+     ret.faceIndex = si.faceIndex;
++    ret.hdpbrtPrimId = si.hdpbrtPrimId;
++    ret.hdpbrtInstanceId = si.hdpbrtInstanceId;
+     return ret;
+ }
+ 
+-- 
+2.43.0
+

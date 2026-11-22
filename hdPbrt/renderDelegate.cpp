@@ -406,7 +406,7 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
     os << "# pbrt-v4 scene written by hdPbrt\n";
     os << "Film \"rgb\" \"string filename\" " << HdPbrt_Quote(pfm)
        << " \"integer xresolution\" " << width << " \"integer yresolution\" " << height
-       << " \"bool hdpbrtdepth\" true\n";
+       << " \"bool hdpbrtdepth\" true \"bool hdpbrtids\" true\n";
     os << "Sampler " << HdPbrt_Quote(GetSetting<std::string>(HdPbrtSettingsTokens->sampler,
                                                              "zsobol"))
        << " \"integer pixelsamples\" " << GetSpp() << "\n";

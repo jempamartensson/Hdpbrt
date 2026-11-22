@@ -75,7 +75,14 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   are ignored; a scene without lights gets a uniform white environment.
 - **Camera:** the render pass state's view and projection (so viewport framing and window
   policy match), perspective and orthographic. No depth of field yet.
-- **AOVs:** color (pbrt image), depth, and primId/instanceId/elementId (-1, no selection yet).
+- **AOVs:** color (pbrt image), depth, primId and instanceId (selection), elementId (-1).
+  Ids: each mesh's Shape gets `"integer hdpbrtprimid" <HdRprim::GetPrimId()>`, each
+  ObjectInstance is preceded by `Attribute "shape" "integer hdpbrtinstanceid" <i>` (i = index
+  in the flattened instance list, nested instancers outer-major, as Hydra expects). The film
+  (`"bool hdpbrtids" true`, patch 3) keeps the ids of the nearest first hit per pixel and
+  streams them as display channels `primId`/`instanceId` (float values, exact up to 2^24).
+  In Houdini the scene graph select tool then selects prims and point instances. Around a
+  distant light's origin Houdini's own light guide wins the pick (Karma CPU does the same).
   Depth is real: pbrt's RGBFilm (patched, `"bool hdpbrtdepth" true`) keeps the nearest
   first-hit camera-space z per pixel and streams it as display channel `Z`; the render pass
   turns it into NDC depth in [0, 1] with the projection matrix. **Houdini's Vulkan viewport
@@ -129,6 +136,11 @@ Gotchas:
   1920x1080 -fullscreen -ac`, then Houdini on DISPLAY=:7 with its own HOUDINI_USER_PREF_DIR and
   a 123.py that builds a scene, picks the renderer and flipbooks the viewport.
   (Rootless Xwayland of headless gnome-shell hangs; use the rootful one. Kill by PID, not pkill -f.)
+- Selection: `vp_pick.py` (same setup) adds a point instancer, switches to the
+  `scenegraphselect` state, clicks the viewport surface (the `RE_WindowWindow` QWindow) with
+  QTest and logs `PICK ok/FAIL` per target to `$VPT_OUT.log`: instancer, ground, background,
+  sphere, and the three point instances with `setSelectionPointInstances(True)`. All pass with
+  pbrt; the build before patch 3 selects nothing.
 
 - `hython test/hydra_render.py HdPbrtRendererPlugin out.png test/test_scene.usda`
   (UsdAppUtils.FrameRecorder; `make_scene.py` builds the scene: checker texture, glass via

@@ -206,7 +206,7 @@ private:
     GfRect2i _dataWindow;
     TfTokenVector _renderTags;
     uint64_t _imageVersion = 0;
-    std::vector<float> _image, _depth;
+    std::vector<float> _image, _depth, _primIds, _instanceIds;
     static void _ToNdcDepth(std::vector<float> *zs, GfMatrix4d const &proj);
     bool _converged = false;
     bool _started = false;

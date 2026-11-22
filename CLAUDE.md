@@ -11,7 +11,8 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (2 commits, the same as `patches/`).
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (3 commits, the same as `patches/`;
+    regenerate with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o patches`).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
     the Blender flavor.
   - `build/pbrt`, `build/hdpbrt-houdini`, `build/hdpbrt-blender`: build dirs.
@@ -19,7 +20,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
     imgtool.
   - `houdini/dso/usd_plugins/`: what Houdini loads through `HOUDINI_PATH`.
   - `build.sh`: full local rebuild. The repo's `scripts/build.sh` is the portable version.
-  - `test/`: scenes, renders, `viewport/` (live-viewport test).
+  - `test/`: scenes, renders, `viewport/` (live-viewport test). The repo copy is `tests/`.
 - Houdini package: `~/dev/houdini_packages/hdpbrt_pkg`. rez package: `hdpbrt-0.1.0` in
   `~/dev/rez_packages`. Jens runs `rez env houdini-22 hdpbrt -- houdini`.
 - Blender add-on symlink: `~/.config/blender/5.3/scripts/addons/hydra_pbrt`.
@@ -32,6 +33,9 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 1. Exit when `PBRT_PARENT_PID` dies.
 2. RGBFilm `"bool hdpbrtdepth" true` records the nearest first-hit camera-space z and streams
    it as display channel `Z`.
+3. RGBFilm `"bool hdpbrtids" true` records the `hdpbrtprimid` (shape parameter) and
+   `hdpbrtinstanceid` (`Attribute "shape"` before `ObjectInstance`) of the nearest first hit,
+   streamed as channels `primId`/`instanceId`. They fill the selection AOVs.
 
 ## Done in the 2026-11-22 session
 
@@ -88,11 +92,12 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    `unset GSETTINGS_SCHEMA_DIR; export XDG_DATA_DIRS=/usr/share/ubuntu:/usr/share/gnome:/usr/local/share/:/usr/share/`
    in both.sh and in the Houdini run script.
 5. The Houdini segfault on `hou.exit()` from the startup script is Houdini's own and harmless.
+6. Selection: `tests/viewport/vp_pick.py` clicks the viewport through QTest in the
+   `scenegraphselect` state and logs `PICK ok/FAIL` lines. Houdini VK and Karma CPU work as
+   controls. The default `lopview` state does not select on click.
 
 ## Open items and ideas
 
-- Selection: fill `primId`/`instanceId` with real ids. pbrt would have to stream a per-pixel
-  shape id, as another film channel similar to `Z`.
 - Alpha: the background is opaque. Coverage could become an `A` channel, so Houdini's viewport
   background shows through when there is no dome.
 - Not translated yet: curves, points, volumes, subdivision refinement, motion blur, depth of

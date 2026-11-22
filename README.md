@@ -17,8 +17,9 @@ errors, so it runs as a separate process instead:
 3. pbrt streams its progressive image, plus first-hit depth, over its tev display-server
    protocol. The final image is read from the PFM pbrt writes when it exits.
 
-pbrt needs the two patches in `patches/` (against pbrt-v4 `20e41fd`): pbrt exits when its
-parent process dies, and its RGB film can record and stream depth for the viewport.
+pbrt needs the three patches in `patches/` (against pbrt-v4 `20e41fd`): pbrt exits when its
+parent process dies, and its RGB film can record and stream depth and per-pixel prim/instance
+ids (selection) for the viewport.
 
 ## Build
 
@@ -52,8 +53,8 @@ Environment: `HDPBRT_PBRT_EXECUTABLE`, `HDPBRT_TMPDIR`, `HDPBRT_KEEP_TMP=1`,
 Meshes, implicit shapes, point instancers; UsdPreviewSurface and MaterialX standard_surface /
 open_pbr_surface (mapped to pbrt conductor, dielectric or coateddiffuse) with image textures;
 distant, sphere, rect, disk, cylinder and dome lights; perspective and orthographic cameras;
-color and depth AOVs. Not yet: curves, points, volumes, subdivision, motion blur, depth of
-field, light shaping, selection ids.
+color, depth, primId and instanceId AOVs (viewport selection, including point instances).
+Not yet: curves, points, volumes, subdivision, motion blur, depth of field, light shaping.
 
 ## Tests
 

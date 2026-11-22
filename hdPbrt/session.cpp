@@ -81,8 +81,11 @@ bool PbrtSession::Start(const std::string &pbrtExe, const std::string &sceneFile
         _height = height;
         _image.assign(size_t(width) * height * 3, 0.f);
         _depth.assign(size_t(width) * height, std::numeric_limits<float>::infinity());
+        _primIds.assign(size_t(width) * height, -1.f);
+        _instanceIds.assign(size_t(width) * height, -1.f);
         _hasData = false;
         _hasDepth = false;
+        _hasIds = false;
     }
     _outputPfm = outputPfm;
     _logFile = logFile;
@@ -240,7 +243,9 @@ bool PbrtSession::_LoadPfm(const std::string &path)
 }
 
 bool PbrtSession::Snapshot(std::vector<float> *out, int *width, int *height,
-                           uint64_t *version, std::vector<float> *depth) const
+                           uint64_t *version, std::vector<float> *depth,
+                           std::vector<float> *primIds,
+                           std::vector<float> *instanceIds) const
 {
     std::lock_guard<std::mutex> lock(_imageMutex);
     if (!_hasData || *version == _version)
@@ -251,6 +256,18 @@ bool PbrtSession::Snapshot(std::vector<float> *out, int *width, int *height,
             *depth = _depth;
         else
             depth->clear();
+    }
+    if (primIds) {
+        if (_hasIds)
+            *primIds = _primIds;
+        else
+            primIds->clear();
+    }
+    if (instanceIds) {
+        if (_hasIds)
+            *instanceIds = _instanceIds;
+        else
+            instanceIds->clear();
     }
     *width = _width;
     *height = _height;
@@ -301,7 +318,9 @@ void PbrtSession::_HandleMessage(const std::vector<uint8_t> &msg)
             : channel == "G" ? 1
             : channel == "B" ? 2
             : channel == "Z" ? 3
-                             : -1;
+            : channel == "primId"     ? 4
+            : channel == "instanceId" ? 5
+                                      : -1;
     if (c < 0)
         return;
     int x, y, w, h;
@@ -321,11 +340,18 @@ void PbrtSession::_HandleMessage(const std::vector<uint8_t> &msg)
             const size_t pix = size_t(y + j) * _width + (x + i);
             if (c == 3)
                 _depth[pix] = f;
+            else if (c == 4)
+                _primIds[pix] = f;
+            else if (c == 5)
+                _instanceIds[pix] = f;
             else
                 _image[pix * 3 + c] = f;
         }
-    if (c == 3) {
-        _hasDepth = true;
+    if (c >= 3) {
+        if (c == 3)
+            _hasDepth = true;
+        else
+            _hasIds = true;
         return;  // the RGB channels bump the version
     }
     _hasData = true;
