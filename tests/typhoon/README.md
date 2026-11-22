@@ -19,6 +19,20 @@ same USD files with hdPbrt and compare the images with Typhoon's.
   4 decimals on all 7 frames, both within 0.25% of the analytic values in the file header
   (Sunny 16 gives 0.2233 for the expected 0.2238).
 
+- `run_materials.sh` / `compare_images.py`: the suite's material fixtures (MaterialX PBR
+  nodes, OpenPBR, Standard Surface shaderballs). The published references are 16 spp with
+  Typhoon's default clamps and caustics off, so the script renders its own Typhoon
+  references (clamps off, caustics on, 256 spp) and compares mean ratio and RMS error after
+  4x downsampling. Result: `MATERIALS_RESULTS.txt` (2026-11-22: 4 match, 15 close, 23 differ).
+  What differs and why:
+  - dielectric-over-diffuse bases (OpenPBR/Standard Surface/UsdPreviewSurface) are ~9%
+    darker and more saturated: pbrt's coateddiffuse simulates internal bounces in the coat,
+    MaterialX/Typhoon scale the diffuse by 1 - the specular's directional albedo;
+  - `pbr/` fixtures build surfaces from MaterialX BSDF nodes (burley, conductor, sheen,
+    layer, unlit, ...), which hdPbrt doesn't map (default grey);
+  - fuzz/sheen, transmission color with depth (absorbing interiors: honey), dispersion and
+    thin-walled aren't modeled.
+
 Typhoon's defaults include a firefly clamp of 20; reference scenes must set
 `ty:fireflyClampThreshold = 0` (and `ty:causticsClampThreshold = 0`), or bright values are
 clamped.

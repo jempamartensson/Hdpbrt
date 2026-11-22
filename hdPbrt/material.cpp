@@ -168,15 +168,54 @@ struct _Builder {
         std::string file = _AssetPath(_Param(*up, "file"));
         if (file.empty() || !_SupportedImage(file))
             return {};
+        // UsdUVTexture: sourceColorSpace "auto" decodes 8-bit images as sRGB.
+        // MaterialX image nodes: a file is in the document's (linear) color
+        // space unless its colorspace says otherwise (Hydra passes it as
+        // "colorSpace:file"), as USD's reference renderer reads them.
         std::string encoding = "sRGB";
-        VtValue cs = _Param(*up, "sourceColorSpace");
-        if (!isColor || (cs.IsHolding<TfToken>() && cs.UncheckedGet<TfToken>() == "raw"))
+        if (TfStringStartsWith(up->nodeTypeId.GetString(), "ND_")) {
+            VtValue mcs = _Param(*up, "colorSpace:file");
+            std::string name = mcs.IsHolding<TfToken>() ? mcs.UncheckedGet<TfToken>().GetString()
+                               : mcs.IsHolding<std::string>() ? mcs.UncheckedGet<std::string>()
+                                                               : std::string();
+            name = TfStringToLower(name);
+            encoding = (name.find("srgb") != std::string::npos && name.find("lin") != 0)
+                           ? "sRGB" : "linear";
+        } else {
+            VtValue cs = _Param(*up, "sourceColorSpace");
+            if (cs.IsHolding<TfToken>() && cs.UncheckedGet<TfToken>() == "raw")
+                encoding = "linear";
+        }
+        if (!isColor)
             encoding = "linear";
         std::string name = prefix + "_" + input + std::to_string(texCount++);
         std::ostringstream os;
         os << "Texture " << HdPbrt_Quote(name) << (isColor ? " \"spectrum\"" : " \"float\"")
            << " \"imagemap\" \"string filename\" " << HdPbrt_Quote(file)
            << " \"string encoding\" " << HdPbrt_Quote(encoding);
+        // MaterialX tiledimage: uvtiling (often fed by a convert node from a
+        // float) scales the texture coordinates, as pbrt's uscale/vscale.
+        if (TfStringStartsWith(up->nodeTypeId.GetString(), "ND_tiledimage_")) {
+            GfVec2f tiling(1.f);
+            VtValue t = _Param(*up, "uvtiling");
+            if (t.IsHolding<GfVec2f>()) {
+                tiling = t.UncheckedGet<GfVec2f>();
+            } else {
+                TfToken o;
+                if (const HdMaterialNode2 *c = net.Upstream(*up, TfToken("uvtiling"), &o)) {
+                    VtValue in = _Param(*c, "in");
+                    VtValue val = _Param(*c, "value");
+                    if (in.IsHolding<float>())
+                        tiling = GfVec2f(in.UncheckedGet<float>());
+                    else if (in.IsHolding<GfVec2f>())
+                        tiling = in.UncheckedGet<GfVec2f>();
+                    else if (val.IsHolding<GfVec2f>())
+                        tiling = val.UncheckedGet<GfVec2f>();
+                }
+            }
+            if (tiling != GfVec2f(1.f))
+                os << " \"float uscale\" " << tiling[0] << " \"float vscale\" " << tiling[1];
+        }
         VtValue scale = _Param(*up, "scale");
         if (scale.IsHolding<GfVec4f>()) {
             GfVec4f s = scale.UncheckedGet<GfVec4f>();
@@ -250,6 +289,16 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 opacity = _Float(*surf, "opacity", 1);
                 emission = _Color(*surf, "emission_color", GfVec3f(1)) * _Float(*surf, "emission", 0);
                 baseIn = "base_color"; roughIn = "specular_roughness"; opacityIn = "opacity";
+                // No subsurface scattering yet: its weight blends the diffuse
+                // albedo toward subsurface_color, which is what it converges to.
+                {
+                    const float w = std::min(std::max(_Float(*surf, "subsurface", 0), 0.f), 1.f);
+                    if (w > 0) {
+                        base = base * (1 - w) + _Color(*surf, "subsurface_color", GfVec3f(1)) * w;
+                        if (w >= 0.5f)
+                            baseIn = "subsurface_color";
+                    }
+                }
                 noSpecular = _Float(*surf, "specular", 1) <= 0.f && _Float(*surf, "coat", 0) <= 0.f;
             } else if (TfStringStartsWith(type, "ND_open_pbr_surface")) {
                 base = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base_weight", 1);
@@ -261,6 +310,16 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 emission = _Color(*surf, "emission_color", GfVec3f(1)) *
                            _Float(*surf, "emission_luminance", 0);
                 baseIn = "base_color"; roughIn = "specular_roughness"; opacityIn = "geometry_opacity";
+                {
+                    const float w =
+                        std::min(std::max(_Float(*surf, "subsurface_weight", 0), 0.f), 1.f);
+                    if (w > 0) {
+                        base = base * (1 - w) +
+                               _Color(*surf, "subsurface_color", GfVec3f(0.8f)) * w;
+                        if (w >= 0.5f)
+                            baseIn = "subsurface_color";
+                    }
+                }
                 noSpecular = _Float(*surf, "specular_weight", 1) <= 0.f &&
                              _Float(*surf, "coat_weight", 0) <= 0.f;
             } else {

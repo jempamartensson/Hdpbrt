@@ -237,7 +237,15 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   film `iso` with the shutter compensation. `tests/typhoon/exposure_scene.usda` matches
   Typhoon to 4 decimals. render_hdpbrt.py reuses the previous image when a frame changes
   nothing (hdPbrt doesn't re-render then).
-- Next: Typhoon reference scenes for what the usdlux suite doesn't cover (distant-light cone
-  and soft shadows, light linking, materials: the suite's materials/ and test-suite/ scenes).
+- Materials vs Typhoon (2026-11-22): `tests/typhoon/run_materials.sh` renders clean Typhoon
+  references (clamps off, caustics on) and compares; `MATERIALS_RESULTS.txt` 4 match /
+  15 close / 23 differ. Fixed so far: subsurface weight blends toward subsurface_color,
+  MaterialX tiledimage uvtiling (pbrt uscale/vscale), MaterialX images default to linear
+  (only an authored sRGB colorspace decodes). Open, in order of payoff: (1) a MaterialX-style
+  layered BSDF (dielectric spec + diffuse scaled by 1 - E_spec, MaterialX's analytic GGX
+  albedo fit; Typhoon: energyCompensation.cpp) instead of coateddiffuse, fixes ~12 fixtures;
+  (2) mapping MaterialX BSDF-node graphs (pbr/ fixtures); (3) transmission depth/color as an
+  interior medium; (4) fuzz/sheen, thin-walled, dispersion.
+- Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens
   wants it after everything else).
