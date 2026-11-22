@@ -32,10 +32,10 @@ add_library(hdPbrt SHARED
 set_target_properties(hdPbrt PROPERTIES PREFIX "")
 target_compile_definitions(hdPbrt PRIVATE TBB_SUPPRESS_DEPRECATED_MESSAGES=1 NDEBUG)
 target_compile_options(hdPbrt PRIVATE -Wno-deprecated -Wno-deprecated-declarations)
-target_link_options(hdPbrt PRIVATE -Wl,--no-undefined)
 
 if(HDPBRT_FLAVOR STREQUAL "houdini")
   set(HFS "/opt/hfs22.0" CACHE PATH "Houdini install")
+  target_link_options(hdPbrt PRIVATE -Wl,--no-undefined)
   target_include_directories(hdPbrt SYSTEM PRIVATE
     ${HFS}/toolkit/include ${HFS}/python/include/python3.13)
   set(_libs hdsi hd hf pxOsd cameraUtil sdf ar plug trace work vt gf tf arch js python)
@@ -54,7 +54,6 @@ elseif(HDPBRT_FLAVOR STREQUAL "blender")
     ${USD_GENERATED} ${USD_SOURCE} ${TBB_INCLUDE} ${PYTHON_INCLUDE})
   target_link_libraries(hdPbrt PRIVATE ${BLENDER_LIB}/libusd_ms.so ${BLENDER_LIB}/libtbb.so)
   # Python symbols come from the Blender executable at run time.
-  target_link_options(hdPbrt PRIVATE -Wl,--allow-shlib-undefined)
 else()
   message(FATAL_ERROR "HDPBRT_FLAVOR must be houdini or blender")
 endif()

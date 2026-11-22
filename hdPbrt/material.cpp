@@ -273,10 +273,17 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             d.opacityTexture = opacityTex;
             std::ostringstream other;
             auto roughParam = [&](const char *name) {
+                // USD/MaterialX roughness r means GGX alpha = r^2. pbrt's
+                // "remaproughness" uses alpha = sqrt(r), so pass alpha
+                // directly for constants. (Textured roughness keeps pbrt's
+                // remap, which is too rough for glossy values.)
                 if (!roughTex.empty())
                     other << " \"texture " << name << "\" " << HdPbrt_Quote(roughTex);
-                else
-                    other << " \"float " << name << "\" " << std::min(std::max(rough, 0.f), 1.f);
+                else {
+                    float r = std::min(std::max(rough, 0.f), 1.f);
+                    other << " \"float " << name << "\" " << r * r
+                          << " \"bool remaproughness\" false";
+                }
             };
             if (metallic >= 0.5f) {
                 d.type = "conductor";

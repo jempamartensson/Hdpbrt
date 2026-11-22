@@ -1,1 +1,3 @@
 build/
+blender/hydra_pbrt/plugin
+__pycache__/

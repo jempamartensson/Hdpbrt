@@ -26,7 +26,7 @@ HdPbrtMesh::HdPbrtMesh(SdfPath const &id, HdPbrtRenderDelegate *delegate)
 HdPbrtMesh::~HdPbrtMesh()
 {
     _delegate->Unregister(this);
-    if (!_plyPath.empty())
+    if (!_plyPath.empty() && !getenv("HDPBRT_KEEP_TMP"))
         unlink(_plyPath.c_str());
 }
 
@@ -53,6 +53,35 @@ struct _Primvar {
     bool valid = false;
 };
 
+template <typename T>
+bool _Flatten(VtValue *v, VtIntArray const &indices)
+{
+    if (!v->IsHolding<VtArray<T>>())
+        return false;
+    const VtArray<T> &src = v->UncheckedGet<VtArray<T>>();
+    VtArray<T> out(indices.size());
+    for (size_t i = 0; i < indices.size(); ++i) {
+        int k = indices[i];
+        out[i] = (k >= 0 && size_t(k) < src.size()) ? src[k] : T();
+    }
+    *v = VtValue(out);
+    return true;
+}
+
+// Get a primvar, expanding indexed primvars to one value per element.
+VtValue _GetFlat(HdSceneDelegate *sd, SdfPath const &id, TfToken const &name)
+{
+    VtIntArray indices;
+    VtValue v = sd->GetIndexedPrimvar(id, name, &indices);
+    if (v.IsEmpty())
+        return sd->Get(id, name);
+    if (!indices.empty()) {
+        _Flatten<GfVec3f>(&v, indices) || _Flatten<GfVec2f>(&v, indices) ||
+            _Flatten<float>(&v, indices);
+    }
+    return v;
+}
+
 _Primvar _FindPrimvar(HdSceneDelegate *sd, SdfPath const &id,
                       const std::vector<TfToken> &names, bool anyVec2 = false)
 {
@@ -63,12 +92,12 @@ _Primvar _FindPrimvar(HdSceneDelegate *sd, SdfPath const &id,
         for (HdInterpolation interp : interps)
             for (const HdPrimvarDescriptor &pv : sd->GetPrimvarDescriptors(id, interp))
                 if (pv.name == name)
-                    return {sd->Get(id, pv.name), interp, true};
+                    return {_GetFlat(sd, id, pv.name), interp, true};
     if (anyVec2) {
         for (HdInterpolation interp : {HdInterpolationFaceVarying, HdInterpolationVertex,
                                        HdInterpolationVarying})
             for (const HdPrimvarDescriptor &pv : sd->GetPrimvarDescriptors(id, interp)) {
-                VtValue v = sd->Get(id, pv.name);
+                VtValue v = _GetFlat(sd, id, pv.name);
                 if (v.IsHolding<VtVec2fArray>())
                     return {v, interp, true};
             }
@@ -80,9 +109,11 @@ template <typename T>
 VtArray<T> _Triangulated(HdMeshUtil &util, VtArray<T> const &src, HdType type)
 {
     VtValue out;
-    if (util.ComputeTriangulatedFaceVaryingPrimvar(src.cdata(), (int)src.size(), type,
-                                                   &out) == HdMeshComputationResult::Success &&
-        out.IsHolding<VtArray<T>>())
+    HdMeshComputationResult r =
+        util.ComputeTriangulatedFaceVaryingPrimvar(src.cdata(), (int)src.size(), type, &out);
+    if (r == HdMeshComputationResult::Unchanged)  // already all triangles
+        return src;
+    if (r == HdMeshComputationResult::Success && out.IsHolding<VtArray<T>>())
         return out.UncheckedGet<VtArray<T>>();
     return {};
 }
@@ -183,6 +214,19 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
         tris = good;
     }
 
+    static const bool debug = getenv("HDPBRT_DEBUG") != nullptr;
+    if (debug) {
+        for (HdInterpolation i : {HdInterpolationConstant, HdInterpolationUniform,
+                                  HdInterpolationVarying, HdInterpolationVertex,
+                                  HdInterpolationFaceVarying})
+            for (const HdPrimvarDescriptor &pv : sd->GetPrimvarDescriptors(id, i))
+                fprintf(stderr, "hdPbrt: %s primvar %s interp %d role %s type %s\n",
+                        id.GetText(), pv.name.GetText(), int(i), pv.role.GetText(),
+                        sd->Get(id, pv.name).GetTypeName().c_str());
+        fprintf(stderr, "hdPbrt: %s scheme %s points %zu\n", id.GetText(),
+                topology.GetScheme().GetText(), points.size());
+    }
+
     // Normals.
     _Primvar nPv = _FindPrimvar(sd, id, {HdTokens->normals});
     VtVec3fArray normals;
@@ -228,6 +272,10 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
         nFaceVarying = false;
     if (uvFaceVarying && uvs.size() != numTris * 3)
         uvFaceVarying = false;
+    if (debug)
+        fprintf(stderr, "hdPbrt: %s tris %zu normals %zu (fv %d v %d) uvs %zu (fv %d v %d)\n",
+                id.GetText(), numTris, normals.size(), nFaceVarying, nVertex, uvs.size(),
+                uvFaceVarying, uvVertex);
     const bool hasN = nVertex || nFaceVarying;
     const bool hasUV = uvVertex || uvFaceVarying;
     const bool unweld = nFaceVarying || uvFaceVarying;
