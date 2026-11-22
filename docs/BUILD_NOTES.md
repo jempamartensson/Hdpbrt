@@ -57,8 +57,26 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
 
 - **Geometry:** meshes (incl. holes, left-handed orientation), UsdGeom implicit shapes
   (converted to meshes by an `HdsiImplicitSurfaceSceneIndex` plugin), point instancers and
-  nested instancers (pbrt ObjectBegin/ObjectInstance), basis curves and points. No volumes
-  or camera motion blur yet.
+  nested instancers (pbrt ObjectBegin/ObjectInstance), basis curves, points and volumes. No
+  camera motion blur yet.
+  - **Volumes:** `Volume` rprims with `openvdbAsset` fields (and `houdiniFieldAsset` fields
+    whose file is on disk; Houdini's in-memory `op:` volumes get a warning: cache them to
+    disk). The field named `density` (else the first) and an optional `temperature` field
+    in the same file are converted to NanoVDB by `hdpbrt_vdb2nvdb` (next to pbrt; cached per
+    file, mtime and grid), which also writes the density's world-space active-voxel bounds.
+    The scene gets `MakeNamedMedium "nanovdb"` under the volume's transform and an
+    outward-facing `interface` box over those bounds (pbrt picks the entered medium from
+    the box normals; an inward box renders nothing). No volume materials: sigma_s =
+    `pbrt:volumeAlbedo` (0.9) x displayColor, sigma_a = 1 - sigma_s, `"float scale"` =
+    `pbrt:volumeDensity` (1); temperature emits only with `pbrt:volumeTemperatureScale` > 0
+    (blackbody of temperature x scale). Volumes don't write depth or ids, don't move and
+    aren't instanced; the camera must be outside them.
+  - **hdpbrt_vdb2nvdb** (`tools/vdb2nvdb.cpp`) is built with the Houdini flavor against
+    `libopenvdb_sesi` (OpenVDB 13) and pbrt's own NanoVDB 32.3 headers
+    (`-DPBRT_SOURCE`), so the file version matches pbrt's reader. pbrt's
+    `OpenToNanoVDB.h` assigns OpenVDB 11+'s 64-bit `nodeCount()` to `uint32_t`, so CMake
+    writes a fixed copy into the build dir. Houdini's toolkit also has a newer NanoVDB:
+    pbrt's include dir must come first. The Blender install links to the Houdini one.
   - **Subdivision:** catmullClark and loop meshes are refined uniformly to
     `pbrt:subdivLevel` (default 2, max 6, 0 = off) with OpenSubdiv through USD's
     `PxOsdRefinerFactory` (creases, corners, holes and interpolation rules from

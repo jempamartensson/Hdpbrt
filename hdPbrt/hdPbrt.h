@@ -23,6 +23,9 @@
 #include "pxr/imaging/hd/mesh.h"
 #include "pxr/imaging/hd/basisCurves.h"
 #include "pxr/imaging/hd/points.h"
+#include "pxr/imaging/hd/volume.h"
+#include "pxr/imaging/hd/field.h"
+#include "pxr/base/gf/range3d.h"
 #include "pxr/imaging/hd/renderDelegate.h"
 #include "pxr/imaging/hd/renderPass.h"
 #include "pxr/imaging/hd/rendererPlugin.h"
@@ -54,6 +57,9 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((xformSamples, "pbrt:xformSamples"))       \
     ((geoSamples, "pbrt:geoSamples"))           \
     ((subdivLevel, "pbrt:subdivLevel"))         \
+    ((volumeDensity, "pbrt:volumeDensity"))     \
+    ((volumeAlbedo, "pbrt:volumeAlbedo"))       \
+    ((volumeTemperatureScale, "pbrt:volumeTemperatureScale")) \
     ((exportPath, "pbrt:exportPath"))           \
     ((pbrtExecutable, "pbrt:executable"))
 
@@ -132,6 +138,7 @@ std::string HdPbrt_Rgb(const GfVec3f &c);
 struct HdPbrtWriteContext {
     std::set<SdfPath> texturesWritten;
     int objectCounter = 0;
+    int volumeCounter = 0;
     size_t numMeshes = 0, numInstances = 0;
 };
 
@@ -253,8 +260,8 @@ public:
     virtual ~HdPbrtGeom();
 
     // Append this prim's pbrt description to the scene.
-    void Write(std::ostream &os, HdRenderIndex &index, TfTokenVector const &renderTags,
-               HdPbrtWriteContext &ctx) const;
+    virtual void Write(std::ostream &os, HdRenderIndex &index, TfTokenVector const &renderTags,
+                       HdPbrtWriteContext &ctx) const;
 
 protected:
     virtual HdRprim const &_Prim() const = 0;
@@ -367,6 +374,50 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// A volume field (openvdbAsset, or houdiniFieldAsset with a file on disk).
+class HdPbrtField final : public HdField {
+public:
+    explicit HdPbrtField(SdfPath const &id);
+    void Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
+              HdDirtyBits *dirtyBits) override;
+    HdDirtyBits GetInitialDirtyBitsMask() const override { return AllDirty; }
+    void Get(std::string *filePath, std::string *gridName) const {
+        std::lock_guard<std::mutex> l(_mutex);
+        *filePath = _filePath;
+        *gridName = _gridName;
+    }
+
+private:
+    mutable std::mutex _mutex;
+    std::string _filePath, _gridName;
+};
+
+// ---------------------------------------------------------------------------
+// A volume: its density field as a pbrt nanovdb medium in an interface box.
+class HdPbrtVolume final : public HdVolume, public HdPbrtGeom {
+public:
+    HdPbrtVolume(SdfPath const &id, HdPbrtRenderDelegate *delegate);
+    ~HdPbrtVolume() override;
+    HdDirtyBits GetInitialDirtyBitsMask() const override;
+    void Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
+              HdDirtyBits *dirtyBits, TfToken const &reprToken) override;
+    void Finalize(HdRenderParam *renderParam) override;
+    void Write(std::ostream &os, HdRenderIndex &index, TfTokenVector const &renderTags,
+               HdPbrtWriteContext &ctx) const override;
+
+protected:
+    HdRprim const &_Prim() const override { return *this; }
+    std::string _Shapes(std::string const &) const override { return ""; }
+    HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override { return bits; }
+    void _InitRepr(TfToken const &reprToken, HdDirtyBits *dirtyBits) override {}
+
+private:
+    std::string _nvdb;   // converted density (+ temperature) grids
+    GfRange3d _bbox;     // density's active voxels, volume object space
+    bool _hasTemperature = false;
+};
+
+// ---------------------------------------------------------------------------
 class HdPbrtLight final : public HdLight {
 public:
     HdPbrtLight(SdfPath const &id, TfToken const &lightType,
@@ -464,6 +515,11 @@ public:
     // Convert a lat-long environment image to pbrt's equal-area square
     // layout (cached). Returns an empty string on failure.
     std::string GetEquiAreaTexture(const std::string &latlong);
+    // Convert an OpenVDB file's density grid (and temperature grid, if named)
+    // to NanoVDB for pbrt's nanovdb medium with hdpbrt_vdb2nvdb (cached).
+    // bbox: the density's active voxels in the file's world space.
+    bool GetNanoVDB(const std::string &vdb, const std::string &densityGrid,
+                    const std::string &temperatureGrid, std::string *nvdb, GfRange3d *bbox);
 
     // Write the full pbrt scene to a file and start rendering it.
     bool StartRender(HdRenderIndex *index, const GfMatrix4d &view,
@@ -495,6 +551,7 @@ private:
     std::atomic<int> _tempCounter{0};
     std::mutex _texMutex;
     std::map<std::string, std::string> _equiAreaCache;
+    std::map<std::string, std::pair<std::string, GfRange3d>> _nanoVdbCache;
     hdpbrt::PbrtSession _session;
     int _renderCount = 0;
     GfVec2f _shutter{0.f, 0.f};

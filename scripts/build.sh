@@ -34,7 +34,7 @@ ninja -C "$WORK/build/pbrt" -j$J pbrt_exe imgtool
 
 # 2. hdPbrt for Houdini 22
 cmake -G Ninja -S "$ROOT" -B "$WORK/build/hdpbrt-houdini" -DHDPBRT_FLAVOR=houdini \
-      -DHFS="$HFS" -DCMAKE_INSTALL_PREFIX="$PREFIX/houdini"
+      -DHFS="$HFS" -DPBRT_SOURCE="$WORK/pbrt-v4" -DCMAKE_INSTALL_PREFIX="$PREFIX/houdini"
 ninja -C "$WORK/build/hdpbrt-houdini" -j$J install
 flavors=houdini
 
@@ -59,5 +59,7 @@ fi
 for f in $flavors; do
   ln -sfn "$WORK/build/pbrt/pbrt" "$PREFIX/$f/pbrt"
   ln -sfn "$WORK/build/pbrt/imgtool" "$PREFIX/$f/imgtool"
+  # The VDB -> NanoVDB converter is built with the Houdini flavor; share it.
+  [ "$f" = houdini ] || ln -sfn "$PREFIX/houdini/hdpbrt_vdb2nvdb" "$PREFIX/$f/hdpbrt_vdb2nvdb"
 done
 echo "built OK: $PREFIX"

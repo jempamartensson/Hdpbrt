@@ -48,6 +48,7 @@ Render settings: `pbrt:pixelSamples`, `pbrt:maxDepth`, `pbrt:integrator`, `pbrt:
 `pbrt:motionBlur` (default on),
 `pbrt:xformSamples` / `pbrt:geoSamples` (motion keys over the shutter, default 2),
 `pbrt:subdivLevel` (uniform subdivision of catmullClark/loop meshes, default 2, 0 = off),
+`pbrt:volumeDensity` (1), `pbrt:volumeAlbedo` (0.9), `pbrt:volumeTemperatureScale` (0: no emission),
 `pbrt:exportPath`.
 
 Environment: `HDPBRT_PBRT_EXECUTABLE`, `HDPBRT_TMPDIR`, `HDPBRT_KEEP_TMP=1`,
@@ -58,7 +59,7 @@ Environment: `HDPBRT_PBRT_EXECUTABLE`, `HDPBRT_TMPDIR`, `HDPBRT_KEEP_TMP=1`,
 
 Meshes (catmullClark/loop subdivision with OpenSubdiv, creases, holes), implicit shapes,
 basis curves (bspline, bezier, catmullRom, linear; tubes or ribbons), points (spheres),
-point instancers; UsdPreviewSurface and MaterialX standard_surface /
+point instancers, volumes (OpenVDB fields as a pbrt NanoVDB medium); UsdPreviewSurface and MaterialX standard_surface /
 open_pbr_surface (mapped to pbrt conductor, dielectric or coateddiffuse) with image textures;
 distant, sphere, rect, disk, cylinder and dome lights; perspective and orthographic cameras,
 depth of field from the camera's fStop and focusDistance (thin lens), transform motion blur
@@ -66,7 +67,8 @@ over the camera shutter (meshes and point instances) and deformation blur for me
 points are time-sampled, with N keys for curved motion (not camera motion);
 color, depth, primId and instanceId AOVs (viewport selection, including point instances).
 Without a dome light the background is transparent, so the host's viewport background shows.
-Not yet: volumes, camera motion blur, light shaping, velocity motion blur.
+Not yet: camera motion blur, light shaping, velocity motion blur, volume materials,
+in-memory Houdini volumes (write VDBs to disk).
 
 ## Tests
 

@@ -29,6 +29,7 @@ add_library(hdPbrt SHARED
   hdPbrt/curves.cpp
   hdPbrt/points.cpp
   hdPbrt/subdiv.cpp
+  hdPbrt/volume.cpp
   hdPbrt/material.cpp
   hdPbrt/light.cpp
   hdPbrt/instancer.cpp
@@ -66,6 +67,28 @@ elseif(HDPBRT_FLAVOR STREQUAL "blender")
   # Python symbols come from the Blender executable at run time.
 else()
   message(FATAL_ERROR "HDPBRT_FLAVOR must be houdini or blender")
+endif()
+
+# hdpbrt_vdb2nvdb: OpenVDB -> NanoVDB for volumes (Houdini flavor; it's a
+# standalone tool, so the Blender flavor can use the same binary). Built with
+# pbrt's own NanoVDB headers (-DPBRT_SOURCE=<pbrt-v4 source>) so the file
+# version matches pbrt's reader; pbrt's OpenToNanoVDB.h predates OpenVDB 11's
+# 64-bit nodeCount(), so a fixed copy is generated.
+set(PBRT_SOURCE "" CACHE PATH "pbrt-v4 source tree (for NanoVDB headers)")
+if(HDPBRT_FLAVOR STREQUAL "houdini" AND PBRT_SOURCE AND EXISTS ${HFS}/dsolib/libopenvdb_sesi.so)
+  set(_nano ${PBRT_SOURCE}/src/ext/openvdb/nanovdb)
+  file(READ ${_nano}/nanovdb/util/OpenToNanoVDB.h _o2n)
+  string(REPLACE "std::vector<uint32_t> nodeCount = openTree.nodeCount();"
+                 "auto nodeCount = openTree.nodeCount();" _o2n "${_o2n}")
+  string(REGEX REPLACE "#include \"([A-Za-z]+\\.h)\"" "#include <nanovdb/util/\\1>" _o2n "${_o2n}")
+  file(WRITE ${CMAKE_BINARY_DIR}/nanovdb-compat/nanovdb/util/OpenToNanoVDB.h "${_o2n}")
+  add_executable(hdpbrt_vdb2nvdb tools/vdb2nvdb.cpp)
+  target_include_directories(hdpbrt_vdb2nvdb SYSTEM BEFORE PRIVATE
+    ${CMAKE_BINARY_DIR}/nanovdb-compat ${_nano} ${HFS}/toolkit/include)
+  target_compile_options(hdpbrt_vdb2nvdb PRIVATE -Wno-deprecated -Wno-deprecated-declarations)
+  target_link_libraries(hdpbrt_vdb2nvdb PRIVATE ${HFS}/dsolib/libopenvdb_sesi.so ${HFS}/dsolib/libtbb.so)
+  set_target_properties(hdpbrt_vdb2nvdb PROPERTIES INSTALL_RPATH "${HFS}/dsolib" BUILD_RPATH "${HFS}/dsolib")
+  install(TARGETS hdpbrt_vdb2nvdb DESTINATION .)
 endif()
 
 configure_file(plugInfo.json.in ${CMAKE_BINARY_DIR}/plugInfo.json @ONLY)

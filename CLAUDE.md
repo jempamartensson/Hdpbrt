@@ -115,7 +115,12 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 
 ## Open items and ideas
 
-- Not translated yet: volumes (next), camera motion blur, light shaping/IES, light linking.
+- Not translated yet: camera motion blur, light shaping/IES, light linking, volume
+  materials (Karma pyro shaders), in-memory Houdini volumes (`op:` paths).
+- Volumes (done 2026-11-22): `volume.cpp` (`HdPbrtField` bprims, `HdPbrtVolume`), converter
+  `tools/vdb2nvdb.cpp` -> `hdpbrt_vdb2nvdb` next to pbrt (Houdini flavor, needs
+  `-DPBRT_SOURCE`; Blender's install links to it). The interface box must face outward.
+  Test: `tests/volume_scene.usda` (uses Houdini's sample cloud.vdb from /opt/hfs22.0).
 - Curves, points and subdivision (done 2026-11-22): `curves.cpp`, `points.cpp`,
   `subdiv.cpp`. All geometry rprims share `HdPbrtGeom` (`geom.cpp`: transform samples,
   visibility, display color, instancing, and `Write()` with material, motion keys and

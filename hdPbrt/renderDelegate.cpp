@@ -67,13 +67,21 @@ std::string HdPbrt_Rgb(const GfVec3f &c)
 // --- delegate ----------------------------------------------------------------
 
 static const TfTokenVector _supportedRprims = {
-    HdPrimTypeTokens->mesh, HdPrimTypeTokens->basisCurves, HdPrimTypeTokens->points};
+    HdPrimTypeTokens->mesh, HdPrimTypeTokens->basisCurves, HdPrimTypeTokens->points,
+    HdPrimTypeTokens->volume};
 static const TfTokenVector _supportedSprims = {
     HdPrimTypeTokens->camera,      HdPrimTypeTokens->material,
     HdPrimTypeTokens->distantLight, HdPrimTypeTokens->sphereLight,
     HdPrimTypeTokens->rectLight,   HdPrimTypeTokens->diskLight,
     HdPrimTypeTokens->cylinderLight, HdPrimTypeTokens->domeLight};
-static const TfTokenVector _supportedBprims = {HdPrimTypeTokens->renderBuffer};
+TF_DEFINE_PRIVATE_TOKENS(_fieldTokens, (openvdbAsset)(houdiniFieldAsset));
+static const TfTokenVector &_SupportedBprims()
+{
+    static const TfTokenVector types = {HdPrimTypeTokens->renderBuffer,
+                                        _fieldTokens->openvdbAsset,
+                                        _fieldTokens->houdiniFieldAsset};
+    return types;
+}
 
 HdPbrtRenderDelegate::HdPbrtRenderDelegate() : HdRenderDelegate() { _Init(); }
 
@@ -107,6 +115,10 @@ void HdPbrtRenderDelegate::_Init()
     add("Deformation Motion Samples", HdPbrtSettingsTokens->geoSamples, VtValue(2));
     add("Subdivision Level (catmullClark/loop meshes, 0 = off)",
         HdPbrtSettingsTokens->subdivLevel, VtValue(2));
+    add("Volume Density Scale", HdPbrtSettingsTokens->volumeDensity, VtValue(1.f));
+    add("Volume Albedo", HdPbrtSettingsTokens->volumeAlbedo, VtValue(0.9f));
+    add("Volume Temperature Scale (Kelvin per unit, 0 = no emission)",
+        HdPbrtSettingsTokens->volumeTemperatureScale, VtValue(0.f));
     add("Export .pbrt Scene To", HdPbrtSettingsTokens->exportPath, VtValue(std::string()));
     _PopulateDefaultSettings(_settingDescriptors);
 
@@ -143,7 +155,7 @@ HdPbrtRenderDelegate::~HdPbrtRenderDelegate()
 
 const TfTokenVector &HdPbrtRenderDelegate::GetSupportedRprimTypes() const { return _supportedRprims; }
 const TfTokenVector &HdPbrtRenderDelegate::GetSupportedSprimTypes() const { return _supportedSprims; }
-const TfTokenVector &HdPbrtRenderDelegate::GetSupportedBprimTypes() const { return _supportedBprims; }
+const TfTokenVector &HdPbrtRenderDelegate::GetSupportedBprimTypes() const { return _SupportedBprims(); }
 
 HdResourceRegistrySharedPtr HdPbrtRenderDelegate::GetResourceRegistry() const
 {
@@ -182,6 +194,11 @@ T HdPbrtRenderDelegate::GetSetting(TfToken const &key, T const &def) const
         if (v.IsHolding<double>()) return (int)v.UncheckedGet<double>();
         if (v.IsHolding<bool>()) return (int)v.UncheckedGet<bool>();
     }
+    if constexpr (std::is_same_v<T, float>) {
+        if (v.IsHolding<double>()) return (float)v.UncheckedGet<double>();
+        if (v.IsHolding<int>()) return (float)v.UncheckedGet<int>();
+        if (v.IsHolding<int64_t>()) return (float)v.UncheckedGet<int64_t>();
+    }
     if constexpr (std::is_same_v<T, bool>) {
         if (v.IsHolding<int>()) return v.UncheckedGet<int>() != 0;
         if (v.IsHolding<int64_t>()) return v.UncheckedGet<int64_t>() != 0;
@@ -195,6 +212,7 @@ T HdPbrtRenderDelegate::GetSetting(TfToken const &key, T const &def) const
 // Used from the render pass too.
 template bool HdPbrtRenderDelegate::GetSetting<bool>(TfToken const &, bool const &) const;
 template int HdPbrtRenderDelegate::GetSetting<int>(TfToken const &, int const &) const;
+template float HdPbrtRenderDelegate::GetSetting<float>(TfToken const &, float const &) const;
 template std::string HdPbrtRenderDelegate::GetSetting<std::string>(TfToken const &,
                                                                    std::string const &) const;
 
@@ -254,6 +272,8 @@ HdRprim *HdPbrtRenderDelegate::CreateRprim(TfToken const &typeId, SdfPath const 
         return new HdPbrtCurves(rprimId, this);
     if (typeId == HdPrimTypeTokens->points)
         return new HdPbrtPoints(rprimId, this);
+    if (typeId == HdPrimTypeTokens->volume)
+        return new HdPbrtVolume(rprimId, this);
     return nullptr;
 }
 
@@ -290,6 +310,8 @@ HdBprim *HdPbrtRenderDelegate::CreateBprim(TfToken const &typeId, SdfPath const 
 {
     if (typeId == HdPrimTypeTokens->renderBuffer)
         return new HdPbrtRenderBuffer(bprimId);
+    if (typeId == _fieldTokens->openvdbAsset || typeId == _fieldTokens->houdiniFieldAsset)
+        return new HdPbrtField(bprimId);
     return nullptr;
 }
 
@@ -398,6 +420,52 @@ std::string HdPbrtRenderDelegate::GetEquiAreaTexture(const std::string &latlong)
     }
     _equiAreaCache[key] = out;
     return out;
+}
+
+bool HdPbrtRenderDelegate::GetNanoVDB(const std::string &vdb, const std::string &densityGrid,
+                                      const std::string &temperatureGrid, std::string *nvdb,
+                                      GfRange3d *bbox)
+{
+    struct stat st;
+    if (stat(vdb.c_str(), &st) != 0) {
+        TF_WARN("hdPbrt: volume file not found: %s", vdb.c_str());
+        return false;
+    }
+    const std::string key = vdb + "@" + std::to_string((long long)st.st_mtime) + "@" +
+                            densityGrid + "@" + temperatureGrid;
+    std::lock_guard<std::mutex> l(_texMutex);
+    auto it = _nanoVdbCache.find(key);
+    if (it == _nanoVdbCache.end()) {
+        std::string tool =
+            std::filesystem::path(_PbrtExecutable()).parent_path() / "hdpbrt_vdb2nvdb";
+        std::string out = NewTempPath("volume", ".nvdb");
+        std::vector<std::string> args = {tool, vdb, out, densityGrid};
+        if (!temperatureGrid.empty())
+            args.push_back(temperatureGrid);
+        GfRange3d range;
+        bool ok = _RunTool(args, NewTempPath("vdb2nvdb", ".log"));
+        if (ok) {
+            ok = false;
+            if (FILE *f = fopen((out + ".bbox").c_str(), "r")) {
+                double v[6];
+                if (fscanf(f, "%lf %lf %lf %lf %lf %lf", &v[0], &v[1], &v[2], &v[3], &v[4],
+                           &v[5]) == 6) {
+                    range = GfRange3d(GfVec3d(v[0], v[1], v[2]), GfVec3d(v[3], v[4], v[5]));
+                    ok = !range.IsEmpty();
+                }
+                fclose(f);
+            }
+        }
+        if (!ok) {
+            TF_WARN("hdPbrt: converting grid \"%s\" of %s to NanoVDB failed (%s)",
+                    densityGrid.c_str(), vdb.c_str(), tool.c_str());
+            out.clear();
+        }
+        it = _nanoVdbCache.emplace(key, std::make_pair(out, range)).first;
+    }
+    *nvdb = it->second.first;
+    *bbox = it->second.second;
+    return !nvdb->empty();
 }
 
 bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &view,
