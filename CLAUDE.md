@@ -1,0 +1,104 @@
+# hdPbrt: working notes for Claude Code
+
+hdPbrt is a Hydra render delegate for pbrt-v4, used from Houdini 22 Solaris (Apprentice) and
+Blender 5.3. It is CPU only, on a Strix Halo machine (gfx1151, 128 GB). This repo is
+`git@github.com:jempamartensson/Hdpbrt.git` (branch `main`). It pushes over SSH with
+`~/.ssh/id_ed25519`, which is on Jens's GitHub. There are no HTTPS credentials and no `gh`.
+
+Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hydra/BUILD_NOTES.md`).
+
+## Layout on this machine
+
+- `~/dev/pbrt_hydra/`: the working tree.
+  - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (2 commits, the same as `patches/`).
+  - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
+    the Blender flavor.
+  - `build/pbrt`, `build/hdpbrt-houdini`, `build/hdpbrt-blender`: build dirs.
+  - `install/houdini`, `install/blender`: hdPbrt.so, plugInfo.json, and symlinks to pbrt and
+    imgtool.
+  - `houdini/dso/usd_plugins/`: what Houdini loads through `HOUDINI_PATH`.
+  - `build.sh`: full local rebuild. The repo's `scripts/build.sh` is the portable version.
+  - `test/`: scenes, renders, `viewport/` (live-viewport test).
+- Houdini package: `~/dev/houdini_packages/hdpbrt_pkg`. rez package: `hdpbrt-0.1.0` in
+  `~/dev/rez_packages`. Jens runs `rez env houdini-22 hdpbrt -- houdini`.
+- Blender add-on symlink: `~/.config/blender/5.3/scripts/addons/hydra_pbrt`.
+
+## How it works (short)
+
+Hydra prims become PLY files plus a `.pbrt` scene. pbrt runs as a child process
+(`pbrt --display-server 127.0.0.1:<port>`) and streams its progressive image over the tev
+protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
+1. Exit when `PBRT_PARENT_PID` dies.
+2. RGBFilm `"bool hdpbrtdepth" true` records the nearest first-hit camera-space z and streams
+   it as display channel `Z`.
+
+## Done in the 2026-11-22 session
+
+1. **Blank Solaris viewport fixed.** Houdini's viewport (HdxTaskController, "Houdini VK")
+   draws nothing from a delegate without a `depth` AOV, even when color is filled. The
+   delegate now offers `depth` (Float32) and `primId`/`instanceId`/`elementId` (Int32, -1).
+2. **Real depth.** It comes from patch 2 and is converted to NDC [0,1] with the projection
+   matrix in `HdPbrtRenderPass::_ToNdcDepth`. **Houdini VK expects reversed depth (1 = near,
+   0 = far)**: with standard depth, the grid and handles disappear. The Houdini build reverses
+   (`HDPBRT_HOUDINI` define), Blender does not, and `HDPBRT_REVERSED_DEPTH=0/1` overrides.
+   Verified: the grid is hidden by the top of the sphere and shows in front of its lower half.
+3. `HDPBRT_DEBUG=1` prints the AOV bindings (name, format, size) on every execute, plus
+   snapshot and depth ranges.
+4. The repo was set up and pushed: README, Apache-2.0 LICENSE, `patches/`, `scripts/build.sh`
+   (only syntax-checked, never run from a fresh clone), docs, tests.
+
+## Rules and gotchas
+
+- Build at no more than `-j8`, inside a memory cap:
+  `systemd-run --user --scope -p MemoryMax=64G -p MemorySwapMax=0 ...`. No sudo.
+- **Never `ninja install` over `install/houdini/hdPbrt.so` while Houdini runs**, because it
+  overwrites the mapped file. Build, then `cp` to a temp name and `mv` it over the old one.
+  Jens has to restart Houdini to load a new build.
+- Never use `pkill -f` with a pattern that also appears in your own command line, because it
+  kills your shell. Kill by PID.
+- Houdini ignores `PXR_PLUGINPATH_NAME` set from a package. Register through `HOUDINI_PATH`
+  and `dso/usd_plugins/plugInfo.json`.
+- hython FrameRecorder tests (`test/hydra_render.py`) don't catch viewport problems. Use the
+  live-viewport test.
+- Husk can't be tested: the Apprentice licence refuses third-party delegates.
+
+## Live-viewport test (without touching Jens's desktop)
+
+1. Start a private headless compositor with a rootful X server. The rootless Xwayland of a
+   headless gnome-shell hangs.
+   ```bash
+   # both.sh, run as: setsid dbus-run-session -- ./both.sh &
+   gnome-shell --headless --virtual-monitor 1920x1080 --wayland --no-x11 --wayland-display=wl-hdtest &
+   sleep 5; WAYLAND_DISPLAY=wl-hdtest Xwayland :7 -geometry 1920x1080 -fullscreen -ac -noreset &
+   wait
+   ```
+2. Run Houdini on `DISPLAY=:7` with `QT_QPA_PLATFORM=xcb`, its own
+   `HOUDINI_USER_PREF_DIR=<dir>/houdini__HVER__`, and
+   `HOUDINI_SCRIPT_PATH=<dir with 123.py>:&`. The `123.py` runs
+   `test/viewport/vp_test.py`. That script builds a scene (sphere, ground, sun, dome) with a
+   Python Script LOP, switches the viewer to the renderer named in `VPT_RENDERER`, waits
+   `VPT_WAIT` seconds, and flipbooks to `VPT_OUT`. See `test/viewport/run_real.sh`; its
+   scratchpad paths need replacing.
+3. To test a build without replacing the installed one, point `HOUDINI_PATH` at a temporary
+   dir whose `dso/usd_plugins/plugInfo.json` includes a test install.
+4. Afterwards, kill gnome-shell and Xwayland :7 by PID.
+   If the shell runs from the VS Code snap, gnome-shell aborts with "Settings schema
+   'org.gnome.desktop.privacy' does not contain a key named 'privacy-screen'". Run
+   `unset GSETTINGS_SCHEMA_DIR; export XDG_DATA_DIRS=/usr/share/ubuntu:/usr/share/gnome:/usr/local/share/:/usr/share/`
+   in both.sh and in the Houdini run script.
+5. The Houdini segfault on `hou.exit()` from the startup script is Houdini's own and harmless.
+
+## Open items and ideas
+
+- Selection: fill `primId`/`instanceId` with real ids. pbrt would have to stream a per-pixel
+  shape id, as another film channel similar to `Z`.
+- Alpha: the background is opaque. Coverage could become an `A` channel, so Houdini's viewport
+  background shows through when there is no dome.
+- Not translated yet: curves, points, volumes, subdivision refinement, motion blur, depth of
+  field, light shaping/IES, light linking. Implicit spheres are coarse.
+- pbrt's coateddiffuse looks darker and more saturated than Karma's or Cycles' diffuse.
+- Jens's own test scene (a 1×1 rect light about 8 units away, no dome) renders almost black.
+  That is the scene, not a bug.
+- `scripts/build.sh` has never run from a clean clone (pbrt clone plus submodules is a large
+  download; cap downloads with `curl --limit-rate` style limits).
