@@ -116,6 +116,11 @@ void HdPbrt_SampleXform(F &&sample, HdTimeSampleArray<GfMatrix4d, 4> *out)
     *out = dense;
 }
 
+// Tabulate an IES profile (angle scale and normalization applied) as the
+// one-channel theta x phi table pbrt's light shaping reads (patch 8).
+bool HdPbrt_WriteIESTable(const std::string &iesPath, float angleScale, bool normalize,
+                          const std::string &outPfm);
+
 // Thin-lens parameters for pbrt's perspective camera, in world units.
 // lensRadius 0 = pinhole (no depth of field).
 struct HdPbrtLens {
@@ -535,6 +540,8 @@ public:
     // Convert an OpenVDB file's density grid (and temperature grid, if named)
     // to NanoVDB for pbrt's nanovdb medium with hdpbrt_vdb2nvdb (cached).
     // bbox: the density's active voxels in the file's world space.
+    // HdPbrt_WriteIESTable, cached per file, mtime, angle scale and normalize.
+    std::string GetIESTable(const std::string &ies, float angleScale, bool normalize);
     bool GetNanoVDB(const std::string &vdb, const std::string &densityGrid,
                     const std::string &temperatureGrid, std::string *nvdb, GfRange3d *bbox);
 
@@ -570,6 +577,7 @@ private:
     std::mutex _texMutex;
     std::map<std::string, std::string> _equiAreaCache;
     std::map<std::string, std::pair<std::string, GfRange3d>> _nanoVdbCache;
+    std::map<std::string, std::string> _iesCache;
     hdpbrt::PbrtSession _session;
     int _renderCount = 0;
     GfVec2f _shutter{0.f, 0.f};

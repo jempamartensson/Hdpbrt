@@ -1,0 +1,87 @@
+#usda 1.0
+# Light shaping: four lights pointing down at a ground plane.
+#   left:   sphere light, cone 25 deg, softness 0.4
+#   middle: rect light, focus 20, orange focus tint
+#   right:  sphere light with ring.ies (bright center, dark gap, ring)
+#   front:  point light (treatAsPoint) with lobes.ies (brighter toward phi = 0)
+# hython hydra_render.py HdPbrtRendererPlugin out.png shaping_scene.usda
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Mesh "ground"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-6, 0, 4), (6, 0, 4), (6, 0, -4), (-6, 0, -4)]
+        uniform token subdivisionScheme = "none"
+        color3f[] primvars:displayColor = [(0.6, 0.6, 0.6)]
+    }
+
+    def SphereLight "cone" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:radius = 0.05
+        float inputs:intensity = 300
+        float inputs:shaping:cone:angle = 25
+        float inputs:shaping:cone:softness = 0.4
+        double3 xformOp:translate = (-3.5, 3, -1)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def RectLight "focus" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:width = 0.4
+        float inputs:height = 0.4
+        float inputs:intensity = 60
+        float inputs:shaping:focus = 20
+        color3f inputs:shaping:focusTint = (1, 0.35, 0)
+        double3 xformOp:translate = (0, 3, -1)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def SphereLight "ring" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:radius = 0.05
+        float inputs:intensity = 1
+        asset inputs:shaping:ies:file = @./ring.ies@
+        double3 xformOp:translate = (3.5, 3, -1)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def SphereLight "lobes" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        bool treatAsPoint = 1
+        float inputs:intensity = 0.02
+        asset inputs:shaping:ies:file = @./lobes.ies@
+        double3 xformOp:translate = (0, 2, 2)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def DomeLight "sky"
+    {
+        float inputs:intensity = 0.03
+    }
+
+    def Camera "cam"
+    {
+        float focalLength = 18
+        float xformOp:rotateX = -60
+        double3 xformOp:translate = (0, 7.5, 4.5)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}

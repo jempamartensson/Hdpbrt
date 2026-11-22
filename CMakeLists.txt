@@ -31,6 +31,8 @@ add_library(hdPbrt SHARED
   hdPbrt/subdiv.cpp
   hdPbrt/volume.cpp
   hdPbrt/camera.cpp
+  hdPbrt/ies.cpp
+  third_party/cycles_ies/ies.cpp
   hdPbrt/material.cpp
   hdPbrt/light.cpp
   hdPbrt/instancer.cpp

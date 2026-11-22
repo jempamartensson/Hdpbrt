@@ -17,12 +17,12 @@ errors, so it runs as a separate process instead:
 3. pbrt streams its progressive image, plus first-hit depth, over its tev display-server
    protocol. The final image is read from the PFM pbrt writes when it exits.
 
-pbrt needs the seven patches in `patches/` (against pbrt-v4 `20e41fd`): pbrt exits when its
+pbrt needs the eight patches in `patches/` (against pbrt-v4 `20e41fd`): pbrt exits when its
 parent process dies, its RGB film can record and stream depth, per-pixel prim/instance
 ids (selection) and coverage (alpha) for the viewport, triangle meshes can deform over
 the shutter (deformation motion blur), and instances and meshes take N motion keys (curved
 motion blur), and animated transforms with a reflection interpolate correctly (moving
-cameras).
+cameras), and area and point lights take USD light shaping (cone, focus, IES).
 
 ## Build
 
@@ -62,13 +62,14 @@ Meshes (catmullClark/loop subdivision with OpenSubdiv, creases, holes), implicit
 basis curves (bspline, bezier, catmullRom, linear; tubes or ribbons), points (spheres),
 point instancers, volumes (OpenVDB fields as a pbrt NanoVDB medium); UsdPreviewSurface and MaterialX standard_surface /
 open_pbr_surface (mapped to pbrt conductor, dielectric or coateddiffuse) with image textures;
-distant, sphere, rect, disk, cylinder and dome lights; perspective and orthographic cameras,
+distant, sphere, rect, disk, cylinder and dome lights, light shaping (cone, focus, IES
+profiles) on sphere, rect and disk lights; perspective and orthographic cameras,
 depth of field from the camera's fStop and focusDistance (thin lens), transform motion blur
 over the camera shutter (meshes and point instances) and deformation blur for meshes whose
 points are time-sampled, with N keys for curved motion, and camera motion (two keys);
 color, depth, primId and instanceId AOVs (viewport selection, including point instances).
 Without a dome light the background is transparent, so the host's viewport background shows.
-Not yet: light shaping, velocity motion blur, volume materials,
+Not yet: velocity motion blur, volume materials,
 in-memory Houdini volumes (write VDBs to disk).
 
 ## Tests
@@ -76,6 +77,11 @@ in-memory Houdini volumes (write VDBs to disk).
 `tests/`: hython and Blender render scripts and a test scene. `tests/viewport/vp_test.py`
 drives a live Solaris viewport and flipbooks it (see the Tests section of the build notes for
 running it in a headless compositor).
+
+## Third-party code
+
+`third_party/cycles_ies`: the IES profile parser from Cycles (Apache-2.0, Blender
+Foundation), as vendored in OpenUSD.
 
 ## License
 

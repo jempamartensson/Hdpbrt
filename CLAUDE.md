@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (7 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (8 commits, the same as `patches/`;
     regenerate with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o patches`).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
     the Blender flavor.
@@ -53,6 +53,9 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 7. `Transform::Decompose` handles reflections (pbrt had `XXX TODO FIXME deal with flip`):
    an improper rotation is negated so the reflection lands in the scale. Without it an
    animated camera (our camera matrix flips z) looks the wrong way.
+8. USD light shaping on `DiffuseAreaLight` and `PointLight` (`HdPbrtShaping` in lights.h):
+   `shapingfocus`, `shapingfocustint`, `shapingconeangle` (degrees), `shapingconesoftness`,
+   `shapingies` (1-channel PFM, u = phi/2pi, v = theta/pi). Axis -z in light space.
 
 ## Done in the 2026-11-22 session
 
@@ -124,7 +127,16 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
   (`ActiveTransform StartTime/EndTime`, `TransformTimes` before `Camera`). pbrt cameras
   take two keys only, so camera motion is linear. Test: `tests/camera_motion.usda` (the
   camera tracks the red sphere: sphere sharp, the rest streaks).
-- Not translated yet: light shaping/IES, light linking, volume
+- Light shaping (done 2026-11-22): `light.cpp` writes shaping params only for authored
+  values (ShapingAPI's default cone 90 = hemisphere, per the spec); not on cylinder lights
+  (their pbrt shape is rotated). IES: Cycles' parser (`third_party/cycles_ies`, Apache-2.0;
+  not USD's pxrIES, which is under USD's license), our own eval/power in `ies.cpp`
+  following hdEmbree's conventions (theta from the light axis; phi of the vector toward the
+  light; normalize divides by the average intensity), tabulated 180x180 into a PFM. The
+  phi orientation follows hdEmbree and wasn't checked against Karma. Tests:
+  `tests/shaping_scene.usda` with synthetic `ring.ies` / `lobes.ies`. A profile whose
+  intensity varies with phi at theta 0 shows a seam through the nadir; that's the profile.
+- Not translated yet: light linking, volume
   materials (Karma pyro shaders), in-memory Houdini volumes (`op:` paths).
 - Volumes (done 2026-11-22): `volume.cpp` (`HdPbrtField` bprims, `HdPbrtVolume`), converter
   `tools/vdb2nvdb.cpp` -> `hdpbrt_vdb2nvdb` next to pbrt (Houdini flavor, needs

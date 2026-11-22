@@ -1,0 +1,195 @@
+From a10db45b0f34eb75284db4fa2aab8101e7f1056b Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sun, 22 Nov 2026 19:30:21 +0100
+Subject: [PATCH 8/8] USD light shaping on diffuse area lights and point lights
+ (for hdPbrt)
+
+"float shapingfocus", "rgb shapingfocustint", "float shapingconeangle",
+"float shapingconesoftness" and "string shapingies" (a one-channel theta x phi table
+image) multiply the emission by UsdLuxShapingAPI's shaping factor, evaluated in the
+light's frame with -z as the axis.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/lights.cpp | 41 ++++++++++++++++++++++++--
+ src/pbrt/lights.h   | 71 +++++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 108 insertions(+), 4 deletions(-)
+
+diff --git a/src/pbrt/lights.cpp b/src/pbrt/lights.cpp
+index 7df3178..bb2f444 100644
+--- a/src/pbrt/lights.cpp
++++ b/src/pbrt/lights.cpp
+@@ -209,7 +209,42 @@ PointLight *PointLight::Create(const Transform &renderFromLight, Medium medium,
+     Transform tf = Translate(Vector3f(from.x, from.y, from.z));
+     Transform finalRenderFromLight(renderFromLight * tf);
+ 
+-    return alloc.new_object<PointLight>(finalRenderFromLight, medium, I, sc);
++    PointLight *light = alloc.new_object<PointLight>(finalRenderFromLight, medium, I, sc);
++    light->shaping = HdPbrtShaping::Create(parameters, colorSpace, loc, alloc);  // hdPbrt
++    return light;
++}
++
++// hdPbrt: HdPbrtShaping Method Definitions
++HdPbrtShaping HdPbrtShaping::Create(const ParameterDictionary &parameters,
++                                    const RGBColorSpace *colorSpace, const FileLoc *loc,
++                                    Allocator alloc) {
++    HdPbrtShaping s;
++    s.focus = std::max<Float>(0, parameters.GetOneFloat("shapingfocus", 0));
++    RGB tintRGB(0, 0, 0);
++    std::vector<RGB> rgbs = parameters.GetRGBArray("shapingfocustint");
++    if (!rgbs.empty())
++        tintRGB = rgbs[0];
++    if (s.focus > 0 && (tintRGB.r > 0 || tintRGB.g > 0 || tintRGB.b > 0))
++        s.focusTint = alloc.new_object<RGBUnboundedSpectrum>(*colorSpace, ClampZero(tintRGB));
++    const Float angle = parameters.GetOneFloat("shapingconeangle", 180);
++    const Float softness = Clamp(parameters.GetOneFloat("shapingconesoftness", 0), 0, 1);
++    if (angle < 180) {
++        s.coneCutoff = Radians(std::max<Float>(angle, 0));
++        s.coneSmoothStart = Lerp(softness, s.coneCutoff, Float(0));
++    }
++    std::string ies = ResolveFilename(parameters.GetOneString("shapingies", ""));
++    if (!ies.empty()) {
++        ImageAndMetadata im = Image::Read(ies, alloc);
++        if (im.image.NChannels() < 1)
++            Warning(loc, "%s: can't read the IES table; ignored.", ies);
++        else
++            s.ies = im.image.SelectChannels(im.image.AllChannelsDesc().size() == 1
++                                                ? im.image.AllChannelsDesc()
++                                                : im.image.GetChannelDesc({"R"}),
++                                            alloc);
++    }
++    s.active = s.focus > 0 || s.coneCutoff < Pi || bool(s.ies);
++    return s;
+ }
+ 
+ // DistantLight Method Definitions
+@@ -936,9 +971,11 @@ DiffuseAreaLight *DiffuseAreaLight::Create(const Transform &renderFromLight,
+         scale *= phi_v / k_e;
+     }
+ 
+-    return alloc.new_object<DiffuseAreaLight>(renderFromLight, medium, L, scale, shape,
++    DiffuseAreaLight *light = alloc.new_object<DiffuseAreaLight>(renderFromLight, medium, L, scale, shape,
+                                               alphaTex, std::move(image), imageColorSpace,
+                                               twoSided);
++    light->shaping = HdPbrtShaping::Create(parameters, colorSpace, loc, alloc);  // hdPbrt
++    return light;
+ }
+ 
+ // UniformInfiniteLight Method Definitions
+diff --git a/src/pbrt/lights.h b/src/pbrt/lights.h
+index 76caca7..3c0d962 100644
+--- a/src/pbrt/lights.h
++++ b/src/pbrt/lights.h
+@@ -185,6 +185,62 @@ class LightBase {
+     static InternCache<DenselySampledSpectrum> *spectrumCache;
+ };
+ 
++// hdPbrt: HdPbrtShaping Definition
++// USD light shaping (UsdLuxShapingAPI) as a multiplier on a light's emission:
++// focus and focus tint, cone angle and softness, and an IES profile given as a
++// one-channel table image (u = phi / 2pi, v = theta / pi, theta measured from
++// the light's axis). The light's axis is -z in light space. Parameters:
++// "float shapingfocus", "rgb shapingfocustint", "float shapingconeangle"
++// (degrees, 180 = no cone), "float shapingconesoftness", "string shapingies".
++struct HdPbrtShaping {
++    static HdPbrtShaping Create(const ParameterDictionary &parameters,
++                                const RGBColorSpace *colorSpace, const FileLoc *loc,
++                                Allocator alloc);
++
++    // wLight: emission direction (away from the light) in light space.
++    PBRT_CPU_GPU
++    SampledSpectrum Eval(Vector3f wLight, const SampledWavelengths &lambda) const {
++        SampledSpectrum f(1.f);
++        if (!active)
++            return f;
++        const Vector3f e = Normalize(wLight);
++        const Float cosOff = -e.z;
++        if (focus > 0) {
++            // lerp(|cos|^focus, focusTint, white)
++            const Float ff = std::pow(std::abs(cosOff), focus);
++            if (focusTint)
++                f = focusTint->Sample(lambda) * (1 - ff) + SampledSpectrum(ff);
++            else
++                f = SampledSpectrum(ff);
++        }
++        const Float theta = SafeACos(cosOff);
++        if (coneCutoff < Pi) {
++            Float s;
++            if (coneSmoothStart >= coneCutoff)
++                s = theta <= coneCutoff ? 0 : 1;
++            else
++                s = SmoothStep(theta, coneSmoothStart, coneCutoff);
++            f *= 1 - s;
++        }
++        if (ies) {
++            // Direction toward the light, as USD's reference (hdEmbree) does.
++            Float phi = std::atan2(-e.y, -e.x);
++            if (phi < 0)
++                phi += 2 * Pi;
++            const Float v = ies.BilerpChannel(Point2f(phi / (2 * Pi), theta / Pi), 0,
++                                              WrapMode2D(WrapMode::Repeat, WrapMode::Clamp));
++            f *= std::max<Float>(v, 0);
++        }
++        return f;
++    }
++
++    bool active = false;
++    Float focus = 0;
++    const RGBUnboundedSpectrum *focusTint = nullptr;  // null: black
++    Float coneCutoff = Pi, coneSmoothStart = Pi;    // radians
++    Image ies;
++};
++
+ // PointLight Definition
+ class PointLight : public LightBase {
+   public:
+@@ -224,6 +280,8 @@ class PointLight : public LightBase {
+         Point3f p = renderFromLight(Point3f(0, 0, 0));
+         Vector3f wi = Normalize(p - ctx.p());
+         SampledSpectrum Li = scale * I->Sample(lambda) / DistanceSquared(p, ctx.p());
++        if (shaping.active)  // hdPbrt
++            Li *= shaping.Eval(renderFromLight.ApplyInverse(-wi), lambda);
+         return LightLiSample(Li, wi, 1, Interaction(p, &mediumInterface));
+     }
+ 
+@@ -232,6 +290,8 @@ class PointLight : public LightBase {
+         return 0;
+     }
+ 
++    HdPbrtShaping shaping;  // hdPbrt
++
+   private:
+     // PointLight Private Members
+     const DenselySampledSpectrum *I;
+@@ -446,6 +506,7 @@ class DiffuseAreaLight : public LightBase {
+         if (AlphaMasked(Interaction(p, uv)))
+             return SampledSpectrum(0.f);
+ 
++        SampledSpectrum Le;
+         if (image) {
+             // Return _DiffuseAreaLight_ emission using image
+             RGB rgb;
+@@ -453,12 +514,18 @@ class DiffuseAreaLight : public LightBase {
+             for (int c = 0; c < 3; ++c)
+                 rgb[c] = image.BilerpChannel(uv, c);
+             RGBIlluminantSpectrum spec(*imageColorSpace, ClampZero(rgb));
+-            return scale * spec.Sample(lambda);
++            Le = scale * spec.Sample(lambda);
+ 
+         } else
+-            return scale * Lemit->Sample(lambda);
++            Le = scale * Lemit->Sample(lambda);
++        // hdPbrt: USD light shaping, by the emission direction in light space.
++        if (shaping.active)
++            Le *= shaping.Eval(renderFromLight.ApplyInverse(w), lambda);
++        return Le;
+     }
+ 
++    HdPbrtShaping shaping;  // hdPbrt
++
+     PBRT_CPU_GPU
+     pstd::optional<LightLiSample> SampleLi(LightSampleContext ctx, Point2f u,
+                                            SampledWavelengths lambda,
+-- 
+2.43.0
+

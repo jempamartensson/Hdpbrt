@@ -120,6 +120,49 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
     const float scale = intensity * std::exp2(exposure);
     GfVec3f L = color * scale;
 
+    // Light shaping (UsdLuxShapingAPI), written only for authored values: pbrt
+    // patch 8 multiplies the emission of area and point lights by it.
+    std::ostringstream sh;
+    {
+        auto has = [&](TfToken const &t) {
+            return !sd->GetLightParamValue(id, t).IsEmpty();
+        };
+        if (has(HdLightTokens->shapingFocus)) {
+            const float focus = _Get<float>(sd, id, HdLightTokens->shapingFocus, 0.f);
+            if (focus > 0) {
+                sh << " \"float shapingfocus\" " << focus;
+                const GfVec3f tint =
+                    _Get<GfVec3f>(sd, id, HdLightTokens->shapingFocusTint, GfVec3f(0));
+                if (tint != GfVec3f(0))
+                    sh << " \"rgb shapingfocustint\" " << HdPbrt_Rgb(tint);
+            }
+        }
+        if (has(HdLightTokens->shapingConeAngle)) {
+            const float angle = _Get<float>(sd, id, HdLightTokens->shapingConeAngle, 180.f);
+            if (angle < 180.f) {
+                sh << " \"float shapingconeangle\" " << angle;
+                const float soft =
+                    _Get<float>(sd, id, HdLightTokens->shapingConeSoftness, 0.f);
+                if (soft > 0)
+                    sh << " \"float shapingconesoftness\" " << soft;
+            }
+        }
+        VtValue iv = sd->GetLightParamValue(id, HdLightTokens->shapingIesFile);
+        if (iv.IsHolding<SdfAssetPath>()) {
+            const SdfAssetPath &a = iv.UncheckedGet<SdfAssetPath>();
+            const std::string ies =
+                a.GetResolvedPath().empty() ? a.GetAssetPath() : a.GetResolvedPath();
+            if (!ies.empty()) {
+                const std::string table = _delegate->GetIESTable(
+                    ies, _Get<float>(sd, id, HdLightTokens->shapingIesAngleScale, 0.f),
+                    _Get<bool>(sd, id, HdLightTokens->shapingIesNormalize, false));
+                if (!table.empty())
+                    sh << " \"string shapingies\" " << HdPbrt_Quote(table);
+            }
+        }
+    }
+    const std::string shaping = sh.str();
+
     os << "# light " << id.GetString() << "\n";
     auto areaHeader = [&](double area) {
         GfVec3f Le = L;
@@ -127,7 +170,8 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
             Le /= float(area);
         os << "AttributeBegin\n  Transform " << HdPbrt_Matrix(xf) << "\n"
            << "  Material \"diffuse\" \"rgb reflectance\" [0 0 0]\n"
-           << "  AreaLightSource \"diffuse\" \"rgb L\" " << HdPbrt_Rgb(Le) << "\n";
+           << "  AreaLightSource \"diffuse\" \"rgb L\" " << HdPbrt_Rgb(Le)
+           << (_type == HdPrimTypeTokens->cylinderLight ? std::string() : shaping) << "\n";
     };
 
     if (_type == HdPrimTypeTokens->distantLight) {
@@ -142,7 +186,8 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
             float rr = r > 0 ? r : 1.f;
             GfVec3f I = normalize ? L / float(4 * M_PI) : L * float(M_PI * rr * rr);
             os << "AttributeBegin\n  Transform " << HdPbrt_Matrix(xf) << "\n"
-               << "  LightSource \"point\" \"rgb I\" " << HdPbrt_Rgb(I) << "\nAttributeEnd\n";
+               << "  LightSource \"point\" \"rgb I\" " << HdPbrt_Rgb(I) << shaping
+               << "\nAttributeEnd\n";
         } else {
             areaHeader(4 * M_PI * r * r * _ScaleUniform2(xf));
             os << "  Shape \"sphere\" \"float radius\" " << r << "\nAttributeEnd\n";

@@ -422,6 +422,29 @@ std::string HdPbrtRenderDelegate::GetEquiAreaTexture(const std::string &latlong)
     return out;
 }
 
+std::string HdPbrtRenderDelegate::GetIESTable(const std::string &ies, float angleScale,
+                                              bool normalize)
+{
+    struct stat st;
+    if (stat(ies.c_str(), &st) != 0) {
+        TF_WARN("hdPbrt: IES file not found: %s", ies.c_str());
+        return {};
+    }
+    const std::string key = ies + "@" + std::to_string((long long)st.st_mtime) + "@" +
+                            TfStringify(angleScale) + "@" + (normalize ? "1" : "0");
+    std::lock_guard<std::mutex> l(_texMutex);
+    auto it = _iesCache.find(key);
+    if (it != _iesCache.end())
+        return it->second;
+    std::string out = NewTempPath("ies", ".pfm");
+    if (!HdPbrt_WriteIESTable(ies, angleScale, normalize, out)) {
+        TF_WARN("hdPbrt: could not read IES profile %s", ies.c_str());
+        out.clear();
+    }
+    _iesCache[key] = out;
+    return out;
+}
+
 bool HdPbrtRenderDelegate::GetNanoVDB(const std::string &vdb, const std::string &densityGrid,
                                       const std::string &temperatureGrid, std::string *nvdb,
                                       GfRange3d *bbox)

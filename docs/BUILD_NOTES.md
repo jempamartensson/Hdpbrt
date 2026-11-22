@@ -110,6 +110,16 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   colorTemperature, normalize. No shaping/IES, no light-linking.
   The default lights HdxTaskController adds (GlfSimpleLight camera light at intensity 15000)
   are ignored; a scene without lights gets a uniform white environment.
+- **Light shaping** (UsdLuxShapingAPI, pbrt patch 8): focus and focus tint, cone angle and
+  softness, and IES profiles on sphere (area and point), rect and disk lights, applied as a
+  multiplier on the emission in the light's frame (axis -z), following the spec and USD's
+  reference implementation in hdEmbree. Written only for authored values; the API's
+  default cone of 90 degrees limits a light to its hemisphere, as the spec says. IES files
+  are parsed with Cycles' parser (`third_party/cycles_ies`), evaluated with the angle scale
+  and optional normalization (divide by the average intensity over the covered
+  (hemi)sphere), and tabulated into a 180x180 one-channel PFM that pbrt samples
+  bilinearly. Raw candela values multiply the light's color, as in hdEmbree. Not on
+  cylinder lights. pbrt's light sampling ignores shaping, so tight cones are noisier.
 - **Camera:** the render pass state's view and projection (so viewport framing and window
   policy match), perspective and orthographic. Depth of field from the active HdCamera:
   fStop > 0 and focusDistance > 0 give pbrt's thin lens (`lensradius` = focalLength /
@@ -175,7 +185,7 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
 
 ## Layout (~/dev/pbrt_hydra)
 
-- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth, id and alpha channels, deformation blur, N-key motion, Decompose reflections).
+- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth, id and alpha channels, deformation blur, N-key motion, Decompose reflections, light shaping).
 - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`: headers for the Blender build.
   `src/usd-blender-generated/pxr/pxr.h`: pxr.h filled in for Blender's USD
   (internal namespace `pxrBlender_v26_08`, version 2608).
