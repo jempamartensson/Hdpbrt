@@ -117,9 +117,16 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   divides by pi sin^2(half angle), making intensity the illuminance in lux. Before this, a
   default distant light was ~15000x too bright. Checked against Typhoon's usdlux suite
   (326/328 frames within 5%; the 2 others are reference noise, `tests/typhoon/`).
-- **Shutter and brightness:** pbrt multiplies the image by (shutterclose - shutteropen) x
-  iso / 100; with motion blur the film gets `iso` = 100 / shutter length so the shutter
-  doesn't change the brightness.
+- **Camera exposure and the shutter:** pbrt multiplies the image by (shutterclose -
+  shutteropen) x iso / 100. The film gets `iso` = 100 x exposureScale / shutter length (shutter
+  length 1 without motion blur), so the motion-blur shutter doesn't change the brightness and
+  the image is multiplied by the camera's `HdCamera::GetLinearExposureScale()`: responsivity
+  x exposure:time x (exposure:iso / 100) x 2^exposure / exposure:fStop^2 (UsdGeomCamera's
+  exposure model, separate from the depth-of-field fStop). Applied when the render pass has
+  exposure compensation enabled (Hydra's default) and the `enableExposureCompensation`
+  render setting is on, as in Typhoon. Checked with `tests/typhoon/exposure_scene.usda`
+  (Sunny 16 gives mid grey; hdPbrt and Typhoon agree to 4 decimals). Houdini's free camera
+  has scale 1.
   The default lights HdxTaskController adds (GlfSimpleLight camera light at intensity 15000)
   are ignored; a scene without lights gets a uniform white environment.
 - **Light shaping** (UsdLuxShapingAPI, pbrt patch 8): focus and focus tint, cone angle and

@@ -1,0 +1,151 @@
+#usda 1.0
+# Camera exposure ("Sunny 16"): an 18% grey card under a 100,000 lux sun
+# (normalized distant light, straight down), seen from straight above.
+# Expected pixel value = 0.18 * 100000 / pi * linearExposureScale, where
+# linearExposureScale = responsivity * time * (iso / 100) * 2^exposure / fStop^2:
+#   frame 1  ISO 100, 1/100 s, f/16         -> 0.2238  (Sunny 16: mid grey)
+#   frame 2  frame 1 with exposure +1       -> 0.4476
+#   frame 3  ISO 200                        -> 0.4476
+#   frame 4  1/50 s                         -> 0.4476
+#   frame 5  f/11                           -> 0.4735
+#   frame 6  responsivity 2                 -> 0.4476
+#   frame 7  default exposure (scale 1)     -> 5729.6
+# Render with render_hdpbrt.py (hdPbrt) or `usdrender -r Embree` (Typhoon).
+(
+    defaultPrim = "World"
+    endTimeCode = 7
+    startTimeCode = 1
+    framesPerSecond = 24
+    timeCodesPerSecond = 24
+    metersPerUnit = 1
+    upAxis = "Y"
+    renderSettingsPrimPath = "/Render/Settings"
+)
+
+def Scope "Render"
+{
+    def RenderSettings "Settings"
+    {
+        rel camera = </World/cam>
+        rel products = [</Render/Product>]
+        int2 resolution = (64, 64)
+        float pixelAspectRatio = 1
+        uniform bool disableMotionBlur = 1
+        bool instantaneousShutter = 1
+        int ty:convergedSamplesPerPixel = 64
+        int ty:maxBounces = 0
+        float ty:fireflyClampThreshold = 0.0
+        float ty:causticsClampThreshold = 0.0
+    }
+
+    def RenderProduct "Product"
+    {
+        rel camera = </World/cam>
+        rel orderedVars = [</Render/Product/Color>]
+        token productName = "exposure-embree.{frame:04d}.exr"
+        token productType = "raster"
+
+        def RenderVar "Color"
+        {
+            token dataType = "color4f"
+            string sourceName = "color"
+            token sourceType = "raw"
+        }
+    }
+}
+
+def Xform "World"
+{
+    def Scope "mtl"
+    {
+        def Material "grey18"
+        {
+            token outputs:surface.connect = </World/mtl/grey18/pbs.outputs:surface>
+
+            def Shader "pbs"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.18, 0.18, 0.18)
+                int inputs:useSpecularWorkflow = 1
+                color3f inputs:specularColor = (0, 0, 0)
+                token outputs:surface
+            }
+        }
+    }
+
+    def Mesh "card" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-10, 0, 10), (10, 0, 10), (10, 0, -10), (-10, 0, -10)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/mtl/grey18>
+    }
+
+    def DistantLight "sun"
+    {
+        float inputs:intensity = 100000
+        bool inputs:normalize = 1
+        float inputs:angle = 0.53
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:rotateX"]
+    }
+
+    def Camera "cam"
+    {
+        float focalLength = 50
+        float horizontalAperture = 20.955
+        float verticalAperture = 20.955
+        float2 clippingRange = (0.1, 1000)
+        float exposure.timeSamples = {
+            1: 0,
+            2: 1,
+            3: 0,
+            4: 0,
+            5: 0,
+            6: 0,
+            7: 0,
+        }
+        float exposure:iso.timeSamples = {
+            1: 100,
+            2: 100,
+            3: 200,
+            4: 100,
+            5: 100,
+            6: 100,
+            7: 100,
+        }
+        float exposure:time.timeSamples = {
+            1: 0.01,
+            2: 0.01,
+            3: 0.01,
+            4: 0.02,
+            5: 0.01,
+            6: 0.01,
+            7: 1,
+        }
+        float exposure:fStop.timeSamples = {
+            1: 16,
+            2: 16,
+            3: 16,
+            4: 16,
+            5: 11,
+            6: 16,
+            7: 1,
+        }
+        float exposure:responsivity.timeSamples = {
+            1: 1,
+            2: 1,
+            3: 1,
+            4: 1,
+            5: 1,
+            6: 2,
+            7: 1,
+        }
+        double3 xformOp:translate = (0, 5, 0)
+        float xformOp:rotateX = -90
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}

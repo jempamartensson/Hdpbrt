@@ -57,6 +57,7 @@ eng.SetFraming(CameraUtil.Framing(Gf.Range2f(Gf.Vec2f(0), Gf.Vec2f(w, h)),
 eng.SetCameraPath(cam)
 
 tmp = os.path.join(os.environ.get('HDPBRT_TMPDIR', '/tmp'), 'hdpbrt-%d-*' % os.getpid())
+last_pfm = None
 for frame in range(first, last + 1):
     p = UsdImagingGL.RenderParams()
     p.frame = Usd.TimeCode(frame)
@@ -72,10 +73,16 @@ for frame in range(first, last + 1):
             new = set(glob.glob(os.path.join(tmp, 'render_*.pfm'))) - seen
             if new:
                 break
+            # Nothing that affects the image changed since the last frame, so
+            # hdPbrt doesn't render again: the previous image is this frame's.
+            if last_pfm and time.time() - t > 2:
+                new = {last_pfm}
+                break
         if time.time() - t > 600:
             sys.exit('frame %d: no converged image after 600 s' % frame)
         time.sleep(0.02)
     pfm = max(new, key=os.path.getmtime)
+    last_pfm = pfm
     out = os.path.join(outdir, '%s-hdpbrt.%04d.pfm' % (stem, frame))
     shutil.copy(pfm, out)
     print('frame %d -> %s (%.1fs)' % (frame, out, time.time() - t), flush=True)

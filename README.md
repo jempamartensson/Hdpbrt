@@ -56,6 +56,7 @@ Render settings: `pbrt:pixelSamples`, `pbrt:maxDepth`, `pbrt:integrator`, `pbrt:
 `pbrt:motionBlur` (default on),
 `pbrt:xformSamples` / `pbrt:geoSamples` (motion keys over the shutter, default 2),
 `pbrt:subdivLevel` (uniform subdivision of catmullClark/loop meshes, default 2, 0 = off),
+`enableExposureCompensation` (apply the camera's exposure, default on),
 `pbrt:volumeDensity` (1), `pbrt:volumeAlbedo` (0.9), `pbrt:volumeTemperatureScale` (0: no emission),
 `pbrt:exportPath`.
 
@@ -71,7 +72,8 @@ point instancers, volumes (OpenVDB fields as a pbrt NanoVDB medium); UsdPreviewS
 open_pbr_surface (mapped to pbrt conductor, dielectric or coateddiffuse) with image textures;
 distant, sphere, rect, disk, cylinder and dome lights, light shaping (cone, focus, IES
 profiles) on sphere, rect and disk lights, light linking and shadow linking; perspective and orthographic cameras,
-depth of field from the camera's fStop and focusDistance (thin lens), transform motion blur
+depth of field from the camera's fStop and focusDistance (thin lens), camera exposure
+(exposure, exposure:iso/time/fStop/responsivity, matching Typhoon), transform motion blur
 over the camera shutter (meshes and point instances) and deformation blur for meshes whose
 points are time-sampled, with N keys for curved motion, and camera motion (two keys);
 color, depth, primId and instanceId AOVs (viewport selection, including point instances).

@@ -232,9 +232,12 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   That is the scene, not a bug.
 - `scripts/build.sh` has never run from a clean clone (pbrt clone plus submodules is a large
   download; cap downloads with `curl --limit-rate` style limits).
-- Next (from the camera exposure / physical units plan): camera exposure via
-  `HdCamera::GetLinearExposureScale()` folded into the film ISO (with the shutter
-  compensation), then reference scenes for exposure / Sunny 16 / distant cone rendered with
-  Typhoon's usdrender. The camera-exposure attributes aren't in the usdlux suite.
+- Camera exposure (done 2026-11-22): `GetLinearExposureScale()` (when the pass enables
+  exposure compensation and the `enableExposureCompensation` setting is on) goes into the
+  film `iso` with the shutter compensation. `tests/typhoon/exposure_scene.usda` matches
+  Typhoon to 4 decimals. render_hdpbrt.py reuses the previous image when a frame changes
+  nothing (hdPbrt doesn't re-render then).
+- Next: Typhoon reference scenes for what the usdlux suite doesn't cover (distant-light cone
+  and soft shadows, light linking, materials: the suite's materials/ and test-suite/ scenes).
 - Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens
   wants it after everything else).

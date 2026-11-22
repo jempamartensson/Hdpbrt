@@ -482,6 +482,7 @@ private:
     int _lastSettingsVersion = -1;
     GfMatrix4d _view{0.0}, _proj{0.0};
     HdPbrtLens _lens;
+    float _exposureScale = 1.f;  // camera exposure (UsdGeomCamera exposure:*)
     GfMatrix4d _viewOpen{0.0}, _viewClose{0.0};  // world-to-view at shutter open/close
     GfRect2i _dataWindow;
     TfTokenVector _renderTags;
@@ -557,7 +558,7 @@ public:
     bool StartRender(HdRenderIndex *index, const GfMatrix4d &view,
                      const GfMatrix4d &proj, int width, int height,
                      TfTokenVector const &renderTags, HdPbrtLens const &lens,
-                     const GfMatrix4d *viewClose = nullptr);
+                     const GfMatrix4d *viewClose = nullptr, float exposureScale = 1.f);
     void StopRender() { _session.Stop(); }
     hdpbrt::PbrtSession &GetSession() { return _session; }
     int GetSpp() const;

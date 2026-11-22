@@ -529,7 +529,8 @@ bool HdPbrtRenderDelegate::GetNanoVDB(const std::string &vdb, const std::string 
 bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &view,
                                        const GfMatrix4d &proj, int width, int height,
                                        TfTokenVector const &renderTags,
-                                       HdPbrtLens const &lens, const GfMatrix4d *viewClose)
+                                       HdPbrtLens const &lens, const GfMatrix4d *viewClose,
+                                       float exposureScale)
 {
     if (width <= 0 || height <= 0 || _tempDir.empty())
         return false;
@@ -581,13 +582,18 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
     os << "Film \"rgb\" \"string filename\" " << HdPbrt_Quote(pfm)
        << " \"integer xresolution\" " << width << " \"integer yresolution\" " << height
        << " \"bool hdpbrtdepth\" true \"bool hdpbrtids\" true";
-    // pbrt scales the image by (shutterclose - shutteropen) * iso / 100; the
-    // motion-blur shutter must not change the brightness, so cancel it.
-    if (_shutter[0] < _shutter[1]) {
-        char iso[64];
-        snprintf(iso, sizeof(iso), " \"float iso\" %.9g",
-                 100.0 / (double(_shutter[1]) - double(_shutter[0])));
-        os << iso;
+    // pbrt scales the image by (shutterclose - shutteropen) * iso / 100. The
+    // motion-blur shutter must not change the brightness, so cancel it, and
+    // apply the camera's exposure scale instead.
+    {
+        const double shutterLength =
+            _shutter[0] < _shutter[1] ? double(_shutter[1]) - double(_shutter[0]) : 1.0;
+        const double iso = 100.0 * double(exposureScale) / shutterLength;
+        if (iso != 100.0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), " \"float iso\" %.9g", iso);
+            os << buf;
+        }
     }
     if (!hasEnvironment)
         os << " \"bool hdpbrtalpha\" true";

@@ -192,6 +192,22 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
             fprintf(stderr, "hdPbrt camera shutter %g..%g -> %g..%g\n", cam->GetShutterOpen(),
                     cam->GetShutterClose(), shutter[0], shutter[1]);
     }
+    // Camera exposure (UsdGeomCamera exposure, exposure:iso/time/fStop/
+    // responsivity): the image is multiplied by the camera's linear exposure
+    // scale when Hydra enables exposure compensation for the pass (the
+    // default) and the enableExposureCompensation render setting is on, as
+    // in USD's reference renderer.
+    float exposureScale = 1.f;
+    if (HdCamera const *cam = state->GetCamera())
+        if (state->GetEnableExposureCompensation() &&
+            _delegate->GetSetting<bool>(HdRenderSettingsTokens->enableExposureCompensation,
+                                        true))
+            exposureScale = cam->GetLinearExposureScale();
+    if (!(exposureScale > 0.f) || !std::isfinite(exposureScale))
+        exposureScale = 1.f;
+    if (debug)
+        fprintf(stderr, "hdPbrt camera exposure scale %g\n", exposureScale);
+
     // Camera motion: the views at shutter open and close from the camera's
     // transform samples C(t): view(t) = C(t)^-1 * C(0) * view (= C(t)^-1 when
     // the view is the camera's own; keeps any extra viewport transform).
@@ -214,7 +230,7 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
     const bool changed = sceneVersion != _lastSceneVersion ||
                          settingsVersion != _lastSettingsVersion || view != _view ||
                          proj != _proj || lens != _lens || shutterChanged ||
-                         viewClose != _viewClose ||
+                         viewClose != _viewClose || exposureScale != _exposureScale ||
                          dw != _dataWindow ||
                          renderTags != _renderTags;
     if (changed) {
@@ -225,6 +241,7 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
         _proj = proj;
         _lens = lens;
         _viewClose = viewClose;
+        _exposureScale = exposureScale;
         _viewOpen = viewOpen;
         _dataWindow = dw;
         _renderTags = renderTags;
@@ -236,7 +253,7 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
     if (_pending && (!_started || _Now() - _lastStart > 0.1)) {
         _pending = false;
         _started = _delegate->StartRender(GetRenderIndex(), _viewOpen, _proj, w, h,
-                                          _renderTags, _lens, &_viewClose);
+                                          _renderTags, _lens, &_viewClose, _exposureScale);
         _lastStart = _Now();
         _imageVersion = 0;
     }
