@@ -581,6 +581,14 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
     os << "Film \"rgb\" \"string filename\" " << HdPbrt_Quote(pfm)
        << " \"integer xresolution\" " << width << " \"integer yresolution\" " << height
        << " \"bool hdpbrtdepth\" true \"bool hdpbrtids\" true";
+    // pbrt scales the image by (shutterclose - shutteropen) * iso / 100; the
+    // motion-blur shutter must not change the brightness, so cancel it.
+    if (_shutter[0] < _shutter[1]) {
+        char iso[64];
+        snprintf(iso, sizeof(iso), " \"float iso\" %.9g",
+                 100.0 / (double(_shutter[1]) - double(_shutter[0])));
+        os << iso;
+    }
     if (!hasEnvironment)
         os << " \"bool hdpbrtalpha\" true";
     os << "\n";

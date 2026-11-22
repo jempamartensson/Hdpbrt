@@ -105,9 +105,21 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   Opacity becomes the shape's alpha (cut-out). Emission becomes a diffuse area light on the
   mesh (not for instances). No material -> diffuse with displayColor.
 - **Lights:** distant, sphere (point if treatAsPoint/radius 0), rect, disk, cylinder (emissive
-  shapes with a black material), dome (`infinite`; lat-long textures converted once to pbrt's
-  equal-area layout with `imgtool makeequiarea`, cached). intensity, exposure, color,
-  colorTemperature, normalize. No shaping/IES, no light-linking.
+  shapes with pbrt's `interface` material, so they emit but don't block or shadow anything,
+  and camera rays see them only with `visibleInPrimaryRay`; pbrt patch 10), dome (`infinite`;
+  lat-long textures converted once to pbrt's equal-area layout with `imgtool makeequiarea`,
+  cached). intensity, exposure, color, colorTemperature (Gf Planckian locus in linear Rec.709,
+  normalized to luminance 1, as UsdLux/Typhoon), normalize (area lights: divide by the
+  world-space area; point lights: intensity L/4 = the sphere's), rect light textures
+  (`inputs:texture:file`, tinted by color; u runs from +x to -x as in Typhoon). Distant
+  lights follow the UsdLux spec: intensity is the radiance (nits) of a disc of angular
+  diameter `angle` (default 0.53 degrees: soft sun shadows, pbrt patch 10); normalize
+  divides by pi sin^2(half angle), making intensity the illuminance in lux. Before this, a
+  default distant light was ~15000x too bright. Checked against Typhoon's usdlux suite
+  (326/328 frames within 5%; the 2 others are reference noise, `tests/typhoon/`).
+- **Shutter and brightness:** pbrt multiplies the image by (shutterclose - shutteropen) x
+  iso / 100; with motion blur the film gets `iso` = 100 / shutter length so the shutter
+  doesn't change the brightness.
   The default lights HdxTaskController adds (GlfSimpleLight camera light at intensity 15000)
   are ignored; a scene without lights gets a uniform white environment.
 - **Light shaping** (UsdLuxShapingAPI, pbrt patch 8): focus and focus tint, cone angle and
@@ -118,8 +130,9 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   are parsed with Cycles' parser (`third_party/cycles_ies`), evaluated with the angle scale
   and optional normalization (divide by the average intensity over the covered
   (hemi)sphere), and tabulated into a 180x180 one-channel PFM that pbrt samples
-  bilinearly. Raw candela values multiply the light's color, as in hdEmbree. Not on
-  cylinder lights. pbrt's light sampling ignores shaping, so tight cones are noisier.
+  bilinearly. Raw candela values multiply the light's color, as in hdEmbree. Cylinder
+  lights pass a `shapingframe` (their pbrt shape is rotated). pbrt's light sampling
+  ignores shaping, so tight cones are noisier.
 - **Light linking** (UsdLuxLightAPI `lightLink` / `shadowLink` collections, pbrt patch 9):
   Hydra resolves the collections only with `HdsiLightLinkingSceneIndex` in the scene index
   chain, which hdPbrt registers for itself (as hdPrman does). Lights then report a
@@ -195,7 +208,7 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
 
 ## Layout (~/dev/pbrt_hydra)
 
-- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth, id and alpha channels, deformation blur, N-key motion, Decompose reflections, light shaping, light linking).
+- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth, id and alpha channels, deformation blur, N-key motion, Decompose reflections, light shaping, light linking, USD light behavior, display buffer fix).
 - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`: headers for the Blender build.
   `src/usd-blender-generated/pxr/pxr.h`: pxr.h filled in for Blender's USD
   (internal namespace `pxrBlender_v26_08`, version 2608).
@@ -233,6 +246,10 @@ Gotchas:
 
 ## Tests (test/)
 
+- `tests/typhoon/run_usdlux.sh`: Typhoon's usdlux regression suite (328 frames of every
+  light type, intensity, exposure, color temperature, normalize, shaping, IES and visible
+  geometry) rendered with hdPbrt and compared with Typhoon's reference images. See CLAUDE.md
+  for the Typhoon setup.
 - `hython tests/hydra_render.py HdPbrtRendererPlugin out.png tests/motion_scene.usda 1`: the
   test scene with a moving sphere and point instances and a deforming quad, shutter 0..1,
   rendered at frame 1

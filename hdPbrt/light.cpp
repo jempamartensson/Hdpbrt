@@ -10,6 +10,8 @@
 #include "pxr/usd/sdf/assetPath.h"
 #include "pxr/base/gf/math.h"
 #include "pxr/base/gf/vec3d.h"
+#include "pxr/base/gf/color.h"
+#include "pxr/base/gf/colorSpace.h"
 #include "pxr/base/tf/stringUtils.h"
 
 #include <cmath>
@@ -31,27 +33,17 @@ T _Get(HdSceneDelegate *sd, SdfPath const &id, TfToken const &name, T def)
     return def;
 }
 
-// Approximate linear-sRGB color of a black body, normalized to max 1.
+// Color of a black body in linear Rec.709 (the rendering color space),
+// normalized to luminance 1, as USD's UsdLuxBlackbodyTemperatureAsRgb and its
+// reference renderer (Typhoon) compute it.
 GfVec3f _Blackbody(float kelvin)
 {
-    double t = std::min(std::max(kelvin, 1000.f), 40000.f) / 100.0;
-    double r, g, b;
-    if (t <= 66) {
-        r = 255;
-        g = 99.4708025861 * std::log(t) - 161.1195681661;
-        b = t <= 19 ? 0 : 138.5177312231 * std::log(t - 10) - 305.0447927307;
-    } else {
-        r = 329.698727446 * std::pow(t - 60, -0.1332047592);
-        g = 288.1221695283 * std::pow(t - 60, -0.0755148492);
-        b = 255;
-    }
-    auto lin = [](double c) {
-        c = std::min(std::max(c / 255.0, 0.0), 1.0);
-        return float(c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4));
-    };
-    GfVec3f c(lin(r), lin(g), lin(b));
-    float m = std::max(c[0], std::max(c[1], c[2]));
-    return m > 0 ? c / m : GfVec3f(1);
+    static const GfColorSpace rec709(GfColorSpaceNames->LinearRec709);
+    GfColor c(rec709);
+    c.SetFromPlanckianLocus(kelvin, 1.0f);
+    const GfVec3f rgb = c.GetRGB();
+    const float lum = GfDot(rgb, GfVec3f(0.2126f, 0.7152f, 0.0722f));
+    return lum > 0.f ? rgb / lum : GfVec3f(1.f);
 }
 
 // Area scale factor of the light's transform in its local XY plane / overall.
@@ -186,27 +178,69 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
     const std::string shaping = sh.str() + links;
 
     os << "# light " << id.GetString() << "\n";
+    // Area lights: the emitting shape has pbrt's "interface" material, so it
+    // emits but doesn't block or shadow anything, and camera rays only see it
+    // with visibleInPrimaryRay (as in USD's reference renderer, Typhoon).
+    const bool cameraVisible =
+        _Get<bool>(sd, id, TfToken("visibleInPrimaryRay"), false);
+    // A rect light's texture (inputs:texture:file) is the emission image,
+    // tinted by color.
+    std::string emissionImage;
+    if (_type == HdPrimTypeTokens->rectLight) {
+        VtValue tv = sd->GetLightParamValue(id, HdLightTokens->textureFile);
+        if (tv.IsHolding<SdfAssetPath>()) {
+            const SdfAssetPath &a = tv.UncheckedGet<SdfAssetPath>();
+            emissionImage = a.GetResolvedPath().empty() ? a.GetAssetPath() : a.GetResolvedPath();
+        }
+    }
     auto areaHeader = [&](double area) {
-        GfVec3f Le = L;
+        float s = scale;
         if (normalize && area > 0)
-            Le /= float(area);
+            s /= float(area);
         os << "AttributeBegin\n  Transform " << HdPbrt_Matrix(xf) << "\n"
-           << "  Material \"diffuse\" \"rgb reflectance\" [0 0 0]\n"
-           << "  AreaLightSource \"diffuse\" \"rgb L\" " << HdPbrt_Rgb(Le)
-           << (_type == HdPrimTypeTokens->cylinderLight ? links : shaping) << "\n";
+           << "  Material \"interface\"\n  AreaLightSource \"diffuse\"";
+        if (!emissionImage.empty())
+            os << " \"string filename\" " << HdPbrt_Quote(emissionImage) << " \"float scale\" "
+               << s << " \"rgb hdpbrttint\" " << HdPbrt_Rgb(color);
+        else
+            os << " \"rgb L\" " << HdPbrt_Rgb(color * s);
+        if (!cameraVisible)
+            os << " \"bool hdpbrtcamera\" false";
+        // The cylinder is written rotated (pbrt's runs along z, USD's along x):
+        // map its light frame back to USD's for the shaping.
+        if (_type == HdPrimTypeTokens->cylinderLight && !sh.str().empty())
+            os << " \"float shapingframe\" [0 0 1 0 1 0 -1 0 0]";
+        os << shaping << "\n";
     };
 
     if (_type == HdPrimTypeTokens->distantLight) {
         os << "AttributeBegin\n  Transform " << HdPbrt_Matrix(xf) << "\n"
-           << "  LightSource \"distant\" \"point3 from\" [0 0 0] \"point3 to\" [0 0 -1]"
-           << " \"rgb L\" " << HdPbrt_Rgb(L) << links << "\nAttributeEnd\n";
+           << "  LightSource \"distant\" \"point3 from\" [0 0 0] \"point3 to\" [0 0 -1]";
+        // USD: L is the radiance (nits) of a disc of angular diameter
+        // `angle`; normalize divides it by pi sin^2(half angle) (or
+        // (2 - sin^2) pi beyond a hemisphere), so intensity becomes the
+        // illuminance in lux. pbrt patch 10 gives the light that cone.
+        const float angle = std::min(std::max(_Get<float>(sd, id, HdLightTokens->angle, 0.53f),
+                                              0.f), 360.f);
+        const double thetaMax = std::min(0.5 * angle * M_PI / 180.0, M_PI);
+        GfVec3f Ld = L;
+        if (normalize && thetaMax > 0) {
+            const double s2 = std::pow(std::sin(thetaMax), 2);
+            Ld /= float(thetaMax <= M_PI / 2 ? s2 * M_PI : (2 - s2) * M_PI);
+        }
+        os << " \"rgb L\" " << HdPbrt_Rgb(Ld);
+        if (angle > 0)
+            os << " \"float hdpbrtangle\" " << angle;
+        os << links << "\nAttributeEnd\n";
     } else if (_type == HdPrimTypeTokens->sphereLight) {
         float r = _Get<float>(sd, id, HdLightTokens->radius, 0.5f);
         bool point = _Get<bool>(sd, id, TfToken("treatAsPoint"), false) || r <= 0;
         if (point) {
             // Point light intensity from a sphere of radius r (or a unit point).
             float rr = r > 0 ? r : 1.f;
-            GfVec3f I = normalize ? L / float(4 * M_PI) : L * float(M_PI * rr * rr);
+            // Same power as the sphere: intensity = luminance * pi r^2, and
+            // with normalize the luminance is divided by the area 4 pi r^2.
+            GfVec3f I = normalize ? L / 4.f : L * float(M_PI * rr * rr);
             os << "AttributeBegin\n  Transform " << HdPbrt_Matrix(xf) << "\n"
                << "  LightSource \"point\" \"rgb I\" " << HdPbrt_Rgb(I) << shaping
                << "\nAttributeEnd\n";
@@ -222,7 +256,9 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
         os << "  Shape \"trianglemesh\" \"point3 P\" [" << -w << " " << -h << " 0 " << w << " "
            << -h << " 0 " << w << " " << h << " 0 " << -w << " " << h << " 0]"
            << " \"integer indices\" [0 1 2 0 2 3] \"normal N\" [0 0 -1 0 0 -1 0 0 -1 0 0 -1]"
-           << " \"point2 uv\" [0 0 1 0 1 1 0 1]\nAttributeEnd\n";
+           // u runs from +x to -x, v from -y to +y (pbrt flips v on lookup):
+           // the texture orientation of USD's reference renderer.
+           << " \"point2 uv\" [1 0 0 0 0 1 1 1]\nAttributeEnd\n";
     } else if (_type == HdPrimTypeTokens->diskLight) {
         float r = _Get<float>(sd, id, HdLightTokens->radius, 0.5f);
         areaHeader(M_PI * r * r * _ScaleXY(xf));

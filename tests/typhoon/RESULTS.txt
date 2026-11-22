@@ -1,0 +1,9 @@
+distant         35/ 35 match   
+rect            63/ 63 match   
+sphere          63/ 63 match   
+disk            62/ 63 match   25:0.943
+cylinder        62/ 63 match   25:1.211
+dome             1/  1 match   
+iesLibPreview   30/ 30 match   
+visibleRect     10/ 10 match   
+total          326/328 match

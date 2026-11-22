@@ -1,0 +1,230 @@
+From fac478ab5b74573641c67765d8ffc39fe159364c Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sun, 22 Nov 2026 20:28:35 +0100
+Subject: [PATCH 10/11] USD light behavior: distant light angular size, emitter
+ camera visibility, image tint, emitting interface shapes, shaping frame (for
+ hdPbrt)
+
+- DistantLight "float hdpbrtangle" (angular diameter): radiance L inside a cone, sampled
+  uniformly; such a light is an infinite light that escaping rays hit. Camera rays do not
+  see the disc.
+- Area lights on "interface" shapes are kept: they emit but do not block or shadow.
+- DiffuseAreaLight "bool hdpbrtcamera" (hide the emitter from camera rays) and
+  "rgb hdpbrttint" (multiplies an emission image).
+- Light shaping "float shapingframe" [9]: rotation from the light frame to the shaping
+  frame, for shapes written in a rotated frame.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/cpu/integrators.cpp | 10 +++++++
+ src/pbrt/lights.cpp          | 16 ++++++++++-
+ src/pbrt/lights.h            | 54 +++++++++++++++++++++++++++++++-----
+ src/pbrt/scene.cpp           |  7 +++--
+ 4 files changed, 77 insertions(+), 10 deletions(-)
+
+diff --git a/src/pbrt/cpu/integrators.cpp b/src/pbrt/cpu/integrators.cpp
+index 17c813f..676b702 100644
+--- a/src/pbrt/cpu/integrators.cpp
++++ b/src/pbrt/cpu/integrators.cpp
+@@ -1139,6 +1139,9 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+             for (const auto &light : infiniteLights) {
+                 if (depth > 0 && !HdPbrtLit(light, prevLinkMask))
+                     continue;
++                // hdPbrt: camera rays don't see a distant light's disc.
++                if (depth == 0 && light.Is<DistantLight>())
++                    continue;
+                 if (SampledSpectrum Le = light.Le(ray, lambda); Le) {
+                     if (depth == 0 || specularBounce)
+                         L += beta * Le / r_u.Average();
+@@ -1159,6 +1162,13 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+         if (Le && depth > 0 && isect.areaLight &&
+             !HdPbrtLit(Light(isect.areaLight), prevLinkMask))
+             Le = SampledSpectrum(0.f);
++        // hdPbrt: emitters hidden from the camera
++        if (Le && depth == 0 && isect.areaLight) {
++            const DiffuseAreaLight *dl =
++                Light(isect.areaLight).CastOrNullptr<DiffuseAreaLight>();
++            if (dl && !dl->hdpbrtCameraVisible)
++                Le = SampledSpectrum(0.f);
++        }
+         if (Le) {
+             // Add contribution of emission from intersected surface
+             if (depth == 0 || specularBounce)
+diff --git a/src/pbrt/lights.cpp b/src/pbrt/lights.cpp
+index 11dc637..e5262ae 100644
+--- a/src/pbrt/lights.cpp
++++ b/src/pbrt/lights.cpp
+@@ -243,6 +243,12 @@ HdPbrtShaping HdPbrtShaping::Create(const ParameterDictionary &parameters,
+                                                 : im.image.GetChannelDesc({"R"}),
+                                             alloc);
+     }
++    std::vector<Float> frame = parameters.GetFloatArray("shapingframe");
++    if (frame.size() == 9) {
++        s.hasFrame = true;
++        for (int i = 0; i < 9; ++i)
++            s.frame[i] = frame[i];
++    }
+     s.active = s.focus > 0 || s.coneCutoff < Pi || bool(s.ies);
+     return s;
+ }
+@@ -307,7 +313,11 @@ DistantLight *DistantLight::Create(const Transform &renderFromLight,
+     if (E_v > 0)
+         sc *= E_v;
+ 
+-    return alloc.new_object<DistantLight>(finalRenderFromLight, L, sc);
++    // hdPbrt: "float hdpbrtangle", the angular diameter in degrees (0 = a
++    // single direction). The radiance inside the cone is L (in nits).
++    Float angle = Clamp(parameters.GetOneFloat("hdpbrtangle", 0), 0, 360);
++    Float cosThetaMax = angle > 0 ? std::cos(Radians(angle) / 2) : 1;
++    return alloc.new_object<DistantLight>(finalRenderFromLight, L, sc, cosThetaMax);
+ }
+ 
+ STAT_MEMORY_COUNTER("Memory/Light image and distributions", imageBytes);
+@@ -975,6 +985,10 @@ DiffuseAreaLight *DiffuseAreaLight::Create(const Transform &renderFromLight,
+                                               alphaTex, std::move(image), imageColorSpace,
+                                               twoSided);
+     light->shaping = HdPbrtShaping::Create(parameters, colorSpace, loc, alloc);  // hdPbrt
++    light->hdpbrtCameraVisible = parameters.GetOneBool("hdpbrtcamera", true);  // hdPbrt
++    std::vector<RGB> tint = parameters.GetRGBArray("hdpbrttint");               // hdPbrt
++    if (!tint.empty())
++        light->hdpbrtTint = tint[0];
+     return light;
+ }
+ 
+diff --git a/src/pbrt/lights.h b/src/pbrt/lights.h
+index 9a34f08..398a723 100644
+--- a/src/pbrt/lights.h
++++ b/src/pbrt/lights.h
+@@ -212,7 +212,11 @@ struct HdPbrtShaping {
+         SampledSpectrum f(1.f);
+         if (!active)
+             return f;
+-        const Vector3f e = Normalize(wLight);
++        Vector3f e = Normalize(wLight);
++        if (hasFrame)  // light frame -> the frame the shaping is defined in
++            e = Vector3f(frame[0] * e.x + frame[1] * e.y + frame[2] * e.z,
++                         frame[3] * e.x + frame[4] * e.y + frame[5] * e.z,
++                         frame[6] * e.x + frame[7] * e.y + frame[8] * e.z);
+         const Float cosOff = -e.z;
+         if (focus > 0) {
+             // lerp(|cos|^focus, focusTint, white)
+@@ -248,6 +252,10 @@ struct HdPbrtShaping {
+     const RGBUnboundedSpectrum *focusTint = nullptr;  // null: black
+     Float coneCutoff = Pi, coneSmoothStart = Pi;    // radians
+     Image ies;
++    // "float shapingframe" [9]: rotation (rows) from the light's frame to
++    // the shaping frame, for shapes written in a rotated frame (cylinders).
++    bool hasFrame = false;
++    Float frame[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+ };
+ 
+ // PointLight Definition
+@@ -311,10 +319,16 @@ class PointLight : public LightBase {
+ class DistantLight : public LightBase {
+   public:
+     // DistantLight Public Methods
+-    DistantLight(const Transform &renderFromLight, Spectrum Lemit, Float scale)
+-        : LightBase(LightType::DeltaDirection, renderFromLight, {}),
++    // hdPbrt: cosThetaMax < 1 gives the light an angular size (a cone of
++    // directions around its axis, like the sun), which makes it an
++    // infinite light that BSDF-sampled rays can hit.
++    DistantLight(const Transform &renderFromLight, Spectrum Lemit, Float scale,
++                 Float cosThetaMax = 1)
++        : LightBase(cosThetaMax < 1 ? LightType::Infinite : LightType::DeltaDirection,
++                    renderFromLight, {}),
+           Lemit(LookupSpectrum(Lemit)),
+-          scale(scale) {}
++          scale(scale),
++          cosThetaMax(cosThetaMax) {}
+ 
+     static DistantLight *Create(const Transform &renderFromLight,
+                                 const ParameterDictionary &parameters,
+@@ -324,8 +338,21 @@ class DistantLight : public LightBase {
+     SampledSpectrum Phi(SampledWavelengths lambda) const;
+ 
+     PBRT_CPU_GPU
+-    Float PDF_Li(LightSampleContext, Vector3f, bool allowIncompletePDF) const {
+-        return 0;
++    Float PDF_Li(LightSampleContext, Vector3f wi, bool allowIncompletePDF) const {
++        if (cosThetaMax >= 1)
++            return 0;
++        // hdPbrt: angular size
++        Vector3f wl = Normalize(renderFromLight.ApplyInverse(wi));
++        return wl.z >= cosThetaMax ? UniformConePDF(cosThetaMax) : 0;
++    }
++
++    // hdPbrt: radiance toward an escaping ray inside the light's cone.
++    PBRT_CPU_GPU
++    SampledSpectrum Le(const Ray &ray, const SampledWavelengths &lambda) const {
++        if (cosThetaMax >= 1)
++            return SampledSpectrum(0.f);
++        Vector3f wl = Normalize(renderFromLight.ApplyInverse(ray.d));
++        return wl.z >= cosThetaMax ? scale * Lemit->Sample(lambda) : SampledSpectrum(0.f);
+     }
+ 
+     PBRT_CPU_GPU
+@@ -351,6 +378,14 @@ class DistantLight : public LightBase {
+     pstd::optional<LightLiSample> SampleLi(LightSampleContext ctx, Point2f u,
+                                            SampledWavelengths lambda,
+                                            bool allowIncompletePDF) const {
++        if (cosThetaMax < 1) {
++            // hdPbrt: uniform sample of the light's cone of directions.
++            Vector3f wi = Normalize(renderFromLight(SampleUniformCone(u, cosThetaMax)));
++            Point3f pOutside = ctx.p() + wi * (2 * sceneRadius);
++            return LightLiSample(scale * Lemit->Sample(lambda), wi,
++                                 UniformConePDF(cosThetaMax),
++                                 Interaction(pOutside, nullptr));
++        }
+         Vector3f wi = Normalize(renderFromLight(Vector3f(0, 0, 1)));
+         Point3f pOutside = ctx.p() + wi * (2 * sceneRadius);
+         return LightLiSample(scale * Lemit->Sample(lambda), wi, 1,
+@@ -361,6 +396,7 @@ class DistantLight : public LightBase {
+     // DistantLight Private Members
+     const DenselySampledSpectrum *Lemit;
+     Float scale;
++    Float cosThetaMax = 1;  // hdPbrt
+     Point3f sceneCenter;
+     Float sceneRadius;
+ };
+@@ -521,7 +557,7 @@ class DiffuseAreaLight : public LightBase {
+             RGB rgb;
+             uv[1] = 1 - uv[1];
+             for (int c = 0; c < 3; ++c)
+-                rgb[c] = image.BilerpChannel(uv, c);
++                rgb[c] = image.BilerpChannel(uv, c) * hdpbrtTint[c];
+             RGBIlluminantSpectrum spec(*imageColorSpace, ClampZero(rgb));
+             Le = scale * spec.Sample(lambda);
+ 
+@@ -534,6 +570,10 @@ class DiffuseAreaLight : public LightBase {
+     }
+ 
+     HdPbrtShaping shaping;  // hdPbrt
++    // hdPbrt: whether camera rays see the emitter ("bool hdpbrtcamera"), and
++    // an RGB tint multiplied into an emission image ("rgb hdpbrttint").
++    bool hdpbrtCameraVisible = true;
++    RGB hdpbrtTint = RGB(1, 1, 1);
+ 
+     PBRT_CPU_GPU
+     pstd::optional<LightLiSample> SampleLi(LightSampleContext ctx, Point2f u,
+diff --git a/src/pbrt/scene.cpp b/src/pbrt/scene.cpp
+index beeaaad..7fbfac5 100644
+--- a/src/pbrt/scene.cpp
++++ b/src/pbrt/scene.cpp
+@@ -1370,9 +1370,12 @@ std::vector<Light> BasicScene::CreateLights(
+             CHECK_LT(sh.materialIndex, materials.size());
+             materialName = materials[sh.materialIndex].name;
+         }
+-        if (materialName == "interface" || materialName == "none" || materialName == "") {
++        // hdPbrt: an area light on an "interface" shape is an emitter that is
++        // otherwise transparent (it doesn't block or shadow anything): the
++        // integrator adds its emission and then skips the surface.
++        if (materialName == "none" || materialName == "") {
+             Warning(&sh.loc, "Ignoring area light specification for shape "
+-                             "with \"interface\" material.");
++                             "without a material.");
+             continue;
+         }
+ 
+-- 
+2.43.0
+

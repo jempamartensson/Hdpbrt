@@ -1,0 +1,36 @@
+From a48c6bfdddb8c6fcc48f04641a75fa275a90df94 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sun, 22 Nov 2026 20:40:50 +0100
+Subject: [PATCH 11/11] Display: size channel buffers for the channel name too
+ (for hdPbrt)
+
+The update-image header holds the title and the channel name, but the buffer only
+reserved title.size() + 32 bytes. Channel names over 8 characters ("instanceId" from the
+hdpbrtids channels) overflowed it by a few bytes, corrupting the heap depending on the
+title length (an abort in malloc).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/util/display.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/pbrt/util/display.cpp b/src/pbrt/util/display.cpp
+index 64f35a1..3a366b3 100644
+--- a/src/pbrt/util/display.cpp
++++ b/src/pbrt/util/display.cpp
+@@ -283,7 +283,11 @@ DisplayItem::DisplayItem(
+ DisplayItem::ImageChannelBuffer::ImageChannelBuffer(const std::string &channelName,
+                                                     int nTiles,
+                                                     const std::string &title) {
+-    int bufferAlloc = tileSize * tileSize * sizeof(float) + title.size() + 32;
++    // hdPbrt: the header holds the title *and* the channel name (plus 24
++    // bytes of fixed fields); without the name, channel names longer than 8
++    // characters (e.g. "instanceId") overflowed the buffer.
++    int bufferAlloc =
++        tileSize * tileSize * sizeof(float) + title.size() + channelName.size() + 32;
+ 
+     buffer.resize(bufferAlloc);
+ 
+-- 
+2.43.0
+

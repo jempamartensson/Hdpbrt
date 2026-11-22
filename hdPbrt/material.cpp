@@ -4,6 +4,7 @@
 // pbrt-v4 materials. pbrt has no "uber" material, so the mapping picks one:
 //   metallic >= 0.5          -> conductor (reflectance = base color)
 //   transmission >= 0.5      -> dielectric (eta = ior)
+//   no specular lobe         -> diffuse (specular weight/color 0, or ior 1)
 //   otherwise                -> coateddiffuse (reflectance = base color)
 // Base color and roughness can come from image textures (UsdUVTexture,
 // MaterialX image/tiledimage). Opacity becomes the shape's alpha (cut-out).
@@ -224,6 +225,9 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             // Gather the generic inputs for the supported surface types.
             GfVec3f base(0.18f), emission(0.f);
             float metallic = 0, rough = 0.5f, transmission = 0, ior = 1.5f, opacity = 1;
+            // No specular lobe at all (specular weight or color 0, or ior 1,
+            // i.e. no Fresnel reflection): a plain Lambertian "diffuse".
+            bool noSpecular = false;
             const char *baseIn = nullptr, *roughIn = nullptr, *opacityIn = nullptr;
             if (type == "UsdPreviewSurface") {
                 base = _Color(*surf, "diffuseColor", GfVec3f(0.18f));
@@ -233,6 +237,10 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 opacity = _Float(*surf, "opacity", 1);
                 emission = _Color(*surf, "emissiveColor", GfVec3f(0));
                 baseIn = "diffuseColor"; roughIn = "roughness"; opacityIn = "opacity";
+                const bool specWorkflow = _Float(*surf, "useSpecularWorkflow", 0) > 0.5f;
+                noSpecular = (specWorkflow &&
+                              _Color(*surf, "specularColor", GfVec3f(0)) == GfVec3f(0)) ||
+                             (!specWorkflow && std::fabs(ior - 1.f) < 1e-4f);
             } else if (TfStringStartsWith(type, "ND_standard_surface")) {
                 base = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base", 1);
                 metallic = _Float(*surf, "metalness", 0);
@@ -242,6 +250,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 opacity = _Float(*surf, "opacity", 1);
                 emission = _Color(*surf, "emission_color", GfVec3f(1)) * _Float(*surf, "emission", 0);
                 baseIn = "base_color"; roughIn = "specular_roughness"; opacityIn = "opacity";
+                noSpecular = _Float(*surf, "specular", 1) <= 0.f && _Float(*surf, "coat", 0) <= 0.f;
             } else if (TfStringStartsWith(type, "ND_open_pbr_surface")) {
                 base = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base_weight", 1);
                 metallic = _Float(*surf, "base_metalness", 0);
@@ -252,6 +261,8 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 emission = _Color(*surf, "emission_color", GfVec3f(1)) *
                            _Float(*surf, "emission_luminance", 0);
                 baseIn = "base_color"; roughIn = "specular_roughness"; opacityIn = "geometry_opacity";
+                noSpecular = _Float(*surf, "specular_weight", 1) <= 0.f &&
+                             _Float(*surf, "coat_weight", 0) <= 0.f;
             } else {
                 // Unknown shader: look for common names, else grey diffuse.
                 base = _Color(*surf, "base_color", _Color(*surf, "diffuseColor", GfVec3f(0.5f)));
@@ -292,6 +303,8 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 d.type = "dielectric";
                 other << " \"float eta\" " << ior;
                 roughParam("roughness");
+            } else if (noSpecular) {
+                d.type = "diffuse";
             } else {
                 d.type = "coateddiffuse";
                 roughParam("roughness");

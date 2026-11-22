@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (9 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (11 commits, the same as `patches/`;
     regenerate with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o patches`).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
     the Blender flavor.
@@ -62,6 +62,14 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    mask); shadow rays pass through non-member surfaces. Light link fields live on
    `LightBase`; dispatch over the 9 light types needs `DispatchCPU` on a const Light
    with a *named* lambda (pbrt's >8-type fallback forwards it as an lvalue).
+10. USD light behavior: `DistantLight` `"float hdpbrtangle"` (angular diameter; a cone of
+   radiance, an `Infinite`-type light that escaping rays hit, not seen by camera rays);
+   area lights allowed on `interface` shapes (emit, never block or shadow);
+   `DiffuseAreaLight` `"bool hdpbrtcamera"` / `"rgb hdpbrttint"` (image tint); shaping
+   `"float shapingframe"` [9] (rotation, for the rotated cylinder).
+11. Display channel buffers include the channel name in their size. Patch 3's "instanceId"
+   (10 characters) overflowed pbrt's `title.size() + 32` by 2 bytes: random malloc aborts
+   (status 134) depending on the temp path length. Fixed 2026-11-22.
 
 ## Done in the 2026-11-22 session
 
@@ -125,6 +133,31 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    viewport's alpha: with no dome, pbrt's and Houdini VK's flipbooks are both transparent
    outside the geometry (checked 2026-11-22).
 
+## Typhoon (USD's reference renderer) for comparisons
+
+Typhoon is hdEmbree in a fork of OpenUSD 26.08 (`github.com/DGG3D/openusd-typhoon`, branch
+`typhoon/main`), a CPU path tracer that implements UsdLux and MaterialX by the spec. It lives in
+`~/dev/pbrt_hydra/typhoon/`: `bin/pixi` (the pixi binary, no shell changes), `openusd-typhoon/`
+(shallow clone, built and installed into its `.pixi/envs/default`), `typhoon-test-suite/`
+(scenes; its prebuilt-package environment 404s, so don't `pixi install` there), `refs/`
+(the usdlux reference archive from the suite's GitHub release, hash-checked, extracted).
+Always `export PIXI_HOME=~/dev/pbrt_hydra/typhoon/pixi-home PIXI_CACHE_DIR=~/dev/pbrt_hydra/typhoon/pixi-cache`.
+Build: `pixi run configure`, then (never pixi's own `build`, it uses all cores)
+`systemd-run --user --scope -p MemoryMax=64G -p MemorySwapMax=0 pixi run cmake --build build -j8 --target install`.
+Render: `pixi run usdrender scene.usda -r Embree -f 25 --outputRoot <dir> -s '{settings}.ty:convergedSamplesPerPixel = 1024'`
+(adaptive sampling). The env has no OpenImageIO Python/numpy; convert EXRs with pbrt's
+`imgtool convert --channels R,G,B` and compare PFMs with system python3 (numpy 1.26).
+
+`tests/typhoon/run_usdlux.sh` (SUITE, REFS, OUT, IMGTOOL, HYTHON) renders the suite's usdlux
+scenes with hdPbrt (`render_hdpbrt.py`: camera/resolution from the RenderSettings prim,
+`pbrt:maxDepth=1` = `ty:maxBounces 0`) and `compare.py` checks the frame means within 5%.
+2026-11-22: 326/328 match; the 2 misses (frame 25 of disk/cylinder, a 10-degree cone) are
+noise in the 16-spp references: at ~1000 spp Typhoon and hdPbrt agree within 2.5%. Lessons: light shapes must not block/shadow/show
+(Typhoon: invisible unless `visibleInPrimaryRay`); color temperature is Gf Planckian locus
+in linear Rec.709 normalized to luminance 1; distant lights are radiance cones (normalize
+divides by pi sin^2); rect light textures flip u; specular-free UsdPreviewSurface (specular
+workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffuse.
+
 ## Open items and ideas
 
 - Camera motion blur (done 2026-11-22): `HdPbrtCamera` (`camera.cpp`) samples its transform
@@ -134,8 +167,8 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
   take two keys only, so camera motion is linear. Test: `tests/camera_motion.usda` (the
   camera tracks the red sphere: sphere sharp, the rest streaks).
 - Light shaping (done 2026-11-22): `light.cpp` writes shaping params only for authored
-  values (ShapingAPI's default cone 90 = hemisphere, per the spec); not on cylinder lights
-  (their pbrt shape is rotated). IES: Cycles' parser (`third_party/cycles_ies`, Apache-2.0;
+  values (ShapingAPI's default cone 90 = hemisphere, per the spec); cylinders pass a
+  `shapingframe` because their pbrt shape is rotated. IES: Cycles' parser (`third_party/cycles_ies`, Apache-2.0;
   not USD's pxrIES, which is under USD's license), our own eval/power in `ies.cpp`
   following hdEmbree's conventions (theta from the light axis; phi of the vector toward the
   light; normalize divides by the average intensity), tabulated 180x180 into a PFM. The
@@ -199,5 +232,9 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
   That is the scene, not a bug.
 - `scripts/build.sh` has never run from a clean clone (pbrt clone plus submodules is a large
   download; cap downloads with `curl --limit-rate` style limits).
+- Next (from the camera exposure / physical units plan): camera exposure via
+  `HdCamera::GetLinearExposureScale()` folded into the film ISO (with the shutter
+  compensation), then reference scenes for exposure / Sunny 16 / distant cone rendered with
+  Typhoon's usdrender. The camera-exposure attributes aren't in the usdlux suite.
 - Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens
   wants it after everything else).

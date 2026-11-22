@@ -17,13 +17,19 @@ errors, so it runs as a separate process instead:
 3. pbrt streams its progressive image, plus first-hit depth, over its tev display-server
    protocol. The final image is read from the PFM pbrt writes when it exits.
 
-pbrt needs the nine patches in `patches/` (against pbrt-v4 `20e41fd`): pbrt exits when its
+pbrt needs the eleven patches in `patches/` (against pbrt-v4 `20e41fd`): pbrt exits when its
 parent process dies, its RGB film can record and stream depth, per-pixel prim/instance
 ids (selection) and coverage (alpha) for the viewport, triangle meshes can deform over
 the shutter (deformation motion blur), and instances and meshes take N motion keys (curved
 motion blur), and animated transforms with a reflection interpolate correctly (moving
 cameras), area and point lights take USD light shaping (cone, focus, IES), and the volpath
-integrator does light linking and shadow linking.
+integrator does light linking and shadow linking, and lights behave like USD's reference
+renderer (distant lights with an angular size, emitters hidden from the camera and casting
+no shadows, textured rect lights).
+
+Lights are checked against Typhoon, USD's reference renderer: 326 of the 328 frames of its
+UsdLux regression suite match within 5%, and the other two (a tight 10-degree cone) agree
+within 2.5% at high sample counts; the published references are 16 spp (`tests/typhoon/`).
 
 ## Build
 
