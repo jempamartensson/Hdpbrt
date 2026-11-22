@@ -82,4 +82,24 @@ void HdPbrtRenderBuffer::WriteRGB(const float *rgb, int w, int h, int x0, int y0
     }
 }
 
+void HdPbrtRenderBuffer::WriteFloat(const float *src, int w, int h, int x0, int y0)
+{
+    size_t fs = HdDataSizeOfFormat(_format);
+    if (!fs)
+        return;
+    for (int y = 0; y < h; ++y) {
+        int yy = y0 + y;
+        if (yy < 0 || yy >= (int)_height)
+            continue;
+        int row = _height - 1 - yy;
+        for (int x = 0; x < w; ++x) {
+            int xx = x0 + x;
+            if (xx < 0 || xx >= (int)_width)
+                continue;
+            float v = src[size_t(y) * w + x];
+            _WritePixel(_format, &_buffer[(size_t(row) * _width + xx) * fs], 1, &v);
+        }
+    }
+}
+
 PXR_NAMESPACE_CLOSE_SCOPE

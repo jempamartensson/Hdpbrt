@@ -204,9 +204,11 @@ HdAovDescriptor HdPbrtRenderDelegate::GetDefaultAovDescriptor(TfToken const &nam
     if (name == HdAovTokens->color)
         return HdAovDescriptor(HdFormatFloat32Vec4, false, VtValue(GfVec4f(0, 0, 0, 1)));
     // Houdini's viewport composites the delegate image using its depth AOV and
-    // draws nothing without one; selection uses the id AOVs.
+    // draws nothing without one; selection uses the id AOVs. Depth is NDC z
+    // mapped to [0, 1] (as hdEmbree and Storm), from pbrt's first-hit depth;
+    // reversed in Houdini (see HdPbrtRenderPass::_ToNdcDepth).
     if (name == HdAovTokens->depth)
-        return HdAovDescriptor(HdFormatFloat32, false, VtValue(1.0f));
+        return HdAovDescriptor(HdFormatFloat32, false, VtValue(HdPbrt_FarDepth()));
     if (name == HdAovTokens->primId || name == HdAovTokens->instanceId ||
         name == HdAovTokens->elementId)
         return HdAovDescriptor(HdFormatInt32, false, VtValue(-1));
@@ -404,7 +406,7 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
     os << "# pbrt-v4 scene written by hdPbrt\n";
     os << "Film \"rgb\" \"string filename\" " << HdPbrt_Quote(pfm)
        << " \"integer xresolution\" " << width << " \"integer yresolution\" " << height
-       << "\n";
+       << " \"bool hdpbrtdepth\" true\n";
     os << "Sampler " << HdPbrt_Quote(GetSetting<std::string>(HdPbrtSettingsTokens->sampler,
                                                              "zsobol"))
        << " \"integer pixelsamples\" " << GetSpp() << "\n";

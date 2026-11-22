@@ -35,6 +35,8 @@ public:
     // starting at (x0, y0) (y-down), converting to the buffer format.
     void WriteRGB(const float *rgb, int w, int h, int x0, int y0);
     void Clear(const float *value, size_t numComponents);
+    // Write a top-down single-channel float image (same layout as WriteRGB).
+    void WriteFloat(const float *v, int w, int h, int x0, int y0);
 
 private:
     void _Deallocate() override;

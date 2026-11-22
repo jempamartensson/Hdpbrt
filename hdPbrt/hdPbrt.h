@@ -206,7 +206,8 @@ private:
     GfRect2i _dataWindow;
     TfTokenVector _renderTags;
     uint64_t _imageVersion = 0;
-    std::vector<float> _image;
+    std::vector<float> _image, _depth;
+    static void _ToNdcDepth(std::vector<float> *zs, GfMatrix4d const &proj);
     bool _converged = false;
     bool _started = false;
     bool _pending = false;
@@ -309,6 +310,10 @@ public:
     bool IsSupported(bool gpuEnabled = true) const override;
 #endif
 };
+
+// Depth AOV convention (reversed in Houdini). See renderPass.cpp.
+bool HdPbrt_ReversedDepth();
+float HdPbrt_FarDepth();
 
 PXR_NAMESPACE_CLOSE_SCOPE
 

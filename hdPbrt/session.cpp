@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "session.h"
+#include <limits>
 
 #include <arpa/inet.h>
 #include <chrono>
@@ -79,7 +80,9 @@ bool PbrtSession::Start(const std::string &pbrtExe, const std::string &sceneFile
         _width = width;
         _height = height;
         _image.assign(size_t(width) * height * 3, 0.f);
+        _depth.assign(size_t(width) * height, std::numeric_limits<float>::infinity());
         _hasData = false;
+        _hasDepth = false;
     }
     _outputPfm = outputPfm;
     _logFile = logFile;
@@ -237,12 +240,18 @@ bool PbrtSession::_LoadPfm(const std::string &path)
 }
 
 bool PbrtSession::Snapshot(std::vector<float> *out, int *width, int *height,
-                           uint64_t *version) const
+                           uint64_t *version, std::vector<float> *depth) const
 {
     std::lock_guard<std::mutex> lock(_imageMutex);
     if (!_hasData || *version == _version)
         return false;
     *out = _image;
+    if (depth) {
+        if (_hasDepth)
+            *depth = _depth;
+        else
+            depth->clear();
+    }
     *width = _width;
     *height = _height;
     *version = _version;
@@ -288,7 +297,11 @@ void PbrtSession::_HandleMessage(const std::vector<uint8_t> &msg)
     pid_t pid = (pid_t)atoi(title.c_str() + open + 1);
     if (pid != _pid.load() || _finished.load())
         return;
-    int c = channel == "R" ? 0 : channel == "G" ? 1 : channel == "B" ? 2 : -1;
+    int c = channel == "R"   ? 0
+            : channel == "G" ? 1
+            : channel == "B" ? 2
+            : channel == "Z" ? 3
+                             : -1;
     if (c < 0)
         return;
     int x, y, w, h;
@@ -305,8 +318,16 @@ void PbrtSession::_HandleMessage(const std::vector<uint8_t> &msg)
         for (int i = 0; i < w; ++i) {
             float f;
             memcpy(&f, (const uint8_t *)v + (size_t(j) * w + i) * 4, 4);
-            _image[(size_t(y + j) * _width + (x + i)) * 3 + c] = f;
+            const size_t pix = size_t(y + j) * _width + (x + i);
+            if (c == 3)
+                _depth[pix] = f;
+            else
+                _image[pix * 3 + c] = f;
         }
+    if (c == 3) {
+        _hasDepth = true;
+        return;  // the RGB channels bump the version
+    }
     _hasData = true;
     ++_version;
 }

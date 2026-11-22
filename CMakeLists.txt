@@ -36,6 +36,7 @@ target_compile_options(hdPbrt PRIVATE -Wno-deprecated -Wno-deprecated-declaratio
 if(HDPBRT_FLAVOR STREQUAL "houdini")
   set(HFS "/opt/hfs22.0" CACHE PATH "Houdini install")
   target_link_options(hdPbrt PRIVATE -Wl,--no-undefined)
+  target_compile_definitions(hdPbrt PRIVATE HDPBRT_HOUDINI=1)
   target_include_directories(hdPbrt SYSTEM PRIVATE
     ${HFS}/toolkit/include ${HFS}/python/include/python3.13)
   set(_libs hdsi hd hf pxOsd cameraUtil sdf ar plug trace work vt gf tf arch js python)

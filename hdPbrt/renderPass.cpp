@@ -8,6 +8,8 @@
 
 #include "pxr/base/tf/stringUtils.h"
 #include <chrono>
+#include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -27,11 +29,49 @@ HdPbrtRenderPass::~HdPbrtRenderPass() { _delegate->StopRender(); }
 
 bool HdPbrtRenderPass::IsConverged() const { return _converged; }
 
+// Houdini's Vulkan viewport composites with reversed depth (1 = near, 0 = far;
+// with standard depth its grid and handles vanish entirely).
+// HDPBRT_REVERSED_DEPTH=0/1 overrides the build default.
+bool HdPbrt_ReversedDepth()
+{
+#ifdef HDPBRT_HOUDINI
+    const bool def = true;
+#else
+    const bool def = false;
+#endif
+    static const bool reversed = getenv("HDPBRT_REVERSED_DEPTH")
+                                     ? atoi(getenv("HDPBRT_REVERSED_DEPTH")) != 0
+                                     : def;
+    return reversed;
+}
+
+float HdPbrt_FarDepth() { return HdPbrt_ReversedDepth() ? 0.f : 1.f; }
+
+// pbrt camera-space z (looking down +Z; +inf = no hit) -> NDC depth in [0, 1].
+// USD view space looks down -Z, and Gf matrices multiply row vectors.
+void HdPbrtRenderPass::_ToNdcDepth(std::vector<float> *zs, GfMatrix4d const &proj)
+{
+    const double a = proj[2][2], b = proj[3][2], c = proj[2][3], d = proj[3][3];
+    for (float &z : *zs) {
+        if (!std::isfinite(z)) {
+            z = 1.f;
+            continue;
+        }
+        const double zv = -double(z);
+        const double w = zv * c + d;
+        const double ndc = w != 0 ? (zv * a + b) / w : 1.0;
+        z = float(std::min(1.0, std::max(0.0, 0.5 * ndc + 0.5)));
+    }
+    if (HdPbrt_ReversedDepth())
+        for (float &z : *zs)
+            z = 1.f - z;
+}
+
 void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
                                 TfTokenVector const &renderTags)
 {
     // Find the color AOV.
-    HdPbrtRenderBuffer *color = nullptr;
+    HdPbrtRenderBuffer *color = nullptr, *depth = nullptr;
     HdRenderPassAovBindingVector bindings = state->GetAovBindings();
     static const bool debug = getenv("HDPBRT_DEBUG") != nullptr;
     if (debug) {
@@ -61,7 +101,16 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
             continue;
         if (b.aovName == HdAovTokens->color && !color)
             color = pb;
-        else if (!pb->IsConverged()) {
+        else if (b.aovName == HdAovTokens->depth && !depth &&
+                 HdGetComponentCount(pb->GetFormat()) == 1 &&
+                 HdGetComponentFormat(pb->GetFormat()) == HdFormatFloat32) {
+            depth = pb;
+            if (!pb->IsConverged()) {
+                float far = HdPbrt_FarDepth();
+                pb->Clear(&far, 1);
+                pb->SetConverged(true);
+            }
+        } else if (!pb->IsConverged()) {
             // Unsupported AOV: fill it with its clear value once.
             if (b.clearValue.IsHolding<int>()) {
                 float v = float(b.clearValue.UncheckedGet<int>());
@@ -125,12 +174,27 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
 
     hdpbrt::PbrtSession &session = _delegate->GetSession();
     int iw = 0, ih = 0;
-    if (session.Snapshot(&_image, &iw, &ih, &_imageVersion)) {
+    if (session.Snapshot(&_image, &iw, &ih, &_imageVersion, depth ? &_depth : nullptr)) {
         if (debug)
             fprintf(stderr, "hdPbrt snapshot %dx%d (want %dx%d) v%llu\n", iw, ih, w, h,
                     (unsigned long long)_imageVersion);
-        if (iw == w && ih == h)
+        if (iw == w && ih == h) {
             color->WriteRGB(_image.data(), iw, ih, dw.GetMinX(), dw.GetMinY());
+            if (depth && _depth.size() == size_t(iw) * ih) {
+                if (debug) {
+                    float lo = 1e30f, hi = -1e30f; size_t hits = 0;
+                    for (float z : _depth) if (std::isfinite(z)) { lo = std::min(lo, z); hi = std::max(hi, z); ++hits; }
+                    fprintf(stderr, "hdPbrt depth: %zu hits, cam z %g..%g\n", hits, lo, hi);
+                }
+                _ToNdcDepth(&_depth, _proj);
+                if (debug) {
+                    float lo = 2, hi = -1;
+                    for (float z : _depth) { lo = std::min(lo, z); hi = std::max(hi, z); }
+                    fprintf(stderr, "hdPbrt depth: ndc01 %g..%g\n", lo, hi);
+                }
+                depth->WriteFloat(_depth.data(), iw, ih, dw.GetMinX(), dw.GetMinY());
+            }
+        }
     }
 
     _converged = !_pending && (!_started || session.IsFinished());

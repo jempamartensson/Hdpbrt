@@ -30,8 +30,10 @@ public:
 
     // Copy the latest RGB image (top-down rows, 3 floats per pixel) if it
     // changed since *version. Returns true if out was written.
+    // depth, if not null, gets pbrt camera-space z per pixel (+inf for no
+    // hit), or is cleared when pbrt hasn't sent depth.
     bool Snapshot(std::vector<float> *out, int *width, int *height,
-                  uint64_t *version) const;
+                  uint64_t *version, std::vector<float> *depth = nullptr) const;
 
     // True once the current pbrt process has exited (and its final image,
     // if any, has been loaded).
@@ -54,6 +56,8 @@ private:
 
     mutable std::mutex _imageMutex;
     std::vector<float> _image;
+    std::vector<float> _depth;
+    bool _hasDepth = false;
     int _width = 0, _height = 0;
     uint64_t _version = 0;
     bool _hasData = false;  // got pixels from the current process
