@@ -1,0 +1,26 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "HdPbrtRendererPlugin": {
+                        "bases": ["HdRendererPlugin"],
+                        "displayName": "pbrt",
+                        "priority": 0
+                    },
+                    "HdPbrt_ImplicitSurfaceSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "loadWithRenderer": "pbrt",
+                        "priority": 0,
+                        "displayName": "Implicit surfaces to meshes for hdPbrt"
+                    }
+                }
+            },
+            "LibraryPath": "hdPbrt.so",
+            "Name": "hdPbrt",
+            "ResourcePath": ".",
+            "Root": ".",
+            "Type": "library"
+        }
+    ]
+}
