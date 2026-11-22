@@ -1,0 +1,43 @@
+From 573f3d271804e21c6bf9032cafdc49f7dd5cab9a Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sun, 22 Nov 2026 19:22:50 +0100
+Subject: [PATCH 7/7] Transform::Decompose: handle reflections (for hdPbrt)
+
+A transform with a negative determinant (a mirrored object, or a camera that flips z)
+left an improper rotation that the quaternion conversion cannot represent, so animated
+transforms with a reflection interpolated wrongly (an animated camera from a right-handed
+system looked in the wrong direction). Negate the rotation so it is proper; the
+reflection moves into the scale matrix.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/util/transform.cpp | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/pbrt/util/transform.cpp b/src/pbrt/util/transform.cpp
+index 29ff79e..1c1ec37 100644
+--- a/src/pbrt/util/transform.cpp
++++ b/src/pbrt/util/transform.cpp
+@@ -220,7 +220,18 @@ void Transform::Decompose(Vector3f *T, SquareMatrix<4> *R, SquareMatrix<4> *S) c
+ 
+         *R = Rnext;
+     } while (++count < 100 && norm > .0001);
+-    // XXX TODO FIXME deal with flip...
++    // hdPbrt: deal with flip. A transform with a reflection (negative
++    // determinant, e.g. a mirrored object or a camera that flips z) leaves an
++    // improper R, which the quaternion conversion can't represent: the
++    // interpolated transform comes out wrong. Negate R's 3x3 part so it's a
++    // proper rotation; the reflection then lands in S below.
++    const Float det3 = (*R)[0][0] * ((*R)[1][1] * (*R)[2][2] - (*R)[1][2] * (*R)[2][1]) -
++                       (*R)[0][1] * ((*R)[1][0] * (*R)[2][2] - (*R)[1][2] * (*R)[2][0]) +
++                       (*R)[0][2] * ((*R)[1][0] * (*R)[2][1] - (*R)[1][1] * (*R)[2][0]);
++    if (det3 < 0)
++        for (int i = 0; i < 3; ++i)
++            for (int j = 0; j < 3; ++j)
++                (*R)[i][j] = -(*R)[i][j];
+ 
+     // Compute scale _S_ using rotation and original matrix
+     *S = InvertOrExit(*R) * M;
+-- 
+2.43.0
+

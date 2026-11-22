@@ -192,6 +192,20 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
             fprintf(stderr, "hdPbrt camera shutter %g..%g -> %g..%g\n", cam->GetShutterOpen(),
                     cam->GetShutterClose(), shutter[0], shutter[1]);
     }
+    // Camera motion: the views at shutter open and close from the camera's
+    // transform samples C(t): view(t) = C(t)^-1 * C(0) * view (= C(t)^-1 when
+    // the view is the camera's own; keeps any extra viewport transform).
+    GfMatrix4d viewOpen = view, viewClose = view;
+    if (shutter[0] < shutter[1]) {
+        if (auto *pc = dynamic_cast<HdPbrtCamera const *>(state->GetCamera())) {
+            const HdTimeSampleArray<GfMatrix4d, 4> sa = pc->GetTransformSamples();
+            if (sa.count > 1) {
+                const GfMatrix4d c0 = HdPbrt_XformAt(sa, 0.f);
+                viewOpen = HdPbrt_XformAt(sa, shutter[0]).GetInverse() * c0 * view;
+                viewClose = HdPbrt_XformAt(sa, shutter[1]).GetInverse() * c0 * view;
+            }
+        }
+    }
     // The prims keep time samples around the current frame; a new shutter
     // only means writing the scene again.
     const bool shutterChanged = shutter != _delegate->GetShutter();
@@ -200,6 +214,7 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
     const bool changed = sceneVersion != _lastSceneVersion ||
                          settingsVersion != _lastSettingsVersion || view != _view ||
                          proj != _proj || lens != _lens || shutterChanged ||
+                         viewClose != _viewClose ||
                          dw != _dataWindow ||
                          renderTags != _renderTags;
     if (changed) {
@@ -209,6 +224,8 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
         _view = view;
         _proj = proj;
         _lens = lens;
+        _viewClose = viewClose;
+        _viewOpen = viewOpen;
         _dataWindow = dw;
         _renderTags = renderTags;
         _changeTime = _Now();
@@ -218,8 +235,8 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
     // more often than every 100 ms.
     if (_pending && (!_started || _Now() - _lastStart > 0.1)) {
         _pending = false;
-        _started = _delegate->StartRender(GetRenderIndex(), _view, _proj, w, h, _renderTags,
-                                          _lens);
+        _started = _delegate->StartRender(GetRenderIndex(), _viewOpen, _proj, w, h,
+                                          _renderTags, _lens, &_viewClose);
         _lastStart = _Now();
         _imageVersion = 0;
     }

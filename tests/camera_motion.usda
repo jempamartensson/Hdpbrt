@@ -1,0 +1,226 @@
+#usda 1.0
+# camera_motion.usda: motion_scene.usda with the camera tracking the red sphere
+# (both move +1 in x between frames 1 and 2): the sphere stays sharp, the rest
+# blurs. Generated from motion_scene.usda.
+# test_scene.usda with motion: the red sphere and three point instances move,
+# and the green quad "flag" deforms (its top edge rises), between frames 1 and 2; camera shutter 0..1. Render at frame 1:
+#   hython hydra_render.py HdPbrtRendererPlugin out.png motion_scene.usda 1
+(
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Mesh "ground" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 3, 2, 1]
+        rel material:binding = </World/mtl/ground>
+        point3f[] points = [(-6, 0, -6), (6, 0, -6), (6, 0, 6), (-6, 0, 6)]
+        texCoord2f[] primvars:st = [(0, 2), (0, 0), (2, 0), (2, 2)] (
+            interpolation = "faceVarying"
+        )
+        uniform token subdivisionScheme = "none"
+    }
+
+    def "mtl"
+    {
+        def Material "ground"
+        {
+            token outputs:surface.connect = </World/mtl/ground/pbs.outputs:surface>
+
+            def Shader "pbs"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/mtl/ground/tex.outputs:rgb>
+                float inputs:roughness = 0.8
+                token outputs:surface
+            }
+
+            def Shader "st"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                token inputs:varname = "st"
+                float2 outputs:result
+            }
+
+            def Shader "tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./checker.png@
+                float2 inputs:st.connect = </World/mtl/ground/st.outputs:result>
+                token inputs:wrapS = "repeat"
+                color3f outputs:rgb
+            }
+        }
+
+        def Material "red"
+        {
+            token outputs:surface.connect = </World/mtl/red/pbs.outputs:surface>
+
+            def Shader "pbs"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.8, 0.1, 0.05)
+                float inputs:roughness = 0.4
+                token outputs:surface
+            }
+        }
+
+        def Material "gold"
+        {
+            token outputs:surface.connect = </World/mtl/gold/pbs.outputs:surface>
+
+            def Shader "pbs"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (1, 0.75, 0.3)
+                float inputs:metallic = 1
+                float inputs:roughness = 0.15
+                token outputs:surface
+            }
+        }
+
+        def Material "glass"
+        {
+            token outputs:mtlx:surface.connect = </World/mtl/glass/ss.outputs:out>
+
+            def Shader "ss"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:specular_IOR = 1.5
+                float inputs:specular_roughness = 0
+                float inputs:transmission = 1
+                token outputs:out
+            }
+        }
+
+        def Material "emit"
+        {
+            token outputs:surface.connect = </World/mtl/emit/pbs.outputs:surface>
+
+            def Shader "pbs"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0, 0, 0)
+                color3f inputs:emissiveColor = (4, 1.5, 0.3)
+                token outputs:surface
+            }
+        }
+    }
+
+    def Sphere "red" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/mtl/red>
+        double radius = 0.7
+        double3 xformOp:translate.timeSamples = {
+            1: (-2.6, 0.7, 0),
+            2: (-1.6, 0.7, 0),
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "gold" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/mtl/gold>
+        double radius = 0.9
+        double3 xformOp:translate = (0, 0.9, -0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "glass" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/mtl/glass>
+        double radius = 0.7
+        double3 xformOp:translate = (2.2, 0.7, 0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "panel" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </World/mtl/emit>
+        point3f[] points = [(2.5, 0.2, -3), (4.5, 0.2, -3), (4.5, 1.6, -3), (2.5, 1.6, -3)]
+    }
+
+    def Mesh "flag"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points.timeSamples = {
+            1: [(0.6, 0.2, 3.5), (1.6, 0.2, 3.5), (1.6, 0.8, 3.5), (0.6, 0.8, 3.5)],
+            2: [(0.6, 0.2, 3.5), (1.6, 0.2, 3.5), (1.6, 1.8, 3.5), (0.6, 1.8, 3.5)],
+        }
+        color3f[] primvars:displayColor = [(0.1, 0.8, 0.2)]
+    }
+
+    def PointInstancer "cubes"
+    {
+        quath[] orientations = [(1, 0, 0, 0), (0.991211, 0, 0.130493, 0), (0.96582, 0, 0.258789, 0), (0.923828, 0, 0.382568, 0), (0.866211, 0, 0.5, 0), (0.793457, 0, 0.608887, 0), (0.707031, 0, 0.707031, 0)]
+        point3f[] positions.timeSamples = {
+            1: [(-3, 0.175, 2), (-2, 0.175, 2), (-1, 0.175, 2), (0, 0.175, 2), (1, 0.175, 2), (2, 0.175, 2), (3, 0.175, 2)],
+            2: [(-3, 0.175, 2), (-2, 0.175, 2.3), (-1, 0.175, 2), (0, 0.175, 2.6), (1, 0.175, 2), (2, 0.175, 2.9), (3, 0.175, 2)],
+        }
+        int[] protoIndices = [0, 0, 0, 0, 0, 0, 0]
+        rel prototypes = </World/cubes/proto/cube>
+
+        def "proto"
+        {
+            def Cube "cube"
+            {
+                color3f[] primvars:displayColor = [(0.1, 0.3, 0.9)]
+                double size = 0.35
+            }
+        }
+    }
+
+    def RectLight "rect"
+    {
+        float inputs:height = 2
+        float inputs:intensity = 4
+        float inputs:width = 2
+        float xformOp:rotateX = -90
+        double3 xformOp:translate = (0, 4, 1)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+
+    def SphereLight "orb"
+    {
+        color3f inputs:color = (1, 0.5, 0.2)
+        float inputs:intensity = 40
+        float inputs:radius = 0.15
+        double3 xformOp:translate = (-1.2, 0.5, 1.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "dome"
+    {
+        float inputs:intensity = 0.6
+        asset inputs:texture:file = @./quadrants.pfm@
+    }
+
+    def Camera "cam"
+    {
+        float focalLength = 35
+        double shutter:open = 0
+        double shutter:close = 1
+        float xformOp:rotateX = -12
+        double3 xformOp:translate.timeSamples = {
+            1: (0, 2.2, 8),
+            2: (1, 2.2, 8),
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}
+

@@ -286,7 +286,7 @@ void HdPbrtRenderDelegate::DestroyRprim(HdRprim *rPrim)
 HdSprim *HdPbrtRenderDelegate::CreateSprim(TfToken const &typeId, SdfPath const &sprimId)
 {
     if (typeId == HdPrimTypeTokens->camera)
-        return new HdCamera(sprimId);
+        return new HdPbrtCamera(sprimId);
     if (typeId == HdPrimTypeTokens->material)
         return new HdPbrtMaterial(sprimId);
     if (std::find(_supportedSprims.begin(), _supportedSprims.end(), typeId) !=
@@ -471,7 +471,7 @@ bool HdPbrtRenderDelegate::GetNanoVDB(const std::string &vdb, const std::string 
 bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &view,
                                        const GfMatrix4d &proj, int width, int height,
                                        TfTokenVector const &renderTags,
-                                       HdPbrtLens const &lens)
+                                       HdPbrtLens const &lens, const GfMatrix4d *viewClose)
 {
     if (width <= 0 || height <= 0 || _tempDir.empty())
         return false;
@@ -542,7 +542,21 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
     // the viewport's conform/window policy) gives the screen window.
     GfMatrix4d flip(1.0);
     flip.SetScale(GfVec3d(1, 1, -1));
-    os << "Transform " << HdPbrt_Matrix(view * flip) << "\n";
+    // Motion blur: TransformTimes must precede the camera (pbrt reads them when
+    // it creates the camera's animated transform). A moving camera gets
+    // pbrt's two keys, at shutter open and close.
+    const GfVec2f shutter = _shutter;
+    if (shutter[0] < shutter[1]) {
+        char tt[96];
+        snprintf(tt, sizeof(tt), "TransformTimes %.9g %.9g\n", shutter[0], shutter[1]);
+        os << tt;
+    }
+    if (shutter[0] < shutter[1] && viewClose && *viewClose != view)
+        os << "ActiveTransform StartTime\nTransform " << HdPbrt_Matrix(view * flip)
+           << "\nActiveTransform EndTime\nTransform " << HdPbrt_Matrix(*viewClose * flip)
+           << "\nActiveTransform All\n";
+    else
+        os << "Transform " << HdPbrt_Matrix(view * flip) << "\n";
     const bool ortho = std::fabs(proj[3][3] - 1.0) < 1e-6;
     double sx0, sx1, sy0, sy1;
     if (ortho) {
@@ -570,7 +584,6 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
     os << sw;
     // Motion blur: pbrt samples ray times over the camera shutter, and the
     // prims' animated transforms span the same interval (TransformTimes).
-    const GfVec2f shutter = _shutter;
     if (shutter[0] < shutter[1]) {
         char sh[128];
         snprintf(sh, sizeof(sh), " \"float shutteropen\" %.9g \"float shutterclose\" %.9g",
@@ -578,11 +591,6 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
         os << sh;
     }
     os << "\n";
-    if (shutter[0] < shutter[1]) {
-        char tt[96];
-        snprintf(tt, sizeof(tt), "TransformTimes %.9g %.9g\n", shutter[0], shutter[1]);
-        os << tt;
-    }
 
     os << "WorldBegin\n";
     HdPbrtWriteContext ctx;

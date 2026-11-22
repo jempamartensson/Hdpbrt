@@ -129,8 +129,17 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   with `SampleTransform(id, t, t + 1e-3)` (USD evaluates an interval's edges exactly; a
   zero-width interval reports nothing time-varying); interpolating authored samples of the
   composed matrix would turn an orbit into a straight line. Between grid points, transforms
-  are decomposed and slerped. A shutter longer than the +-1 frame window clamps. No
-  camera motion (the render pass gets a single view matrix), lights don't move.
+  are decomposed and slerped. A shutter longer than the +-1 frame window clamps. Lights
+  don't move.
+- **Camera motion blur:** the camera sprim is `HdPbrtCamera`, which samples its transform
+  like the prims. The render pass turns it into views at shutter open and close
+  (C(t)^-1 * C(0) * view, which keeps any extra viewport transform in `view`), and the
+  scene gets pbrt's two-key camera: `TransformTimes` first (pbrt reads it when it creates
+  the camera), then `ActiveTransform StartTime/EndTime` transforms. pbrt cameras have two
+  keys, so camera motion is linear over the shutter. Our camera matrix flips z (USD
+  cameras look down -z), and pbrt's `Transform::Decompose` didn't handle reflections
+  (`XXX TODO FIXME deal with flip`): patch 7 moves the reflection into the scale, else a
+  moving camera looks the wrong way. That also fixes animated mirrored objects.
 - **Deformation blur:** stock pbrt-v4 has no moving triangles (motion comes only from
   animated transforms), so patch 5 adds end-pose vertices to `TriangleMesh`: positions and
   normals blend linearly by ray time between `"float motiontimes"` [t0 t1]; bounds cover both
@@ -166,7 +175,7 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
 
 ## Layout (~/dev/pbrt_hydra)
 
-- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth, id and alpha channels, deformation blur, N-key motion).
+- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth, id and alpha channels, deformation blur, N-key motion, Decompose reflections).
 - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`: headers for the Blender build.
   `src/usd-blender-generated/pxr/pxr.h`: pxr.h filled in for Blender's USD
   (internal namespace `pxrBlender_v26_08`, version 2608).

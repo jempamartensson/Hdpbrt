@@ -25,6 +25,7 @@
 #include "pxr/imaging/hd/points.h"
 #include "pxr/imaging/hd/volume.h"
 #include "pxr/imaging/hd/field.h"
+#include "pxr/imaging/hd/camera.h"
 #include "pxr/base/gf/range3d.h"
 #include "pxr/imaging/hd/renderDelegate.h"
 #include "pxr/imaging/hd/renderPass.h"
@@ -374,6 +375,21 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Camera that keeps its transform samples (over HdPbrt_SampleWindow) for
+// camera motion blur.
+class HdPbrtCamera final : public HdCamera {
+public:
+    explicit HdPbrtCamera(SdfPath const &id);
+    void Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
+              HdDirtyBits *dirtyBits) override;
+    HdTimeSampleArray<GfMatrix4d, 4> GetTransformSamples() const;
+
+private:
+    mutable std::mutex _mutex;
+    HdTimeSampleArray<GfMatrix4d, 4> _xform;
+};
+
+// ---------------------------------------------------------------------------
 // A volume field (openvdbAsset, or houdiniFieldAsset with a file on disk).
 class HdPbrtField final : public HdField {
 public:
@@ -459,6 +475,7 @@ private:
     int _lastSettingsVersion = -1;
     GfMatrix4d _view{0.0}, _proj{0.0};
     HdPbrtLens _lens;
+    GfMatrix4d _viewOpen{0.0}, _viewClose{0.0};  // world-to-view at shutter open/close
     GfRect2i _dataWindow;
     TfTokenVector _renderTags;
     uint64_t _imageVersion = 0;
@@ -524,7 +541,8 @@ public:
     // Write the full pbrt scene to a file and start rendering it.
     bool StartRender(HdRenderIndex *index, const GfMatrix4d &view,
                      const GfMatrix4d &proj, int width, int height,
-                     TfTokenVector const &renderTags, HdPbrtLens const &lens);
+                     TfTokenVector const &renderTags, HdPbrtLens const &lens,
+                     const GfMatrix4d *viewClose = nullptr);
     void StopRender() { _session.Stop(); }
     hdpbrt::PbrtSession &GetSession() { return _session; }
     int GetSpp() const;

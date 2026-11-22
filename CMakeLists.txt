@@ -30,6 +30,7 @@ add_library(hdPbrt SHARED
   hdPbrt/points.cpp
   hdPbrt/subdiv.cpp
   hdPbrt/volume.cpp
+  hdPbrt/camera.cpp
   hdPbrt/material.cpp
   hdPbrt/light.cpp
   hdPbrt/instancer.cpp

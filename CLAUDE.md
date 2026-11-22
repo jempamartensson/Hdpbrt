@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (6 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (7 commits, the same as `patches/`;
     regenerate with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o patches`).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
     the Blender flavor.
@@ -50,6 +50,9 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    `MotionPrimitive` picks the segment by ray time (each segment an `AnimatedTransform`).
    Meshes hold N poses: `plymesh` `"string motionfilenames" [...]` + `"float motiontimes"
    [N]` (filename is pose 0; patch 5's `motionfilename` still works).
+7. `Transform::Decompose` handles reflections (pbrt had `XXX TODO FIXME deal with flip`):
+   an improper rotation is negated so the reflection lands in the scale. Without it an
+   animated camera (our camera matrix flips z) looks the wrong way.
 
 ## Done in the 2026-11-22 session
 
@@ -115,7 +118,13 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 
 ## Open items and ideas
 
-- Not translated yet: camera motion blur, light shaping/IES, light linking, volume
+- Camera motion blur (done 2026-11-22): `HdPbrtCamera` (`camera.cpp`) samples its transform
+  like the prims; the render pass writes views at shutter open/close as
+  C(t)^-1 * C(0) * view, and `StartRender` writes pbrt's two-key camera
+  (`ActiveTransform StartTime/EndTime`, `TransformTimes` before `Camera`). pbrt cameras
+  take two keys only, so camera motion is linear. Test: `tests/camera_motion.usda` (the
+  camera tracks the red sphere: sphere sharp, the rest streaks).
+- Not translated yet: light shaping/IES, light linking, volume
   materials (Karma pyro shaders), in-memory Houdini volumes (`op:` paths).
 - Volumes (done 2026-11-22): `volume.cpp` (`HdPbrtField` bprims, `HdPbrtVolume`), converter
   `tools/vdb2nvdb.cpp` -> `hdpbrt_vdb2nvdb` next to pbrt (Houdini flavor, needs
