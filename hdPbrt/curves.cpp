@@ -33,7 +33,7 @@ HdDirtyBits HdPbrtCurves::GetInitialDirtyBitsMask() const
            HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyVisibility |
            HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyNormals |
            HdChangeTracker::DirtyWidths | HdChangeTracker::DirtyInstancer |
-           HdChangeTracker::DirtyMaterialId | HdChangeTracker::DirtyDisplayStyle;
+           HdChangeTracker::DirtyCategories | HdChangeTracker::DirtyMaterialId | HdChangeTracker::DirtyDisplayStyle;
 }
 
 void HdPbrtCurves::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
@@ -46,6 +46,8 @@ void HdPbrtCurves::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderPar
         SetMaterialId(sceneDelegate->GetMaterialId(id));
     if (HdChangeTracker::IsTransformDirty(*dirtyBits, id))
         _SyncTransform(sceneDelegate);
+    if (*dirtyBits & HdChangeTracker::DirtyCategories)
+        _SyncCategories(sceneDelegate);
     {
         std::lock_guard<std::mutex> lock(_mutex);
         if (HdChangeTracker::IsVisibilityDirty(*dirtyBits, id))

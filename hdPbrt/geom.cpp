@@ -135,6 +135,19 @@ void HdPbrtGeom::_SyncInstancing(HdSceneDelegate *sd)
     _instanced = instanced;
 }
 
+void HdPbrtGeom::_SyncCategories(HdSceneDelegate *sd)
+{
+    VtArray<TfToken> c = sd->GetCategories(_Prim().GetId());
+    if (getenv("HDPBRT_DEBUG")) {
+        fprintf(stderr, "hdPbrt %s categories:", _Prim().GetId().GetText());
+        for (auto const &t : c)
+            fprintf(stderr, " %s", t.GetText());
+        fprintf(stderr, "\n");
+    }
+    std::lock_guard<std::mutex> lock(_mutex);
+    _categories = c;
+}
+
 void HdPbrtGeom::_SyncDisplayColor(HdSceneDelegate *sd)
 {
     SdfPath const &id = _Prim().GetId();
@@ -284,6 +297,8 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
     // (selection). Alpha cut-outs go on the shapes too.
     std::ostringstream extra;
     extra << " \"integer hdpbrtprimid\" " << prim.GetPrimId();
+    // Light linking: the collections this prim is in (pbrt patch 9).
+    extra << _delegate->LinkParam(_categories);
     float alpha = mat.opacity * _displayOpacity;
     if (!mat.opacityTexture.empty())
         extra << " \"texture alpha\" " << HdPbrt_Quote(mat.opacityTexture);

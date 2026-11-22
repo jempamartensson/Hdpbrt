@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (8 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (9 commits, the same as `patches/`;
     regenerate with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o patches`).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
     the Blender flavor.
@@ -56,6 +56,12 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 8. USD light shaping on `DiffuseAreaLight` and `PointLight` (`HdPbrtShaping` in lights.h):
    `shapingfocus`, `shapingfocustint`, `shapingconeangle` (degrees), `shapingconesoftness`,
    `shapingies` (1-channel PFM, u = phi/2pi, v = theta/pi). Axis -z in light space.
+9. Light/shadow linking in volpath: shapes `"integer hdpbrtlinks"` (collection bits;
+   [-1] = none; absent = all), lights `hdpbrtlightlink` / `hdpbrtshadowlink`. Unlit
+   surfaces skip the light in SampleLd and for BSDF-sampled emission (previous vertex's
+   mask); shadow rays pass through non-member surfaces. Light link fields live on
+   `LightBase`; dispatch over the 9 light types needs `DispatchCPU` on a const Light
+   with a *named* lambda (pbrt's >8-type fallback forwards it as an lvalue).
 
 ## Done in the 2026-11-22 session
 
@@ -136,7 +142,15 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
   phi orientation follows hdEmbree and wasn't checked against Karma. Tests:
   `tests/shaping_scene.usda` with synthetic `ring.ies` / `lobes.ies`. A profile whose
   intensity varies with phi at theta 0 shows a seam through the nadir; that's the profile.
-- Not translated yet: light linking, volume
+- Light linking (done 2026-11-22, pbrt patch 9): needs `HdsiLightLinkingSceneIndex`
+  (registered in `sceneIndexPlugin.cpp` and `plugInfo.json`, phase 4 like hdPrman), else
+  Hydra reports no collections. Lights get `lightLink`/`shadowLink` category tokens, rprims
+  `GetCategories`; the delegate maps tokens to bits (`LinkBit`, max 64) and `HdPbrtGeom`
+  writes `hdpbrtlinks` at scene-write time (nothing when no light links). Works in
+  Houdini's viewport too. Test: `tests/linking_scene.usda`. Volumes and point-instance
+  categories aren't linked. Area-light shapes cast shadows and show their black back
+  (pre-existing).
+- Not translated yet: volume
   materials (Karma pyro shaders), in-memory Houdini volumes (`op:` paths).
 - Volumes (done 2026-11-22): `volume.cpp` (`HdPbrtField` bprims, `HdPbrtVolume`), converter
   `tools/vdb2nvdb.cpp` -> `hdpbrt_vdb2nvdb` next to pbrt (Houdini flavor, needs

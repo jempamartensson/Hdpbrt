@@ -280,6 +280,7 @@ protected:
     void _SyncTransform(HdSceneDelegate *sd);
     void _SyncInstancing(HdSceneDelegate *sd);  // after the instancer synced
     void _SyncDisplayColor(HdSceneDelegate *sd);
+    void _SyncCategories(HdSceneDelegate *sd);  // light-linking collections
 
     HdPbrtRenderDelegate *_delegate;
     mutable std::mutex _mutex;
@@ -291,6 +292,7 @@ protected:
     bool _hasDisplayColor = false;
     float _displayOpacity = 1.f;
     bool _instanced = false;
+    VtArray<TfToken> _categories;
 };
 
 // ---------------------------------------------------------------------------
@@ -540,6 +542,12 @@ public:
     // Convert an OpenVDB file's density grid (and temperature grid, if named)
     // to NanoVDB for pbrt's nanovdb medium with hdpbrt_vdb2nvdb (cached).
     // bbox: the density's active voxels in the file's world space.
+    // Light linking: each light-/shadow-link collection a light uses gets a
+    // bit (0..63; -1 for none or when out of bits). LinkParam gives the
+    // " \"integer hdpbrtlinks\" [...]" shape parameter for a prim's
+    // categories, or "" when no light uses linking.
+    int LinkBit(TfToken const &collection);
+    std::string LinkParam(VtArray<TfToken> const &categories);
     // HdPbrt_WriteIESTable, cached per file, mtime, angle scale and normalize.
     std::string GetIESTable(const std::string &ies, float angleScale, bool normalize);
     bool GetNanoVDB(const std::string &vdb, const std::string &densityGrid,
@@ -578,6 +586,8 @@ private:
     std::map<std::string, std::string> _equiAreaCache;
     std::map<std::string, std::pair<std::string, GfRange3d>> _nanoVdbCache;
     std::map<std::string, std::string> _iesCache;
+    std::mutex _linkMutex;
+    std::map<TfToken, int> _linkBits;
     hdpbrt::PbrtSession _session;
     int _renderCount = 0;
     GfVec2f _shutter{0.f, 0.f};

@@ -1,0 +1,320 @@
+From 519afad74e66cbcd6d55060835b57f0fffd47525 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sun, 22 Nov 2026 19:40:47 +0100
+Subject: [PATCH 9/9] Light linking and shadow linking in volpath (for hdPbrt)
+
+Shapes take "integer hdpbrtlinks" [collection indices 0..63] (their membership; [-1] for
+none), lights "integer hdpbrtlightlink" and "integer hdpbrtshadowlink" (a collection).
+VolPathIntegrator skips a light at surfaces outside its light-link collection, both for
+light samples and for emission found by BSDF sampling (the previous vertex's mask), and
+shadow rays pass through surfaces outside the light's shadow-link collection.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/cpu/integrators.cpp | 33 ++++++++++++++++++++++++++++++---
+ src/pbrt/cpu/primitive.cpp   |  1 +
+ src/pbrt/cpu/primitive.h     |  3 +++
+ src/pbrt/interaction.h       |  3 +++
+ src/pbrt/lights.cpp          | 15 +++++++++++++++
+ src/pbrt/lights.h            |  9 +++++++++
+ src/pbrt/scene.cpp           | 25 +++++++++++++++++++++++--
+ src/pbrt/util/transform.cpp  |  2 ++
+ 8 files changed, 86 insertions(+), 5 deletions(-)
+
+diff --git a/src/pbrt/cpu/integrators.cpp b/src/pbrt/cpu/integrators.cpp
+index f21c2fa..17c813f 100644
+--- a/src/pbrt/cpu/integrators.cpp
++++ b/src/pbrt/cpu/integrators.cpp
+@@ -991,6 +991,19 @@ STAT_COUNTER("Integrator/Volume interactions", volumeInteractions);
+ STAT_COUNTER("Integrator/Surface interactions", surfaceInteractions);
+ 
+ // VolPathIntegrator Method Definitions
++// hdPbrt: light linking. Whether a light illuminates a surface with the given
++// collection mask, and whether a surface blocks the light.
++static bool HdPbrtLit(const Light &light, uint64_t mask) {
++    auto get = [](auto ptr) { return ptr->hdpbrtLightLink; };
++    const int link = light.DispatchCPU(get);
++    return link < 0 || ((mask >> link) & 1);
++}
++static bool HdPbrtBlocks(const Light &light, uint64_t mask) {
++    auto get = [](auto ptr) { return ptr->hdpbrtShadowLink; };
++    const int link = light.DispatchCPU(get);
++    return link < 0 || ((mask >> link) & 1);
++}
++
+ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &lambda,
+                                       Sampler sampler, ScratchBuffer &scratchBuffer,
+                                       VisibleSurface *visibleSurf) const {
+@@ -1001,6 +1014,7 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+     Float etaScale = 1;
+ 
+     LightSampleContext prevIntrContext;
++    uint64_t prevLinkMask = ~uint64_t(0);  // hdPbrt: light linking at the last vertex
+ 
+     while (true) {
+         // Sample segment of volumetric scattering path
+@@ -1085,6 +1099,7 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+                                 beta *= ps->p / ps->pdf;
+                                 r_l = r_u / ps->pdf;
+                                 prevIntrContext = LightSampleContext(intr);
++                                prevLinkMask = ~uint64_t(0);
+                                 scattered = true;
+                                 ray.o = p;
+                                 ray.d = ps->wi;
+@@ -1122,6 +1137,8 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+         if (!si) {
+             // Accumulate contributions from infinite light sources
+             for (const auto &light : infiniteLights) {
++                if (depth > 0 && !HdPbrtLit(light, prevLinkMask))
++                    continue;
+                 if (SampledSpectrum Le = light.Le(ray, lambda); Le) {
+                     if (depth == 0 || specularBounce)
+                         L += beta * Le / r_u.Average();
+@@ -1138,7 +1155,11 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+             break;
+         }
+         SurfaceInteraction &isect = si->intr;
+-        if (SampledSpectrum Le = isect.Le(-ray.d, lambda); Le) {
++        SampledSpectrum Le = isect.Le(-ray.d, lambda);
++        if (Le && depth > 0 && isect.areaLight &&
++            !HdPbrtLit(Light(isect.areaLight), prevLinkMask))
++            Le = SampledSpectrum(0.f);
++        if (Le) {
+             // Add contribution of emission from intersected surface
+             if (depth == 0 || specularBounce)
+                 L += beta * Le / r_u.Average();
+@@ -1200,6 +1221,7 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+             DCHECK(IsInf(L.y(lambda)) == false);
+         }
+         prevIntrContext = LightSampleContext(isect);
++        prevLinkMask = isect.hdpbrtLinkMask;
+ 
+         // Sample BSDF to get new volumetric path direction
+         Vector3f wo = isect.wo;
+@@ -1338,6 +1360,9 @@ SampledSpectrum VolPathIntegrator::SampleLd(const Interaction &intr, const BSDF
+         return SampledSpectrum(0.f);
+     Light light = sampledLight->light;
+     DCHECK(light && sampledLight->p != 0);
++    // hdPbrt: light linking (medium scattering points are lit by every light).
++    if (bsdf && !HdPbrtLit(light, intr.AsSurface().hdpbrtLinkMask))
++        return SampledSpectrum(0.f);
+ 
+     // Sample a point on the light source
+     pstd::optional<LightLiSample> ls = light.SampleLi(ctx, uLight, lambda, true);
+@@ -1372,8 +1397,10 @@ SampledSpectrum VolPathIntegrator::SampleLd(const Interaction &intr, const BSDF
+     while (lightRay.d != Vector3f(0, 0, 0)) {
+         // Trace ray through media to estimate transmittance
+         pstd::optional<ShapeIntersection> si = Intersect(lightRay, 1 - ShadowEpsilon);
+-        // Handle opaque surface along ray's path
+-        if (si && si->intr.material)
++        // Handle opaque surface along ray's path (hdPbrt: unless shadow
++        // linking says it doesn't block this light; then it's passed through
++        // like a medium boundary)
++        if (si && si->intr.material && HdPbrtBlocks(light, si->intr.hdpbrtLinkMask))
+             return SampledSpectrum(0.f);
+ 
+         // Update transmittance for current ray segment
+diff --git a/src/pbrt/cpu/primitive.cpp b/src/pbrt/cpu/primitive.cpp
+index 379ddb5..793b10e 100644
+--- a/src/pbrt/cpu/primitive.cpp
++++ b/src/pbrt/cpu/primitive.cpp
+@@ -73,6 +73,7 @@ pstd::optional<ShapeIntersection> GeometricPrimitive::Intersect(const Ray &r,
+     // Initialize _SurfaceInteraction_ after _Shape_ intersection
+     si->intr.SetIntersectionProperties(material, areaLight, &mediumInterface, r.medium);
+     si->intr.hdpbrtPrimId = hdpbrtPrimId;
++    si->intr.hdpbrtLinkMask = hdpbrtLinkMask;
+ 
+     return si;
+ }
+diff --git a/src/pbrt/cpu/primitive.h b/src/pbrt/cpu/primitive.h
+index bbbfea2..d688eca 100644
+--- a/src/pbrt/cpu/primitive.h
++++ b/src/pbrt/cpu/primitive.h
+@@ -58,6 +58,8 @@ class GeometricPrimitive {
+     bool IntersectP(const Ray &r, Float tMax) const;
+     // hdPbrt: id reported for hits on this primitive.
+     void SetHdPbrtPrimId(int id) { hdpbrtPrimId = id; }
++    // hdPbrt: light-linking collection membership reported for hits.
++    void SetHdPbrtLinkMask(uint64_t m) { hdpbrtLinkMask = m; }
+ 
+   private:
+     // GeometricPrimitive Private Members
+@@ -67,6 +69,7 @@ class GeometricPrimitive {
+     MediumInterface mediumInterface;
+     FloatTexture alpha;
+     int hdpbrtPrimId = -1;
++    uint64_t hdpbrtLinkMask = ~uint64_t(0);
+ };
+ 
+ // SimplePrimitive Definition
+diff --git a/src/pbrt/interaction.h b/src/pbrt/interaction.h
+index 8cbeee2..3cc82c3 100644
+--- a/src/pbrt/interaction.h
++++ b/src/pbrt/interaction.h
+@@ -259,6 +259,9 @@ class SurfaceInteraction : public Interaction {
+     int faceIndex = 0;
+     // hdPbrt: ids of the primitive (shape) and object instance that were hit.
+     int hdpbrtPrimId = -1, hdpbrtInstanceId = -1;
++    // hdPbrt: light-linking collections this surface belongs to (bit i =
++    // collection i; all bits = belongs to every collection).
++    uint64_t hdpbrtLinkMask = ~uint64_t(0);
+     Material material;
+     Light areaLight;
+     Vector3f dpdx, dpdy;
+diff --git a/src/pbrt/lights.cpp b/src/pbrt/lights.cpp
+index bb2f444..11dc637 100644
+--- a/src/pbrt/lights.cpp
++++ b/src/pbrt/lights.cpp
+@@ -1542,6 +1542,19 @@ PBRT_CPU_GPU void Light::PDF_Le(const Interaction &intr, Vector3f w, Float *pdfP
+     return Dispatch(pdf);
+ }
+ 
++// hdPbrt: read the light-linking parameters into whichever light this is
++// (const dispatch: pbrt's non-const one doesn't take nine light types).
++static void HdPbrtReadLinks(const Light &light, const ParameterDictionary &parameters) {
++    // A named lambda: pbrt's dispatch over more than 8 types forwards it as an
++    // lvalue.
++    auto read = [&](auto ptr) {
++        using T = std::remove_const_t<std::remove_pointer_t<decltype(ptr)>>;
++        const_cast<T *>(ptr)->HdPbrtReadLinks(parameters);
++        return 0;
++    };
++    light.DispatchCPU(read);
++}
++
+ Light Light::Create(const std::string &name, const ParameterDictionary &parameters,
+                     const Transform &renderFromLight,
+                     const CameraTransform &cameraTransform, Medium outsideMedium,
+@@ -1705,6 +1718,7 @@ Light Light::Create(const std::string &name, const ParameterDictionary &paramete
+     if (!light)
+         ErrorExit(loc, "%s: unable to create light.", name);
+ 
++    HdPbrtReadLinks(light, parameters);  // hdPbrt
+     parameters.ReportUnused();
+     return light;
+ }
+@@ -1724,6 +1738,7 @@ Light Light::CreateArea(const std::string &name, const ParameterDictionary &para
+     if (!area)
+         ErrorExit(loc, "%s: unable to create area light.", name);
+ 
++    HdPbrtReadLinks(area, parameters);  // hdPbrt
+     parameters.ReportUnused();
+     return area;
+ }
+diff --git a/src/pbrt/lights.h b/src/pbrt/lights.h
+index 3c0d962..9a34f08 100644
+--- a/src/pbrt/lights.h
++++ b/src/pbrt/lights.h
+@@ -173,6 +173,15 @@ class LightBase {
+         return SampledSpectrum(0.f);
+     }
+ 
++    // hdPbrt: light linking. The light only illuminates surfaces in
++    // collection hdpbrtLightLink, and only surfaces in hdpbrtShadowLink block
++    // it (-1 = all). Read from "integer hdpbrtlightlink" / "hdpbrtshadowlink".
++    int hdpbrtLightLink = -1, hdpbrtShadowLink = -1;
++    void HdPbrtReadLinks(const ParameterDictionary &parameters) {
++        hdpbrtLightLink = parameters.GetOneInt("hdpbrtlightlink", -1);
++        hdpbrtShadowLink = parameters.GetOneInt("hdpbrtshadowlink", -1);
++    }
++
+   protected:
+     // LightBase Protected Methods
+     static const DenselySampledSpectrum *LookupSpectrum(Spectrum s);
+diff --git a/src/pbrt/scene.cpp b/src/pbrt/scene.cpp
+index c0f0870..beeaaad 100644
+--- a/src/pbrt/scene.cpp
++++ b/src/pbrt/scene.cpp
+@@ -31,6 +31,21 @@
+ 
+ namespace pbrt {
+ 
++// hdPbrt: "integer hdpbrtlinks" [collection indices 0..63] -> membership mask
++// for light linking. Without the parameter a shape is in every collection;
++// an empty membership is written as "integer hdpbrtlinks" [-1].
++static uint64_t HdPbrtLinkMask(const ParameterDictionary &parameters) {
++    std::vector<int> links = parameters.GetIntArray("hdpbrtlinks");
++    if (links.empty())
++        return ~uint64_t(0);
++    uint64_t m = 0;
++    for (int l : links)
++        if (l >= 0 && l < 64)
++            m |= uint64_t(1) << l;
++    return m;
++}
++
++
+ InternCache<std::string> SceneEntity::internedStrings(Allocator{});
+ 
+ template <typename T, typename U>
+@@ -1453,6 +1468,7 @@ Primitive BasicScene::CreateAggregate(
+             FloatTexture alphaTex = getAlphaTexture(sh.parameters, &sh.loc);
+             // hdPbrt: id reported for hits on this shape.
+             const int hdpbrtPrimId = sh.parameters.GetOneInt("hdpbrtprimid", -1);
++            const uint64_t hdpbrtLinkMask = HdPbrtLinkMask(sh.parameters);
+             sh.parameters.ReportUnused();  // do now so can grab alpha...
+ 
+             pbrt::Material mtl = nullptr;
+@@ -1478,12 +1494,14 @@ Primitive BasicScene::CreateAggregate(
+                 if (sh.lightIndex != -1 && iter != shapeIndexToAreaLights.end())
+                     area = (*iter->second)[j];
+ 
+-                if (!area && !mi.IsMediumTransition() && !alphaTex && hdpbrtPrimId < 0)
++                if (!area && !mi.IsMediumTransition() && !alphaTex && hdpbrtPrimId < 0 &&
++                    hdpbrtLinkMask == ~uint64_t(0))
+                     primitives.push_back(new SimplePrimitive(shapes[j], mtl));
+                 else {
+                     GeometricPrimitive *gp =
+                         new GeometricPrimitive(shapes[j], mtl, area, mi, alphaTex);
+                     gp->SetHdPbrtPrimId(hdpbrtPrimId);
++                    gp->SetHdPbrtLinkMask(hdpbrtLinkMask);
+                     primitives.push_back(gp);
+                 }
+             }
+@@ -1514,6 +1532,7 @@ Primitive BasicScene::CreateAggregate(
+ 
+             FloatTexture alphaTex = getAlphaTexture(sh.parameters, &sh.loc);
+             const int hdpbrtPrimId = sh.parameters.GetOneInt("hdpbrtprimid", -1);
++            const uint64_t hdpbrtLinkMask = HdPbrtLinkMask(sh.parameters);
+             sh.parameters.ReportUnused();  // do now so can grab alpha...
+ 
+             // Create initial shape or shapes for animated shape
+@@ -1539,12 +1558,14 @@ Primitive BasicScene::CreateAggregate(
+                     ErrorExit(&sh.loc, "Animated area lights are not supported.");
+                 }
+ 
+-                if (!mi.IsMediumTransition() && !alphaTex && hdpbrtPrimId < 0)
++                if (!mi.IsMediumTransition() && !alphaTex && hdpbrtPrimId < 0 &&
++                    hdpbrtLinkMask == ~uint64_t(0))
+                     prims.push_back(new SimplePrimitive(s, mtl));
+                 else {
+                     GeometricPrimitive *gp = new GeometricPrimitive(
+                         s, mtl, nullptr /* area light */, mi, alphaTex);
+                     gp->SetHdPbrtPrimId(hdpbrtPrimId);
++                    gp->SetHdPbrtLinkMask(hdpbrtLinkMask);
+                     prims.push_back(gp);
+                 }
+             }
+diff --git a/src/pbrt/util/transform.cpp b/src/pbrt/util/transform.cpp
+index 1c1ec37..f2c8a9c 100644
+--- a/src/pbrt/util/transform.cpp
++++ b/src/pbrt/util/transform.cpp
+@@ -269,6 +269,7 @@ PBRT_CPU_GPU SurfaceInteraction Transform::operator()(const SurfaceInteraction &
+     ret.faceIndex = si.faceIndex;
+     ret.hdpbrtPrimId = si.hdpbrtPrimId;
+     ret.hdpbrtInstanceId = si.hdpbrtInstanceId;
++    ret.hdpbrtLinkMask = si.hdpbrtLinkMask;
+ 
+     return ret;
+ }
+@@ -379,6 +380,7 @@ PBRT_CPU_GPU SurfaceInteraction Transform::ApplyInverse(const SurfaceInteraction
+     ret.faceIndex = si.faceIndex;
+     ret.hdpbrtPrimId = si.hdpbrtPrimId;
+     ret.hdpbrtInstanceId = si.hdpbrtInstanceId;
++    ret.hdpbrtLinkMask = si.hdpbrtLinkMask;
+     return ret;
+ }
+ 
+-- 
+2.43.0
+

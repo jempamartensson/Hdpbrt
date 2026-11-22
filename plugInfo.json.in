@@ -13,6 +13,12 @@
                         "loadWithRenderer": "pbrt",
                         "priority": 0,
                         "displayName": "Implicit surfaces to meshes for hdPbrt"
+                    },
+                    "HdPbrt_LightLinkingSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "loadWithRenderer": "pbrt",
+                        "priority": 0,
+                        "displayName": "Light linking for hdPbrt"
                     }
                 }
             },

@@ -161,7 +161,29 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
             }
         }
     }
-    const std::string shaping = sh.str();
+    std::ostringstream lk;
+    // Light linking (pbrt patch 9): the light-/shadow-link collections, as
+    // bits the geometry's "hdpbrtlinks" refer to. Empty: the default (all).
+    {
+        auto collection = [&](TfToken const &t) {
+            VtValue v = sd->GetLightParamValue(id, t);
+            return v.IsHolding<TfToken>() ? v.UncheckedGet<TfToken>() : TfToken();
+        };
+        if (getenv("HDPBRT_DEBUG"))
+            fprintf(stderr, "hdPbrt light %s: lightLink %s (%s) shadowLink %s (%s)\n", id.GetText(),
+                    collection(HdTokens->lightLink).GetText(),
+                    sd->GetLightParamValue(id, HdTokens->lightLink).GetTypeName().c_str(),
+                    collection(HdTokens->shadowLink).GetText(),
+                    sd->GetLightParamValue(id, HdTokens->shadowLink).GetTypeName().c_str());
+        const int lb = _delegate->LinkBit(collection(HdTokens->lightLink));
+        const int sb = _delegate->LinkBit(collection(HdTokens->shadowLink));
+        if (lb >= 0)
+            lk << " \"integer hdpbrtlightlink\" " << lb;
+        if (sb >= 0)
+            lk << " \"integer hdpbrtshadowlink\" " << sb;
+    }
+    const std::string links = lk.str();
+    const std::string shaping = sh.str() + links;
 
     os << "# light " << id.GetString() << "\n";
     auto areaHeader = [&](double area) {
@@ -171,13 +193,13 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
         os << "AttributeBegin\n  Transform " << HdPbrt_Matrix(xf) << "\n"
            << "  Material \"diffuse\" \"rgb reflectance\" [0 0 0]\n"
            << "  AreaLightSource \"diffuse\" \"rgb L\" " << HdPbrt_Rgb(Le)
-           << (_type == HdPrimTypeTokens->cylinderLight ? std::string() : shaping) << "\n";
+           << (_type == HdPrimTypeTokens->cylinderLight ? links : shaping) << "\n";
     };
 
     if (_type == HdPrimTypeTokens->distantLight) {
         os << "AttributeBegin\n  Transform " << HdPbrt_Matrix(xf) << "\n"
            << "  LightSource \"distant\" \"point3 from\" [0 0 0] \"point3 to\" [0 0 -1]"
-           << " \"rgb L\" " << HdPbrt_Rgb(L) << "\nAttributeEnd\n";
+           << " \"rgb L\" " << HdPbrt_Rgb(L) << links << "\nAttributeEnd\n";
     } else if (_type == HdPrimTypeTokens->sphereLight) {
         float r = _Get<float>(sd, id, HdLightTokens->radius, 0.5f);
         bool point = _Get<bool>(sd, id, TfToken("treatAsPoint"), false) || r <= 0;
@@ -229,11 +251,11 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
         if (!eq.empty()) {
             float lum = 0.2126f * color[0] + 0.7152f * color[1] + 0.0722f * color[2];
             os << "  LightSource \"infinite\" \"string filename\" " << HdPbrt_Quote(eq)
-               << " \"float scale\" " << scale * lum << "\n";
+               << " \"float scale\" " << scale * lum << links << "\n";
         } else {
             if (!tex.empty())
                 TF_WARN("hdPbrt: could not use dome texture %s", tex.c_str());
-            os << "  LightSource \"infinite\" \"rgb L\" " << HdPbrt_Rgb(L) << "\n";
+            os << "  LightSource \"infinite\" \"rgb L\" " << HdPbrt_Rgb(L) << links << "\n";
         }
         os << "AttributeEnd\n";
     } else {

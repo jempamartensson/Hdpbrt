@@ -422,6 +422,41 @@ std::string HdPbrtRenderDelegate::GetEquiAreaTexture(const std::string &latlong)
     return out;
 }
 
+int HdPbrtRenderDelegate::LinkBit(TfToken const &collection)
+{
+    if (collection.IsEmpty())
+        return -1;
+    std::lock_guard<std::mutex> l(_linkMutex);
+    auto it = _linkBits.find(collection);
+    if (it != _linkBits.end())
+        return it->second;
+    if (_linkBits.size() >= 64) {
+        TF_WARN("hdPbrt: more than 64 light-linking collections; %s is ignored",
+                collection.GetText());
+        return -1;
+    }
+    const int bit = int(_linkBits.size());
+    _linkBits.emplace(collection, bit);
+    return bit;
+}
+
+std::string HdPbrtRenderDelegate::LinkParam(VtArray<TfToken> const &categories)
+{
+    std::lock_guard<std::mutex> l(_linkMutex);
+    if (_linkBits.empty())
+        return {};
+    std::string s = " \"integer hdpbrtlinks\" [";
+    bool any = false;
+    for (TfToken const &c : categories) {
+        auto it = _linkBits.find(c);
+        if (it != _linkBits.end()) {
+            s += " " + std::to_string(it->second);
+            any = true;
+        }
+    }
+    return s + (any ? " ]" : " -1 ]");  // -1: in no collection
+}
+
 std::string HdPbrtRenderDelegate::GetIESTable(const std::string &ies, float angleScale,
                                               bool normalize)
 {

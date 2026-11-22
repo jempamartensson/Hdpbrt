@@ -120,6 +120,16 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   (hemi)sphere), and tabulated into a 180x180 one-channel PFM that pbrt samples
   bilinearly. Raw candela values multiply the light's color, as in hdEmbree. Not on
   cylinder lights. pbrt's light sampling ignores shaping, so tight cones are noisier.
+- **Light linking** (UsdLuxLightAPI `lightLink` / `shadowLink` collections, pbrt patch 9):
+  Hydra resolves the collections only with `HdsiLightLinkingSceneIndex` in the scene index
+  chain, which hdPbrt registers for itself (as hdPrman does). Lights then report a
+  category token per non-trivial collection and geometry its categories; the delegate maps
+  each token to a bit (up to 64) and writes `"integer hdpbrtlinks"` on shapes and
+  `"integer hdpbrtlightlink"` / `"hdpbrtshadowlink"` on lights. In volpath (the default
+  integrator; other integrators ignore links) a light skips surfaces outside its
+  light-link collection, for light samples and for emission reached by BSDF sampling, and
+  its shadow rays pass through surfaces outside its shadow-link collection (BSDF-sampled
+  rays still stop there). Medium scattering points are lit by every light.
 - **Camera:** the render pass state's view and projection (so viewport framing and window
   policy match), perspective and orthographic. Depth of field from the active HdCamera:
   fStop > 0 and focusDistance > 0 give pbrt's thin lens (`lensradius` = focalLength /
@@ -185,7 +195,7 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
 
 ## Layout (~/dev/pbrt_hydra)
 
-- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth, id and alpha channels, deformation blur, N-key motion, Decompose reflections, light shaping).
+- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth, id and alpha channels, deformation blur, N-key motion, Decompose reflections, light shaping, light linking).
 - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`: headers for the Blender build.
   `src/usd-blender-generated/pxr/pxr.h`: pxr.h filled in for Blender's USD
   (internal namespace `pxrBlender_v26_08`, version 2608).
