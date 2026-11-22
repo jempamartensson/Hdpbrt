@@ -26,7 +26,11 @@ void HdPbrtInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *renderParam
     if (*dirtyBits & HdChangeTracker::DirtyVisibility)
         _visible = delegate->GetVisible(GetId());
     if (*dirtyBits & HdChangeTracker::DirtyTransform)
-        delegate->SampleInstancerTransform(GetId(), -w, w, &_xform);
+        HdPbrt_SampleXform(
+            [&](float a, float b, HdTimeSampleArray<GfMatrix4d, 4> *sa) {
+                delegate->SampleInstancerTransform(GetId(), a, b, sa);
+            },
+            &_xform);
     if (HdChangeTracker::IsAnyPrimvarDirty(*dirtyBits, GetId())) {
         for (const HdPrimvarDescriptor &pv :
              delegate->GetPrimvarDescriptors(GetId(), HdInterpolationInstance)) {
@@ -57,6 +61,26 @@ static VtValue _ValueAt(const HdTimeSampleArray<VtValue, 4> &sa, float t)
     const VtValue &v0 = sa.values[i], &v1 = sa.values[i + 1];
     const float t0 = sa.times[i], t1 = sa.times[i + 1];
     const float a = t1 > t0 ? (t - t0) / (t1 - t0) : 0.f;
+    // Orientations: slerp per instance (linear blending would shrink and
+    // skew the rotations between samples).
+    if (v0.IsHolding<VtQuathArray>() && v1.IsHolding<VtQuathArray>() &&
+        v0.GetArraySize() == v1.GetArraySize()) {
+        const VtQuathArray &q0 = v0.UncheckedGet<VtQuathArray>();
+        const VtQuathArray &q1 = v1.UncheckedGet<VtQuathArray>();
+        VtQuathArray r(q0.size());
+        for (size_t k = 0; k < q0.size(); ++k)
+            r[k] = GfQuath(GfSlerp(double(a), GfQuatd(q0[k]), GfQuatd(q1[k])));
+        return VtValue(r);
+    }
+    if (v0.IsHolding<VtQuatfArray>() && v1.IsHolding<VtQuatfArray>() &&
+        v0.GetArraySize() == v1.GetArraySize()) {
+        const VtQuatfArray &q0 = v0.UncheckedGet<VtQuatfArray>();
+        const VtQuatfArray &q1 = v1.UncheckedGet<VtQuatfArray>();
+        VtQuatfArray r(q0.size());
+        for (size_t k = 0; k < q0.size(); ++k)
+            r[k] = GfQuatf(GfSlerp(double(a), GfQuatd(q0[k]), GfQuatd(q1[k])));
+        return VtValue(r);
+    }
     if (v0.GetType() == v1.GetType() && v0.GetArraySize() == v1.GetArraySize()) {
         VtValue r = HdResampleNeighbors(a, v0, v1);
         if (!r.IsEmpty())
@@ -100,7 +124,7 @@ VtMatrix4dArray HdPbrtInstancer::ComputeInstanceTransforms(SdfPath const &protot
     if (it == _indices.end())
         return {};
     const VtIntArray &indices = it->second;
-    GfMatrix4d instancerXf = _xform.count > 0 ? _xform.Resample(time) : GfMatrix4d(1.0);
+    GfMatrix4d instancerXf = HdPbrt_XformAt(_xform, time);
     VtMatrix4dArray xfs(indices.size());
     for (size_t i = 0; i < indices.size(); ++i)
         xfs[i] = instancerXf;

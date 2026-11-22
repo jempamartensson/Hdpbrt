@@ -20,7 +20,8 @@ pieces (render buffer, instancer, implicit-surface scene index plugin) from USD'
 - **Render settings** (Houdini: Render Settings LOP custom attributes or viewport delegate
   options; Blender: the add-on panel): `pbrt:pixelSamples` (256), `pbrt:maxDepth` (5),
   `pbrt:integrator` (volpath), `pbrt:sampler` (zsobol), `pbrt:threads` (0 = all but two),
-  `pbrt:regularize`, `pbrt:depthOfField` (true), `pbrt:motionBlur` (true), `pbrt:exportPath` (also write the .pbrt scene there).
+  `pbrt:regularize`, `pbrt:depthOfField` (true), `pbrt:motionBlur` (true), `pbrt:xformSamples` (2), `pbrt:geoSamples` (2),
+  `pbrt:exportPath` (also write the .pbrt scene there).
 - **Husk:** not testable here: the Apprentice licence refuses third-party delegates in husk.
 
 ## How it works
@@ -82,8 +83,17 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   time) become pbrt's `shutteropen`/`shutterclose` and `TransformTimes`. Meshes sample their
   transform, and instancers their transform and instance primvars, over a fixed window of
   +-1 frame when they sync (`HdPbrt_SampleWindow`); the scene writer resamples them at shutter
-  open and close (`ActiveTransform StartTime/EndTime`). pbrt interpolates between those two,
-  so a shutter longer than the window, or curved motion within it, is approximated. No
+  open and close (`ActiveTransform StartTime/EndTime`). With `pbrt:xformSamples` N > 2, the
+  keys are N evenly spaced shutter times, written as pbrt patch 6's
+  `Attribute "shape" "float hdpbrtmotionxforms" [16*N] "float hdpbrtmotiontimes" [N]` before
+  an `ObjectInstance` (a moving non-instanced mesh becomes a one-instance object; emissive
+  ones keep two keys because pbrt can't instance area lights). pbrt's `MotionPrimitive`
+  interpolates each segment like an AnimatedTransform, so curved motion follows its curve.
+  For exact sub-frame transforms, time-varying transforms are evaluated on a 1/16-frame grid
+  with `SampleTransform(id, t, t + 1e-3)` (USD evaluates an interval's edges exactly; a
+  zero-width interval reports nothing time-varying); interpolating authored samples of the
+  composed matrix would turn an orbit into a straight line. Between grid points, transforms
+  are decomposed and slerped. A shutter longer than the +-1 frame window clamps. No
   camera motion (the render pass gets a single view matrix), lights don't move.
 - **Deformation blur:** stock pbrt-v4 has no moving triangles (motion comes only from
   animated transforms), so patch 5 adds end-pose vertices to `TriangleMesh`: positions and
@@ -93,7 +103,8 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   `"string motionfilename"` (a PLY with the same vertices). The delegate samples `points`
   over +-1 frame at sync; when they move with a constant count it writes PLYs for shutter
   open and close at scene-write time (smooth normals recomputed per pose, authored normals
-  static, uvs shared). Off with `pbrt:motionBlur` false or the render
+  static, uvs shared). `pbrt:geoSamples` N > 2 writes N poses (`"string motionfilenames"`,
+  patch 6); points between authored samples are linear, as USD interpolates them. Off with `pbrt:motionBlur` false or the render
   settings' `disableMotionBlur`. Houdini: needs authored time samples (as Karma does; a LOP
   network evaluated per frame only has the current one, use a Cache LOP). Blender 5.3's
   Hydra export sends no shutter (0..0), so no motion blur there.
@@ -119,7 +130,7 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
 
 ## Layout (~/dev/pbrt_hydra)
 
-- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth, id and alpha channels, deformation blur).
+- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth, id and alpha channels, deformation blur, N-key motion).
 - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`: headers for the Blender build.
   `src/usd-blender-generated/pxr/pxr.h`: pxr.h filled in for Blender's USD
   (internal namespace `pxrBlender_v26_08`, version 2608).
@@ -161,6 +172,10 @@ Gotchas:
   test scene with a moving sphere and point instances and a deforming quad, shutter 0..1,
   rendered at frame 1
   (`docs/images/motion_blur.png`).
+- `hython tests/render_settings.py out.png tests/curved_scene.usda 1 pbrt:xformSamples=9
+  pbrt:geoSamples=9` (with `HDPBRT_KEEP_TMP=1 HDPBRT_TMPDIR=<dir>`): an orbiting ball and a
+  quad that rises and falls within the shutter. `docs/images/curved_motion.png` shows 2
+  samples (chord, no deformation) next to 9 (arc, rise and fall).
 - Live viewport test without touching the user's desktop: `test/viewport/` (vp_test.py,
   run_real.sh). Start a private headless compositor with an X server:
   `dbus-run-session` running `gnome-shell --headless --virtual-monitor 1920x1080 --wayland

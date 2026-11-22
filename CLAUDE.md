@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (5 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (6 commits, the same as `patches/`;
     regenerate with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o patches`).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
     the Blender flavor.
@@ -45,6 +45,11 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    time over `time0..time1`. `trianglemesh` takes `"point3 P1"`/`"normal N1"`, `plymesh` takes
    `"string motionfilename"` (PLY with the same vertices); both take `"float motiontimes"`.
    Bounds cover both poses; Area/SolidAngle use the start pose. Not for quads/displacement.
+6. N-key motion. An `ObjectInstance` takes `Attribute "shape" "float hdpbrtmotionxforms"
+   [16*N]` (world-from-instance, Transform layout) and `"float hdpbrtmotiontimes" [N]`;
+   `MotionPrimitive` picks the segment by ray time (each segment an `AnimatedTransform`).
+   Meshes hold N poses: `plymesh` `"string motionfilenames" [...]` + `"float motiontimes"
+   [N]` (filename is pose 0; patch 5's `motionfilename` still works).
 
 ## Done in the 2026-11-22 session
 
@@ -112,6 +117,16 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 
 - Not translated yet: curves, points, volumes, subdivision refinement, camera motion blur,
   light shaping/IES, light linking. Implicit spheres are coarse.
+- Curved motion (done 2026-11-22, pbrt patch 6): `pbrt:xformSamples` / `pbrt:geoSamples`
+  (default 2) keys evenly spaced over the shutter. Transforms are sampled at sync on a
+  1/16-frame grid over +-1 frame, each with `SampleTransform(id, t, t + 1e-3)`: a zero-width
+  interval returns nothing time-varying, a tiny one has its edges evaluated exactly by USD
+  (a rotateY orbit follows its arc; Houdini's viewport does this too). Between keys,
+  `HdPbrt_InterpolateXform` decomposes (slerp), instance quaternions slerp. More than two
+  transform keys need an ObjectInstance, so a moving non-instanced mesh is written as a
+  one-instance object (except emissive ones: pbrt can't instance area lights, two keys).
+  `tests/curved_scene.usda` + `tests/render_settings.py` (renders with renderer settings;
+  reads pbrt's PFM from HDPBRT_TMPDIR). `docs/images/curved_motion.png`: 2 vs 9 samples.
 - Deformation blur (done 2026-11-22, pbrt patch 5): a mesh samples `points` over +-1 frame at
   sync; only when they move (same count) it keeps `_Motion` (samples, PLY vertex -> point
   map, indices, uvs, authored normals or a topology copy for smooth normals). `Write()`

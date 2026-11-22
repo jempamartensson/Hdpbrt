@@ -20,7 +20,7 @@ J=${J:-8}
 PBRT_COMMIT=20e41fd
 mkdir -p "$WORK"
 
-# 1. pbrt-v4 at a known commit + patches (parent-PID watchdog, depth, id and alpha channels, deformation blur)
+# 1. pbrt-v4 at a known commit + patches (parent-PID watchdog, depth, id and alpha channels, deformation and N-key motion blur)
 if [ ! -d "$WORK/pbrt-v4/.git" ]; then
   git clone --recursive https://github.com/mmp/pbrt-v4.git "$WORK/pbrt-v4"
   git -C "$WORK/pbrt-v4" checkout -b hdpbrt $PBRT_COMMIT

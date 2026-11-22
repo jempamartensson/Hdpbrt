@@ -1,0 +1,510 @@
+From 94c88d96903b3966009f4fc5c5bdf1190eed2270 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sun, 22 Nov 2026 18:44:38 +0100
+Subject: [PATCH 6/6] N-key motion: transform keys for object instances and N
+ mesh poses (for hdPbrt)
+
+An ObjectInstance takes Attribute "shape" "float hdpbrtmotionxforms" [16 * N] and
+"float hdpbrtmotiontimes" [N]: a MotionPrimitive moves it through N transform keys, each
+segment interpolated like an AnimatedTransform, so many keys give curved motion.
+Triangle meshes hold N poses: plymesh "string motionfilenames" [...] with
+"float motiontimes" [N] (the mesh file is the first pose); motionfilename still works.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/cpu/primitive.cpp | 45 ++++++++++++++++++++++
+ src/pbrt/cpu/primitive.h   | 27 ++++++++++++-
+ src/pbrt/scene.cpp         | 45 +++++++++++++++++++++-
+ src/pbrt/scene.h           |  4 ++
+ src/pbrt/shapes.cpp        | 77 +++++++++++++++++++++++++-------------
+ src/pbrt/shapes.h          |  6 +--
+ src/pbrt/util/mesh.cpp     | 52 ++++++++++++++++++-------
+ src/pbrt/util/mesh.h       | 59 +++++++++++++++++++++--------
+ 8 files changed, 253 insertions(+), 62 deletions(-)
+
+diff --git a/src/pbrt/cpu/primitive.cpp b/src/pbrt/cpu/primitive.cpp
+index 44f258e..379ddb5 100644
+--- a/src/pbrt/cpu/primitive.cpp
++++ b/src/pbrt/cpu/primitive.cpp
+@@ -162,4 +162,49 @@ bool AnimatedPrimitive::IntersectP(const Ray &r, Float tMax) const {
+     return primitive.IntersectP(ray, tMax);
+ }
+ 
++// hdPbrt: MotionPrimitive Method Definitions
++MotionPrimitive::MotionPrimitive(Primitive p, std::vector<Transform> renderFromPrimitive,
++                                 std::vector<Float> t)
++    : primitive(p), times(std::move(t)) {
++    CHECK_GE(renderFromPrimitive.size(), 2);
++    CHECK_EQ(renderFromPrimitive.size(), times.size());
++    for (size_t k = 0; k + 1 < renderFromPrimitive.size(); ++k)
++        segments.push_back(AnimatedTransform(renderFromPrimitive[k], times[k],
++                                             renderFromPrimitive[k + 1], times[k + 1]));
++    primitiveMemory += sizeof(*this) + segments.size() * sizeof(AnimatedTransform);
++}
++
++Bounds3f MotionPrimitive::Bounds() const {
++    Bounds3f pb = primitive.Bounds(), b;
++    for (const AnimatedTransform &s : segments)
++        b = Union(b, s.MotionBounds(pb));
++    return b;
++}
++
++const AnimatedTransform &MotionPrimitive::Segment(Float time) const {
++    size_t k = 0;
++    while (k + 1 < segments.size() && times[k + 1] <= time)
++        ++k;
++    return segments[k];
++}
++
++pstd::optional<ShapeIntersection> MotionPrimitive::Intersect(const Ray &r,
++                                                             Float tMax) const {
++    Transform interpRenderFromPrimitive = Segment(r.time).Interpolate(r.time);
++    Ray ray = interpRenderFromPrimitive.ApplyInverse(r, &tMax);
++    pstd::optional<ShapeIntersection> si = primitive.Intersect(ray, tMax);
++    if (!si)
++        return {};
++    si->intr = interpRenderFromPrimitive(si->intr);
++    CHECK_GE(Dot(si->intr.n, si->intr.shading.n), 0);
++    if (hdpbrtInstanceId >= 0)
++        si->intr.hdpbrtInstanceId = hdpbrtInstanceId;
++    return si;
++}
++
++bool MotionPrimitive::IntersectP(const Ray &r, Float tMax) const {
++    Ray ray = Segment(r.time).ApplyInverse(r, &tMax);
++    return primitive.IntersectP(ray, tMax);
++}
++
+ }  // namespace pbrt
+diff --git a/src/pbrt/cpu/primitive.h b/src/pbrt/cpu/primitive.h
+index a048a79..bbbfea2 100644
+--- a/src/pbrt/cpu/primitive.h
++++ b/src/pbrt/cpu/primitive.h
+@@ -26,13 +26,15 @@ class SimplePrimitive;
+ class GeometricPrimitive;
+ class TransformedPrimitive;
+ class AnimatedPrimitive;
++class MotionPrimitive;
+ class BVHAggregate;
+ class KdTreeAggregate;
+ 
+ // Primitive Definition
+ class Primitive
+     : public TaggedPointer<SimplePrimitive, GeometricPrimitive, TransformedPrimitive,
+-                           AnimatedPrimitive, BVHAggregate, KdTreeAggregate> {
++                           AnimatedPrimitive, MotionPrimitive, BVHAggregate,
++                           KdTreeAggregate> {
+   public:
+     // Primitive Interface
+     using TaggedPointer::TaggedPointer;
+@@ -125,6 +127,29 @@ class AnimatedPrimitive {
+     int hdpbrtInstanceId = -1;
+ };
+ 
++// hdPbrt: MotionPrimitive Definition
++// A primitive moved by N >= 2 transform keys at increasing times. Between
++// neighboring keys it moves like an AnimatedPrimitive (decomposed translation,
++// rotation and scale), so many keys follow curved motion. Ray times outside
++// the keys clamp to the first or last key.
++class MotionPrimitive {
++  public:
++    MotionPrimitive(Primitive primitive, std::vector<Transform> renderFromPrimitive,
++                    std::vector<Float> times);
++    Bounds3f Bounds() const;
++    pstd::optional<ShapeIntersection> Intersect(const Ray &r, Float tMax) const;
++    bool IntersectP(const Ray &r, Float tMax) const;
++    void SetHdPbrtInstanceId(int id) { hdpbrtInstanceId = id; }
++
++  private:
++    const AnimatedTransform &Segment(Float time) const;
++
++    Primitive primitive;
++    std::vector<AnimatedTransform> segments;  // key k -> k + 1
++    std::vector<Float> times;
++    int hdpbrtInstanceId = -1;
++};
++
+ }  // namespace pbrt
+ 
+ #endif  // PBRT_CPU_PRIMITIVE_H
+diff --git a/src/pbrt/scene.cpp b/src/pbrt/scene.cpp
+index 2a35077..c0f0870 100644
+--- a/src/pbrt/scene.cpp
++++ b/src/pbrt/scene.cpp
+@@ -382,6 +382,43 @@ void BasicSceneBuilder::ObjectInstance(const std::string &origName, FileLoc loc)
+             p->lookedUp = true;
+         }
+ 
++    // hdPbrt: N transform keys, Attribute "shape" "float hdpbrtmotionxforms"
++    // [16 * N] (world from instance, like Transform) "float hdpbrtmotiontimes" [N].
++    {
++        const ParsedParameter *xf = nullptr, *tm = nullptr;
++        for (const ParsedParameter *p : graphicsState.shapeAttributes) {
++            if (p->name == "hdpbrtmotionxforms" && p->type == "float")
++                xf = p;
++            else if (p->name == "hdpbrtmotiontimes" && p->type == "float")
++                tm = p;
++        }
++        if (xf && tm) {
++            xf->lookedUp = tm->lookedUp = true;
++            const size_t n = tm->floats.size();
++            bool ok = n >= 2 && xf->floats.size() == 16 * n;
++            for (size_t k = 1; ok && k < n; ++k)
++                ok = tm->floats[k] >= tm->floats[k - 1];
++            if (!ok)
++                Warning(&loc, "hdpbrtmotionxforms/hdpbrtmotiontimes: need 16 * N and N "
++                              "increasing values (N >= 2); ignored.");
++            else {
++                auto *keys = new std::vector<class Transform>();
++                std::vector<Float> times;
++                for (size_t k = 0; k < n; ++k) {
++                    class Transform worldFromInstance = Transpose(pbrt::Transform(
++                        SquareMatrix<4>(pstd::MakeConstSpan(&xf->floats[16 * k], 16))));
++                    keys->push_back(renderFromWorld * worldFromInstance * worldFromRender);
++                    times.push_back(tm->floats[k]);
++                }
++                instanceUses.push_back(InstanceSceneEntity(name, loc, (const class Transform *)nullptr));
++                instanceUses.back().renderFromInstanceKeys = keys;
++                instanceUses.back().keyTimes = std::move(times);
++                instanceUses.back().hdpbrtInstanceId = hdpbrtInstanceId;
++                return;
++            }
++        }
++    }
++
+     if (CTMIsAnimated()) {
+         AnimatedTransform animatedRenderFromInstance(
+             RenderFromObject(0) * worldFromRender, graphicsState.transformStartTime,
+@@ -1585,7 +1622,13 @@ Primitive BasicScene::CreateAggregate(
+             // empty instance
+             continue;
+ 
+-        if (inst.renderFromInstance) {
++        if (inst.renderFromInstanceKeys) {
++            MotionPrimitive *mp = new MotionPrimitive(
++                iter->second, std::move(*inst.renderFromInstanceKeys), inst.keyTimes);
++            mp->SetHdPbrtInstanceId(inst.hdpbrtInstanceId);
++            primitives.push_back(mp);
++            delete inst.renderFromInstanceKeys;
++        } else if (inst.renderFromInstance) {
+             TransformedPrimitive *tp =
+                 new TransformedPrimitive(iter->second, inst.renderFromInstance);
+             tp->SetHdPbrtInstanceId(inst.hdpbrtInstanceId);
+diff --git a/src/pbrt/scene.h b/src/pbrt/scene.h
+index 83992e7..a8bea5b 100644
+--- a/src/pbrt/scene.h
++++ b/src/pbrt/scene.h
+@@ -223,6 +223,10 @@ struct InstanceSceneEntity {
+     const Transform *renderFromInstance = nullptr;
+     // hdPbrt: from Attribute "shape" "integer hdpbrtinstanceid" (-1 = none).
+     int hdpbrtInstanceId = -1;
++    // hdPbrt: N-key transform motion (Attribute "shape" "float
++    // hdpbrtmotionxforms" / "hdpbrtmotiontimes"); overrides the others.
++    std::vector<Transform> *renderFromInstanceKeys = nullptr;
++    std::vector<Float> keyTimes;
+ };
+ 
+ // MaxTransforms Definition
+diff --git a/src/pbrt/shapes.cpp b/src/pbrt/shapes.cpp
+index aff3504..df0f854 100644
+--- a/src/pbrt/shapes.cpp
++++ b/src/pbrt/shapes.cpp
+@@ -296,8 +296,9 @@ PBRT_CPU_GPU Bounds3f Triangle::Bounds() const {
+     Bounds3f b = Union(Bounds3f(p0, p1), p2);
+     // hdPbrt: a moving triangle covers both of its end poses (linear motion
+     // stays inside their union).
+-    if (mesh->p1)
+-        b = Union(Union(Union(b, mesh->p1[v[0]]), mesh->p1[v[1]]), mesh->p1[v[2]]);
++    for (int k = 1; k < mesh->nPoses; ++k)
++        b = Union(Union(Union(b, mesh->poseP[k][v[0]]), mesh->poseP[k][v[1]]),
++                  mesh->poseP[k][v[2]]);
+     return b;
+ }
+ 
+@@ -307,7 +308,7 @@ PBRT_CPU_GPU DirectionCone Triangle::NormalBounds() const {
+     const int *v = &mesh->vertexIndices[3 * triIndex];
+     Point3f p0 = mesh->p[v[0]], p1 = mesh->p[v[1]], p2 = mesh->p[v[2]];
+ 
+-    if (mesh->p1)  // hdPbrt: a deforming triangle may turn
++    if (mesh->nPoses > 1)  // hdPbrt: a deforming triangle may turn
+         return DirectionCone::EntireSphere();
+     Normal3f n = Normalize(Normal3f(Cross(p1 - p0, p2 - p0)));
+     // Ensure correct orientation of geometric normal for normal bounds
+@@ -328,7 +329,7 @@ PBRT_CPU_GPU pstd::optional<ShapeIntersection> Triangle::Intersect(const Ray &ra
+     const TriangleMesh *mesh = GetMesh();
+     const int *v = &mesh->vertexIndices[3 * triIndex];
+     // hdPbrt: vertices at the ray's time (deformation blur).
+-    const Float mf = mesh->MotionFactor(ray.time);
++    const TriangleMesh::MotionSegment mf = mesh->MotionFactor(ray.time);
+     Point3f p0 = mesh->P(v[0], mf), p1 = mesh->P(v[1], mf), p2 = mesh->P(v[2], mf);
+ 
+     pstd::optional<TriangleIntersection> triIsect =
+@@ -350,7 +351,7 @@ PBRT_CPU_GPU bool Triangle::IntersectP(const Ray &ray, Float tMax) const {
+     // Get triangle vertices in _p0_, _p1_, and _p2_
+     const TriangleMesh *mesh = GetMesh();
+     const int *v = &mesh->vertexIndices[3 * triIndex];
+-    const Float mf = mesh->MotionFactor(ray.time);  // hdPbrt
++    const TriangleMesh::MotionSegment mf = mesh->MotionFactor(ray.time);  // hdPbrt
+     Point3f p0 = mesh->P(v[0], mf), p1 = mesh->P(v[1], mf), p2 = mesh->P(v[2], mf);
+ 
+     pstd::optional<TriangleIntersection> isect = IntersectTriangle(ray, tMax, p0, p1, p2);
+@@ -456,10 +457,14 @@ TriangleMesh *Triangle::CreateMesh(const Transform *renderFromObject,
+     TriangleMesh *mesh = alloc.new_object<TriangleMesh>(
+         *renderFromObject, reverseOrientation, std::move(vi), std::move(P), std::move(S),
+         std::move(N), std::move(uvs), std::move(faceIndices), alloc);
+-    if (!P1.empty())
+-        mesh->SetMotion(*renderFromObject, std::move(P1), std::move(N1),
+-                        motionTimes.size() == 2 ? motionTimes[0] : 0.f,
+-                        motionTimes.size() == 2 ? motionTimes[1] : 1.f, alloc);
++    if (!P1.empty()) {
++        std::vector<std::vector<Normal3f>> n1;
++        if (!N1.empty())
++            n1.push_back(std::move(N1));
++        mesh->SetMotion(*renderFromObject, {std::move(P1)}, std::move(n1),
++                        motionTimes.size() == 2 ? motionTimes : std::vector<Float>{0, 1},
++                        alloc);
++    }
+     return mesh;
+ }
+ 
+@@ -1485,28 +1490,46 @@ pstd::vector<Shape> Shape::Create(
+                 *renderFromObject, reverseOrientation, plyMesh.triIndices, plyMesh.p,
+                 std::vector<Vector3f>(), plyMesh.n, plyMesh.uv, plyMesh.faceIndices,
+                 alloc);
+-            // hdPbrt: deformation motion blur. "string motionfilename" is a
+-            // PLY with the same vertices (and normals) at the end of
+-            // "float motiontimes" [t0 t1]. Triangles only, no displacement.
+-            std::string motionFile =
+-                ResolveFilename(parameters.GetOneString("motionfilename", ""));
+-            if (!motionFile.empty()) {
++            // hdPbrt: deformation motion blur. "string motionfilenames" are
++            // PLYs with the same vertices (and normals) at "float motiontimes"
++            // [1..N-1]; this file is the pose at motiontimes[0].
++            // "string motionfilename" is the two-pose form. Triangles only, no
++            // displacement.
++            std::vector<std::string> motionFiles =
++                parameters.GetStringArray("motionfilenames");
++            if (motionFiles.empty()) {
++                std::string one = parameters.GetOneString("motionfilename", "");
++                if (!one.empty())
++                    motionFiles.push_back(one);
++            }
++            if (!motionFiles.empty()) {
++                std::vector<Float> times = parameters.GetFloatArray("motiontimes");
++                if (times.empty() && motionFiles.size() == 1)
++                    times = {0, 1};
+                 if (!displacementTexName.empty() || !plyMesh.quadIndices.empty())
+-                    Warning(loc, "%s: motionfilename is ignored with displacement "
++                    Warning(loc, "%s: motion files are ignored with displacement "
+                                  "or quads.", filename);
++                else if (times.size() != motionFiles.size() + 1)
++                    Warning(loc, "%s: need %d motiontimes; no motion.", filename,
++                            int(motionFiles.size() + 1));
+                 else {
+-                    TriQuadMesh end = TriQuadMesh::ReadPLY(motionFile);
+-                    if (end.p.size() != plyMesh.p.size())
+-                        Warning(loc, "%s: vertex count differs from %s; no motion.",
+-                                motionFile, filename);
+-                    else {
+-                        std::vector<Float> times =
+-                            parameters.GetFloatArray("motiontimes");
+-                        mesh->SetMotion(*renderFromObject, std::move(end.p),
+-                                        std::move(end.n),
+-                                        times.size() == 2 ? times[0] : 0.f,
+-                                        times.size() == 2 ? times[1] : 1.f, alloc);
++                    std::vector<std::vector<Point3f>> P;
++                    std::vector<std::vector<Normal3f>> N;
++                    bool ok = true;
++                    for (const std::string &mf : motionFiles) {
++                        TriQuadMesh pose = TriQuadMesh::ReadPLY(ResolveFilename(mf));
++                        if (pose.p.size() != plyMesh.p.size()) {
++                            Warning(loc, "%s: vertex count differs from %s; no motion.",
++                                    mf, filename);
++                            ok = false;
++                            break;
++                        }
++                        P.push_back(std::move(pose.p));
++                        N.push_back(std::move(pose.n));
+                     }
++                    if (ok)
++                        mesh->SetMotion(*renderFromObject, std::move(P), std::move(N),
++                                        std::move(times), alloc);
+                 }
+             }
+             shapes = Triangle::CreateTriangles(mesh, alloc);
+diff --git a/src/pbrt/shapes.h b/src/pbrt/shapes.h
+index 6c76226..1b32b0e 100644
+--- a/src/pbrt/shapes.h
++++ b/src/pbrt/shapes.h
+@@ -887,7 +887,7 @@ class Triangle {
+                                                           Float time, Vector3f wo) {
+         const int *v = &mesh->vertexIndices[3 * triIndex];
+         // hdPbrt: vertices and normals at the ray's time (deformation blur).
+-        const Float mf = mesh->MotionFactor(time);
++        const TriangleMesh::MotionSegment mf = mesh->MotionFactor(time);
+         Point3f p0 = mesh->P(v[0], mf), p1 = mesh->P(v[1], mf), p2 = mesh->P(v[2], mf);
+         Normal3f nv[3];
+         if (mesh->n)
+@@ -1061,7 +1061,7 @@ class Triangle {
+         const TriangleMesh *mesh = GetMesh();
+         const int *v = &mesh->vertexIndices[3 * triIndex];
+         // hdPbrt: at the reference point's time (deformation blur).
+-        const Float mf = mesh->MotionFactor(ctx.time);
++        const TriangleMesh::MotionSegment mf = mesh->MotionFactor(ctx.time);
+         Point3f p0 = mesh->P(v[0], mf), p1 = mesh->P(v[1], mf), p2 = mesh->P(v[2], mf);
+ 
+         // Use uniform area sampling for numerically unstable cases
+@@ -1163,7 +1163,7 @@ class Triangle {
+             // Get triangle vertices in _p0_, _p1_, and _p2_
+             const TriangleMesh *mesh = GetMesh();
+             const int *v = &mesh->vertexIndices[3 * triIndex];
+-            const Float mf = mesh->MotionFactor(ctx.time);  // hdPbrt
++            const TriangleMesh::MotionSegment mf = mesh->MotionFactor(ctx.time);  // hdPbrt
+             Point3f p0 = mesh->P(v[0], mf), p1 = mesh->P(v[1], mf), p2 = mesh->P(v[2], mf);
+ 
+             Point2f u = InvertSphericalTriangleSample({p0, p1, p2}, ctx.p(), wi);
+diff --git a/src/pbrt/util/mesh.cpp b/src/pbrt/util/mesh.cpp
+index 7f14acd..e015aab 100644
+--- a/src/pbrt/util/mesh.cpp
++++ b/src/pbrt/util/mesh.cpp
+@@ -76,25 +76,49 @@ TriangleMesh::TriangleMesh(const Transform &renderFromObject, bool reverseOrient
+     CHECK_LE(indices.size(), std::numeric_limits<int>::max());
+ }
+ 
+-void TriangleMesh::SetMotion(const Transform &renderFromObject, std::vector<Point3f> P1,
+-                             std::vector<Normal3f> N1, Float t0, Float t1,
++void TriangleMesh::SetMotion(const Transform &renderFromObject,
++                             std::vector<std::vector<Point3f>> P,
++                             std::vector<std::vector<Normal3f>> N, std::vector<Float> times,
+                              Allocator alloc) {
+     // hdPbrt: deformation motion blur (see mesh.h).
+-    if (P1.size() != size_t(nVertices))
++    const int n = int(P.size()) + 1;
++    if (n < 2 || times.size() != size_t(n))
+         return;
+-    for (Point3f &pt : P1)
+-        pt = renderFromObject(pt);
+-    p1 = point3BufferCache->LookupOrAdd(P1, alloc);
+-    if (n && N1.size() == size_t(nVertices)) {
+-        for (Normal3f &nn : N1) {
+-            nn = renderFromObject(nn);
+-            if (reverseOrientation)
+-                nn = -nn;
++    for (const auto &pose : P)
++        if (pose.size() != size_t(nVertices))
++            return;
++    for (int k = 1; k < n; ++k)
++        if (!(times[k] >= times[k - 1]))
++            return;
++    const Point3f **pp = alloc.allocate_object<const Point3f *>(n);
++    pp[0] = p;
++    for (int k = 1; k < n; ++k) {
++        for (Point3f &pt : P[k - 1])
++            pt = renderFromObject(pt);
++        pp[k] = point3BufferCache->LookupOrAdd(P[k - 1], alloc);
++    }
++    bool haveN = this->n && N.size() == P.size();
++    for (const auto &pose : N)
++        haveN &= pose.size() == size_t(nVertices);
++    if (haveN) {
++        const Normal3f **nn = alloc.allocate_object<const Normal3f *>(n);
++        nn[0] = this->n;
++        for (int k = 1; k < n; ++k) {
++            for (Normal3f &v : N[k - 1]) {
++                v = renderFromObject(v);
++                if (reverseOrientation)
++                    v = -v;
++            }
++            nn[k] = normal3BufferCache->LookupOrAdd(N[k - 1], alloc);
+         }
+-        n1 = normal3BufferCache->LookupOrAdd(N1, alloc);
++        poseN = nn;
+     }
+-    time0 = t0;
+-    time1 = t1;
++    Float *tt = alloc.allocate_object<Float>(n);
++    for (int k = 0; k < n; ++k)
++        tt[k] = times[k];
++    poseP = pp;
++    poseTimes = tt;
++    nPoses = n;
+ }
+ 
+ std::string TriangleMesh::ToString() const {
+diff --git a/src/pbrt/util/mesh.h b/src/pbrt/util/mesh.h
+index f8efc93..3eb1df1 100644
+--- a/src/pbrt/util/mesh.h
++++ b/src/pbrt/util/mesh.h
+@@ -45,26 +45,53 @@ class TriangleMesh {
+     const int *faceIndices = nullptr;
+     bool reverseOrientation, transformSwapsHandedness;
+ 
+-    // hdPbrt: deformation motion blur. When p1 is set, the vertex positions
+-    // (and normals, when n1 is set) move linearly from p/n at time0 to p1/n1
+-    // at time1; ray times outside that range clamp to the end poses.
+-    const Point3f *p1 = nullptr;
+-    const Normal3f *n1 = nullptr;
+-    Float time0 = 0, time1 = 1;
+-    // p1/n1 are in object space, like the constructor's p and n. n1 may be empty.
+-    void SetMotion(const Transform &renderFromObject, std::vector<Point3f> p1,
+-                   std::vector<Normal3f> n1, Float time0, Float time1, Allocator alloc);
+-    // Interpolation factor in [0, 1] for a ray time.
++    // hdPbrt: deformation motion blur. With nPoses > 1, the vertex positions
++    // (and normals, when poseN is set) are given at poseTimes[0..nPoses-1]
++    // (posesP[0] == p) and move linearly between neighboring poses by ray
++    // time; times outside the range clamp to the end poses.
++    int nPoses = 1;
++    const Point3f *const *poseP = nullptr;
++    const Normal3f *const *poseN = nullptr;
++    const Float *poseTimes = nullptr;
++    // Poses 1..N-1 in object space (pose 0 is the constructor's p and n);
++    // times has one entry per pose including pose 0. Normals may be empty.
++    void SetMotion(const Transform &renderFromObject, std::vector<std::vector<Point3f>> P,
++                   std::vector<std::vector<Normal3f>> N, std::vector<Float> times,
++                   Allocator alloc);
++    struct MotionSegment {
++        int k = 0;    // between pose k and k + 1
++        Float f = 0;  // interpolation factor
++    };
+     PBRT_CPU_GPU
+-    Float MotionFactor(Float time) const {
+-        if (!p1 || time1 <= time0)
+-            return 0;
+-        return Clamp((time - time0) / (time1 - time0), 0, 1);
++    MotionSegment MotionFactor(Float time) const {
++        MotionSegment s;
++        if (nPoses < 2 || time <= poseTimes[0])
++            return s;
++        if (time >= poseTimes[nPoses - 1]) {
++            s.k = nPoses - 2;
++            s.f = 1;
++            return s;
++        }
++        while (s.k + 2 < nPoses && poseTimes[s.k + 1] <= time)
++            ++s.k;
++        Float t0 = poseTimes[s.k], t1 = poseTimes[s.k + 1];
++        s.f = t1 > t0 ? Clamp((time - t0) / (t1 - t0), 0, 1) : 0;
++        return s;
+     }
+     PBRT_CPU_GPU
+-    Point3f P(int i, Float f) const { return p1 ? p[i] + f * (p1[i] - p[i]) : p[i]; }
++    Point3f P(int i, MotionSegment s) const {
++        if (nPoses < 2)
++            return p[i];
++        Point3f a = poseP[s.k][i], b = poseP[s.k + 1][i];
++        return a + s.f * (b - a);
++    }
+     PBRT_CPU_GPU
+-    Normal3f N(int i, Float f) const { return n1 ? n[i] + f * (n1[i] - n[i]) : n[i]; }
++    Normal3f N(int i, MotionSegment s) const {
++        if (nPoses < 2 || !poseN)
++            return n[i];
++        Normal3f a = poseN[s.k][i], b = poseN[s.k + 1][i];
++        return a + s.f * (b - a);
++    }
+ };
+ 
+ // BilinearPatchMesh Definition
+-- 
+2.43.0
+

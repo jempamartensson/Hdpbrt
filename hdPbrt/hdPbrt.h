@@ -30,6 +30,7 @@
 #include "session.h"
 
 #include <atomic>
+#include <cmath>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -48,6 +49,8 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((regularize, "pbrt:regularize"))           \
     ((depthOfField, "pbrt:depthOfField"))       \
     ((motionBlur, "pbrt:motionBlur"))           \
+    ((xformSamples, "pbrt:xformSamples"))       \
+    ((geoSamples, "pbrt:geoSamples"))           \
     ((exportPath, "pbrt:exportPath"))           \
     ((pbrtExecutable, "pbrt:executable"))
 
@@ -56,6 +59,52 @@ TF_DECLARE_PUBLIC_TOKENS(HdPbrtSettingsTokens, HDPBRT_SETTINGS_TOKENS);
 // Instancer primvars and transforms are sampled over this window (frames
 // relative to the current time) and resampled at the shutter times.
 constexpr float HdPbrt_SampleWindow = 1.f;
+
+// A time-sampled transform at time t: between neighboring samples, the
+// translation, rotation (slerp) and scale are interpolated separately so
+// rotations don't shrink. Clamps outside the samples; identity if empty.
+GfMatrix4d HdPbrt_XformAt(const HdTimeSampleArray<GfMatrix4d, 4> &sa, float t);
+GfMatrix4d HdPbrt_InterpolateXform(const GfMatrix4d &a, const GfMatrix4d &b, double u);
+
+// Sample a transform over HdPbrt_SampleWindow for motion blur. sample(start,
+// end, &sa) wraps the scene delegate's SampleTransform/SampleInstancerTransform.
+// A time-varying transform is evaluated on a 1/16-frame grid: USD composes the
+// transform exactly at each time (a rotateY orbit follows its arc), which
+// interpolating authored samples of the composed matrix can't do. Delegates
+// that only return authored samples (legacy path) are resampled instead.
+template <typename F>
+void HdPbrt_SampleXform(F &&sample, HdTimeSampleArray<GfMatrix4d, 4> *out)
+{
+    const float w = HdPbrt_SampleWindow;
+    sample(-w, w, out);
+    if (out->count < 2)
+        return;
+    bool varies = false;
+    for (size_t k = 1; k < out->count; ++k)
+        varies |= out->values[k] != out->values[0];
+    if (!varies)
+        return;
+    const int n = int(32 * w);
+    HdTimeSampleArray<GfMatrix4d, 4> dense;
+    dense.Resize(n + 1);
+    for (int k = 0; k <= n; ++k) {
+        const float t = -w + 2.f * w * float(k) / float(n);
+        // A zero-width interval counts as not time-varying; a tiny one has
+        // its edges evaluated exactly.
+        HdTimeSampleArray<GfMatrix4d, 4> one;
+        sample(t, t + 1e-3f, &one);
+        bool exact = false;
+        for (size_t j = 0; j < one.count && !exact; ++j)
+            if (std::fabs(one.times[j] - t) < 1e-4f) {
+                dense.values[k] = one.values[j];
+                exact = true;
+            }
+        if (!exact)
+            dense.values[k] = HdPbrt_XformAt(*out, t);
+        dense.times[k] = t;
+    }
+    *out = dense;
+}
 
 // Thin-lens parameters for pbrt's perspective camera, in world units.
 // lensRadius 0 = pinhole (no depth of field).
@@ -172,9 +221,9 @@ protected:
 
 private:
     void _WritePly(HdSceneDelegate *sceneDelegate, HdDirtyBits dirtyBits);
-    // Deformation blur: (re)write the PLYs of the shutter-open and -close
-    // poses when the shutter changed. Called with _mutex held.
-    void _UpdateMotionPlys(GfVec2f shutter) const;
+    // Deformation blur: (re)write the PLYs of the poses at the given times
+    // when they changed. Called with _mutex held.
+    void _UpdateMotionPlys(std::vector<float> const &times) const;
 
     HdPbrtRenderDelegate *_delegate;
     mutable std::mutex _mutex;
@@ -202,8 +251,8 @@ private:
         std::vector<GfVec2f> uvs;      // per PLY vertex (empty: none)
     };
     std::unique_ptr<_Motion> _motion;
-    mutable GfVec2f _motionShutter{0.f, 0.f};
-    mutable std::string _motionPly0, _motionPly1;
+    mutable std::vector<float> _motionTimes;
+    mutable std::vector<std::string> _motionPlys;
 };
 
 // ---------------------------------------------------------------------------

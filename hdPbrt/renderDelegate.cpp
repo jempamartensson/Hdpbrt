@@ -102,6 +102,8 @@ void HdPbrtRenderDelegate::_Init()
     add("Depth of Field (camera fStop / focusDistance)", HdPbrtSettingsTokens->depthOfField,
         VtValue(true));
     add("Motion Blur (camera shutter)", HdPbrtSettingsTokens->motionBlur, VtValue(true));
+    add("Transform Motion Samples", HdPbrtSettingsTokens->xformSamples, VtValue(2));
+    add("Deformation Motion Samples", HdPbrtSettingsTokens->geoSamples, VtValue(2));
     add("Export .pbrt Scene To", HdPbrtSettingsTokens->exportPath, VtValue(std::string()));
     _PopulateDefaultSettings(_settingDescriptors);
 

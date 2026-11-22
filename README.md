@@ -17,10 +17,11 @@ errors, so it runs as a separate process instead:
 3. pbrt streams its progressive image, plus first-hit depth, over its tev display-server
    protocol. The final image is read from the PFM pbrt writes when it exits.
 
-pbrt needs the five patches in `patches/` (against pbrt-v4 `20e41fd`): pbrt exits when its
+pbrt needs the six patches in `patches/` (against pbrt-v4 `20e41fd`): pbrt exits when its
 parent process dies, its RGB film can record and stream depth, per-pixel prim/instance
-ids (selection) and coverage (alpha) for the viewport, and triangle meshes can deform over
-the shutter (deformation motion blur).
+ids (selection) and coverage (alpha) for the viewport, triangle meshes can deform over
+the shutter (deformation motion blur), and instances and meshes take N motion keys (curved
+motion blur).
 
 ## Build
 
@@ -44,7 +45,9 @@ against Blender's `libusd_ms.so` with OpenUSD v26.08 source headers and the gene
 
 Render settings: `pbrt:pixelSamples`, `pbrt:maxDepth`, `pbrt:integrator`, `pbrt:sampler`,
 `pbrt:threads`, `pbrt:regularize`, `pbrt:depthOfField` (default on),
-`pbrt:motionBlur` (default on), `pbrt:exportPath`.
+`pbrt:motionBlur` (default on),
+`pbrt:xformSamples` / `pbrt:geoSamples` (motion keys over the shutter, default 2),
+`pbrt:exportPath`.
 
 Environment: `HDPBRT_PBRT_EXECUTABLE`, `HDPBRT_TMPDIR`, `HDPBRT_KEEP_TMP=1`,
 `HDPBRT_DEBUG=1` (prints AOV bindings and mesh primvars), `HDPBRT_REVERSED_DEPTH=0/1`
@@ -57,7 +60,7 @@ open_pbr_surface (mapped to pbrt conductor, dielectric or coateddiffuse) with im
 distant, sphere, rect, disk, cylinder and dome lights; perspective and orthographic cameras,
 depth of field from the camera's fStop and focusDistance (thin lens), transform motion blur
 over the camera shutter (meshes and point instances) and deformation blur for meshes whose
-points are time-sampled (not camera motion);
+points are time-sampled, with N keys for curved motion (not camera motion);
 color, depth, primId and instanceId AOVs (viewport selection, including point instances).
 Without a dome light the background is transparent, so the host's viewport background shows.
 Not yet: curves, points, volumes, subdivision, camera motion blur, light shaping.

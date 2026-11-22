@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "hdPbrt.h"
+#include "pxr/base/gf/transform.h"
+#include "pxr/base/gf/rotation.h"
+#include "pxr/base/gf/quatd.h"
 
 #include "pxr/imaging/hd/meshUtil.h"
 #include "pxr/imaging/hd/smoothNormals.h"
@@ -156,7 +159,12 @@ void HdPbrtMesh::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam
             // Motion blur: sample over a window around the current time and
             // resample at the shutter when the scene is written.
             const float w = HdPbrt_SampleWindow;
-            sceneDelegate->SampleTransform(id, -w, w, &_xform);
+            (void)w;
+            HdPbrt_SampleXform(
+                [&](float a, float b, HdTimeSampleArray<GfMatrix4d, 4> *sa) {
+                    sceneDelegate->SampleTransform(id, a, b, sa);
+                },
+                &_xform);
             if (_xform.count == 0) {
                 _xform.Resize(1);
                 _xform.times[0] = 0.f;
@@ -462,31 +470,26 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
     _plyPath = path;
     _numTriangles = writtenTris;
     _motion = std::move(motion);
-    for (std::string *m : {&_motionPly0, &_motionPly1})
-        if (!m->empty()) {
-            unlink(m->c_str());
-            m->clear();
-        }
-    _motionShutter = GfVec2f(0.f, 0.f);
+    for (const std::string &m : _motionPlys)
+        unlink(m.c_str());
+    _motionPlys.clear();
+    _motionTimes.clear();
 }
 
-void HdPbrtMesh::_UpdateMotionPlys(GfVec2f shutter) const
+void HdPbrtMesh::_UpdateMotionPlys(std::vector<float> const &times) const
 {
-    if (!_motion || shutter[0] == shutter[1]) {
+    if (!_motion || times.size() < 2)
         return;
-    }
-    if (shutter == _motionShutter && !_motionPly0.empty())
+    if (times == _motionTimes && _motionPlys.size() == times.size())
         return;
-    for (std::string *m : {&_motionPly0, &_motionPly1})
-        if (!m->empty()) {
-            unlink(m->c_str());
-            m->clear();
-        }
-    _motionShutter = shutter;
+    for (const std::string &m : _motionPlys)
+        unlink(m.c_str());
+    _motionPlys.clear();
+    _motionTimes = times;
     const _Motion &mo = *_motion;
-    std::string paths[2];
-    for (int e = 0; e < 2; ++e) {
-        const VtVec3fArray pts = _PointsAt(mo.points, shutter[e]);
+    std::vector<std::string> paths;
+    for (size_t e = 0; e < times.size(); ++e) {
+        const VtVec3fArray pts = _PointsAt(mo.points, times[e]);
         std::vector<GfVec3f> p(mo.source.size()), n;
         for (size_t v = 0; v < mo.source.size(); ++v)
             p[v] = pts[mo.source[v]];
@@ -503,26 +506,95 @@ void HdPbrtMesh::_UpdateMotionPlys(GfVec2f shutter) const
         } else if (!mo.normals.empty()) {
             n.assign(mo.normals.begin(), mo.normals.end());
         }
-        paths[e] = _delegate->NewTempPath(e ? "motion1" : "motion0", ".ply");
-        if (!_WritePlyFile(paths[e], GetId().GetString(), p, n, mo.uvs, mo.indices)) {
-            TF_WARN("hdPbrt: cannot write %s", paths[e].c_str());
-            for (int k = 0; k <= e; ++k)
-                unlink(paths[k].c_str());
+        paths.push_back(_delegate->NewTempPath("motion", ".ply"));
+        if (!_WritePlyFile(paths.back(), GetId().GetString(), p, n, mo.uvs, mo.indices)) {
+            TF_WARN("hdPbrt: cannot write %s", paths.back().c_str());
+            for (const std::string &q : paths)
+                unlink(q.c_str());
+            _motionTimes.clear();
             return;
         }
     }
-    _motionPly0 = paths[0];
-    _motionPly1 = paths[1];
+    _motionPlys = paths;
 }
 
-// A pbrt transform, animated between shutter open and close when they differ.
-static std::string _MotionTransform(const GfMatrix4d &open, const GfMatrix4d &close)
+GfMatrix4d HdPbrt_InterpolateXform(const GfMatrix4d &a, const GfMatrix4d &b, double u)
 {
-    if (open == close)
-        return "Transform " + HdPbrt_Matrix(open);
-    return "ActiveTransform StartTime Transform " + HdPbrt_Matrix(open) +
-           " ActiveTransform EndTime Transform " + HdPbrt_Matrix(close) +
-           " ActiveTransform All";
+    if (a == b || u <= 0)
+        return a;
+    if (u >= 1)
+        return b;
+    GfTransform ta(a), tb(b);
+    GfTransform r;
+    r.SetScale(ta.GetScale() + u * (tb.GetScale() - ta.GetScale()));
+    r.SetTranslation(ta.GetTranslation() + u * (tb.GetTranslation() - ta.GetTranslation()));
+    r.SetPivotPosition(ta.GetPivotPosition() +
+                       u * (tb.GetPivotPosition() - ta.GetPivotPosition()));
+    r.SetPivotOrientation(ta.GetPivotOrientation());
+    r.SetScaleOrientation(ta.GetScaleOrientation());
+    const GfQuatd qa = ta.GetRotation().GetQuat(), qb = tb.GetRotation().GetQuat();
+    r.SetRotation(GfRotation(GfSlerp(u, qa, qb)));
+    return r.GetMatrix();
+}
+
+GfMatrix4d HdPbrt_XformAt(const HdTimeSampleArray<GfMatrix4d, 4> &sa, float t)
+{
+    if (sa.count == 0)
+        return GfMatrix4d(1.0);
+    if (sa.count == 1 || t <= sa.times[0])
+        return sa.values[0];
+    if (t >= sa.times[sa.count - 1])
+        return sa.values[sa.count - 1];
+    size_t i = 0;
+    while (i + 1 < sa.count && sa.times[i + 1] < t)
+        ++i;
+    const float t0 = sa.times[i], t1 = sa.times[i + 1];
+    const double u = t1 > t0 ? double(t - t0) / double(t1 - t0) : 0.0;
+    return HdPbrt_InterpolateXform(sa.values[i], sa.values[i + 1], u);
+}
+
+// pbrt transform text for keys at the shutter times: a plain Transform when
+// they're all equal, pbrt's own two-key ActiveTransform pair for two keys.
+// For more keys it returns "" and *motionAttr gets the Attribute line for
+// pbrt patch 6 (N-key instance motion; it must precede an ObjectInstance).
+static std::string _MotionTransform(const std::vector<GfMatrix4d> &keys,
+                                    const std::vector<float> &times,
+                                    std::string *motionAttr)
+{
+    bool moving = false;
+    for (size_t k = 1; k < keys.size(); ++k)
+        moving |= keys[k] != keys[0];
+    if (!moving)
+        return "Transform " + HdPbrt_Matrix(keys[0]);
+    if (keys.size() == 2)
+        return "ActiveTransform StartTime Transform " + HdPbrt_Matrix(keys[0]) +
+               " ActiveTransform EndTime Transform " + HdPbrt_Matrix(keys[1]) +
+               " ActiveTransform All";
+    std::string m = "Attribute \"shape\" \"float hdpbrtmotionxforms\" [";
+    for (const GfMatrix4d &k : keys) {
+        std::string one = HdPbrt_Matrix(k);  // "[a b ...]"
+        m += " " + one.substr(1, one.size() - 2);
+    }
+    m += " ] \"float hdpbrtmotiontimes\" [";
+    char buf[32];
+    for (float t : times) {
+        snprintf(buf, sizeof(buf), " %.9g", t);
+        m += buf;
+    }
+    m += " ]";
+    *motionAttr = m;
+    return "";
+}
+
+// N evenly spaced times over the shutter (N >= 2), or {open} without blur.
+static std::vector<float> _ShutterTimes(GfVec2f shutter, int n)
+{
+    if (shutter[0] == shutter[1] || n < 2)
+        return {shutter[0]};
+    std::vector<float> t(n);
+    for (int k = 0; k < n; ++k)
+        t[k] = shutter[0] + (shutter[1] - shutter[0]) * float(k) / float(n - 1);
+    return t;
 }
 
 void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
@@ -534,21 +606,25 @@ void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
     if (!renderTags.empty() &&
         std::find(renderTags.begin(), renderTags.end(), GetRenderTag()) == renderTags.end())
         return;
-    // Transforms at shutter open and close (equal without motion blur).
+    // Transform keys over the shutter (one without motion blur).
     const GfVec2f shutter = _delegate->GetShutter();
     const bool blur = shutter[0] != shutter[1];
-    const GfMatrix4d xf0 = _xform.count ? _xform.Resample(shutter[0]) : GfMatrix4d(1.0);
-    const GfMatrix4d xf1 = blur && _xform.count ? _xform.Resample(shutter[1]) : xf0;
-    VtMatrix4dArray inst0, inst1;
+    const std::vector<float> xTimes = _ShutterTimes(
+        shutter, std::max(2, _delegate->GetSetting<int>(HdPbrtSettingsTokens->xformSamples, 2)));
+    const size_t nx = xTimes.size();
+    std::vector<GfMatrix4d> xf(nx);
+    for (size_t k = 0; k < nx; ++k)
+        xf[k] = HdPbrt_XformAt(_xform, xTimes[k]);
+    std::vector<VtMatrix4dArray> inst;
     if (_instanced) {
-        if (auto *pi = static_cast<HdPbrtInstancer *>(index.GetInstancer(GetInstancerId()))) {
-            inst0 = pi->ComputeInstanceTransforms(GetId(), shutter[0]);
-            inst1 = blur ? pi->ComputeInstanceTransforms(GetId(), shutter[1]) : inst0;
-        }
-        if (inst0.empty())
+        if (auto *pi = static_cast<HdPbrtInstancer *>(index.GetInstancer(GetInstancerId())))
+            for (size_t k = 0; k < nx; ++k)
+                inst.push_back(pi->ComputeInstanceTransforms(GetId(), xTimes[k]));
+        if (inst.empty() || inst[0].empty())
             return;
-        if (inst1.size() != inst0.size())  // the instance count changes
-            inst1 = inst0;
+        for (size_t k = 1; k < nx; ++k)
+            if (inst[k].size() != inst[0].size())  // the instance count changes
+                inst[k] = inst[0];
     }
 
     HdPbrtMaterialDesc mat = HdPbrt_DefaultMaterial();
@@ -563,21 +639,32 @@ void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
     }
     const std::string matLine =
         HdPbrt_MaterialLine(mat, _hasDisplayColor ? &_displayColor : nullptr);
+    const bool emissive = mat.emission[0] > 0 || mat.emission[1] > 0 || mat.emission[2] > 0;
 
-    // Deformation blur: the shutter-open pose as the mesh, the -close pose as
-    // its motion file (pbrt patch 5).
-    _UpdateMotionPlys(shutter);
-    const bool deforming = blur && _motion && !_motionPly0.empty();
+    // Deformation blur: the poses at the geo sample times (pbrt patches 5/6:
+    // filename = first pose, motionfilenames = the rest).
+    if (blur && _motion)
+        _UpdateMotionPlys(_ShutterTimes(
+            shutter,
+            std::max(2, _delegate->GetSetting<int>(HdPbrtSettingsTokens->geoSamples, 2))));
+    const bool deforming = blur && _motion && _motionPlys.size() >= 2;
     std::ostringstream shape;
     // hdpbrtprimid: Hydra's prim id, streamed back by pbrt for the primId AOV
     // (selection).
     shape << "Shape \"plymesh\" \"string filename\" "
-          << HdPbrt_Quote(deforming ? _motionPly0 : _plyPath) << " \"integer hdpbrtprimid\" "
+          << HdPbrt_Quote(deforming ? _motionPlys[0] : _plyPath) << " \"integer hdpbrtprimid\" "
           << GetPrimId();
     if (deforming) {
-        char mt[96];
-        snprintf(mt, sizeof(mt), " \"float motiontimes\" [%.9g %.9g]", shutter[0], shutter[1]);
-        shape << " \"string motionfilename\" " << HdPbrt_Quote(_motionPly1) << mt;
+        shape << " \"string motionfilenames\" [";
+        for (size_t k = 1; k < _motionPlys.size(); ++k)
+            shape << " " << HdPbrt_Quote(_motionPlys[k]);
+        shape << " ] \"float motiontimes\" [";
+        char buf[32];
+        for (float t : _motionTimes) {
+            snprintf(buf, sizeof(buf), " %.9g", t);
+            shape << buf;
+        }
+        shape << " ]";
     }
     float alpha = mat.opacity * _displayOpacity;
     if (!mat.opacityTexture.empty())
@@ -588,11 +675,26 @@ void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
 
     os << "# " << GetId().GetString() << "\n";
     if (!_instanced) {
-        os << "AttributeBegin\n  " << _MotionTransform(xf0, xf1) << "\n  " << matLine;
-        if (mat.emission[0] > 0 || mat.emission[1] > 0 || mat.emission[2] > 0)
-            os << "  AreaLightSource \"diffuse\" \"rgb L\" " << HdPbrt_Rgb(mat.emission)
-               << "\n";
-        os << "  " << shape.str() << "AttributeEnd\n";
+        std::string motionAttr;
+        // Area lights can't be instanced in pbrt: emissive meshes get two keys.
+        const std::vector<GfMatrix4d> keys =
+            emissive && nx > 2 ? std::vector<GfMatrix4d>{xf.front(), xf.back()} : xf;
+        const std::vector<float> keyTimes =
+            emissive && nx > 2 ? std::vector<float>{xTimes.front(), xTimes.back()} : xTimes;
+        const std::string xform = _MotionTransform(keys, keyTimes, &motionAttr);
+        if (motionAttr.empty()) {
+            os << "AttributeBegin\n  " << xform << "\n  " << matLine;
+            if (emissive)
+                os << "  AreaLightSource \"diffuse\" \"rgb L\" " << HdPbrt_Rgb(mat.emission)
+                   << "\n";
+            os << "  " << shape.str() << "AttributeEnd\n";
+        } else {
+            // N-key transform motion only exists for object instances.
+            std::string name = "hdpbrt_obj_" + std::to_string(ctx.objectCounter++);
+            os << "ObjectBegin " << HdPbrt_Quote(name) << "\n  Identity\n  " << matLine << "  "
+               << shape.str() << "ObjectEnd\nAttributeBegin " << motionAttr
+               << " ObjectInstance " << HdPbrt_Quote(name) << " AttributeEnd\n";
+        }
         ++ctx.numMeshes;
     } else {
         std::string name = "hdpbrt_obj_" + std::to_string(ctx.objectCounter++);
@@ -600,11 +702,18 @@ void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
            << shape.str() << "ObjectEnd\n";
         // hdpbrtinstanceid: the instance index Hydra expects in the instanceId
         // AOV (flattened over nested instancers, see HdPbrtInstancer).
-        for (size_t i = 0; i < inst0.size(); ++i)
-            os << "AttributeBegin " << _MotionTransform(xf0 * inst0[i], xf1 * inst1[i])
-               << " Attribute \"shape\" \"integer hdpbrtinstanceid\" " << i
+        std::vector<GfMatrix4d> keys(nx);
+        for (size_t i = 0; i < inst[0].size(); ++i) {
+            for (size_t k = 0; k < nx; ++k)
+                keys[k] = xf[k] * inst[k][i];
+            std::string motionAttr;
+            const std::string xform = _MotionTransform(keys, xTimes, &motionAttr);
+            os << "AttributeBegin " << xform << (xform.empty() ? "" : " ") << motionAttr
+               << (motionAttr.empty() ? "" : " ")
+               << "Attribute \"shape\" \"integer hdpbrtinstanceid\" " << i
                << " ObjectInstance " << HdPbrt_Quote(name) << " AttributeEnd\n";
-        ctx.numInstances += inst0.size();
+        }
+        ctx.numInstances += inst[0].size();
     }
 }
 
