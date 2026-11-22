@@ -401,12 +401,45 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
         unlink((_tempDir + "/render_" + std::to_string(n - 1) + ".pfm").c_str());
     }
 
+    // Lights, written once here so the Film knows whether the background is
+    // an environment (dome, or the fallback white one) or empty. With an
+    // empty background pbrt sends coverage as alpha, so the host's viewport
+    // background shows through.
+    std::string lightText;
+    bool hasEnvironment = false;
+    {
+        std::lock_guard<std::mutex> l(_registryMutex);
+        std::ostringstream ls;
+        ls.imbue(std::locale::classic());
+        size_t numLights = 0;
+        for (HdPbrtLight *light : _lights) {
+            std::ostringstream one;
+            one.imbue(std::locale::classic());
+            light->Write(one);
+            if (one.str().find("Light") != std::string::npos) {  // skip invisible lights
+                ++numLights;
+                if (light->IsDome())
+                    hasEnvironment = true;
+            }
+            ls << one.str();
+        }
+        if (numLights == 0) {
+            ls << "# no lights in the scene: add a uniform white environment\n"
+                  "LightSource \"infinite\" \"rgb L\" [1 1 1]\n";
+            hasEnvironment = true;
+        }
+        lightText = ls.str();
+    }
+
     std::ostringstream os;
     os.imbue(std::locale::classic());
     os << "# pbrt-v4 scene written by hdPbrt\n";
     os << "Film \"rgb\" \"string filename\" " << HdPbrt_Quote(pfm)
        << " \"integer xresolution\" " << width << " \"integer yresolution\" " << height
-       << " \"bool hdpbrtdepth\" true \"bool hdpbrtids\" true\n";
+       << " \"bool hdpbrtdepth\" true \"bool hdpbrtids\" true";
+    if (!hasEnvironment)
+        os << " \"bool hdpbrtalpha\" true";
+    os << "\n";
     os << "Sampler " << HdPbrt_Quote(GetSetting<std::string>(HdPbrtSettingsTokens->sampler,
                                                              "zsobol"))
        << " \"integer pixelsamples\" " << GetSpp() << "\n";
@@ -447,18 +480,8 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
     os << "WorldBegin\n";
     HdPbrtWriteContext ctx;
     {
+        os << lightText;
         std::lock_guard<std::mutex> l(_registryMutex);
-        size_t numLights = 0;
-        for (HdPbrtLight *light : _lights) {
-            std::ostringstream ls;
-            light->Write(ls);
-            if (ls.str().find("Light") != std::string::npos)  // skip invisible lights
-                ++numLights;
-            os << ls.str();
-        }
-        if (numLights == 0)
-            os << "# no lights in the scene: add a uniform white environment\n"
-                  "LightSource \"infinite\" \"rgb L\" [1 1 1]\n";
         for (HdPbrtMesh *mesh : _meshes)
             mesh->Write(os, *index, renderTags, ctx);
     }

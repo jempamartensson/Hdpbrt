@@ -33,7 +33,9 @@ public:
 
     // Write a top-down RGB float image of size w x h into the data window
     // starting at (x0, y0) (y-down), converting to the buffer format.
-    void WriteRGB(const float *rgb, int w, int h, int x0, int y0);
+    // alpha, if not null, is a matching single-channel image (else alpha = 1).
+    void WriteRGB(const float *rgb, int w, int h, int x0, int y0,
+                  const float *alpha = nullptr);
     void Clear(const float *value, size_t numComponents);
     // Write a top-down single-channel float image (same layout as WriteRGB).
     void WriteFloat(const float *v, int w, int h, int x0, int y0);

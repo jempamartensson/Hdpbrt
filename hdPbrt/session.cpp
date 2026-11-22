@@ -83,9 +83,11 @@ bool PbrtSession::Start(const std::string &pbrtExe, const std::string &sceneFile
         _depth.assign(size_t(width) * height, std::numeric_limits<float>::infinity());
         _primIds.assign(size_t(width) * height, -1.f);
         _instanceIds.assign(size_t(width) * height, -1.f);
+        _alpha.assign(size_t(width) * height, 1.f);
         _hasData = false;
         _hasDepth = false;
         _hasIds = false;
+        _hasAlpha = false;
     }
     _outputPfm = outputPfm;
     _logFile = logFile;
@@ -245,7 +247,8 @@ bool PbrtSession::_LoadPfm(const std::string &path)
 bool PbrtSession::Snapshot(std::vector<float> *out, int *width, int *height,
                            uint64_t *version, std::vector<float> *depth,
                            std::vector<float> *primIds,
-                           std::vector<float> *instanceIds) const
+                           std::vector<float> *instanceIds,
+                           std::vector<float> *alpha) const
 {
     std::lock_guard<std::mutex> lock(_imageMutex);
     if (!_hasData || *version == _version)
@@ -268,6 +271,12 @@ bool PbrtSession::Snapshot(std::vector<float> *out, int *width, int *height,
             *instanceIds = _instanceIds;
         else
             instanceIds->clear();
+    }
+    if (alpha) {
+        if (_hasAlpha)
+            *alpha = _alpha;
+        else
+            alpha->clear();
     }
     *width = _width;
     *height = _height;
@@ -320,6 +329,7 @@ void PbrtSession::_HandleMessage(const std::vector<uint8_t> &msg)
             : channel == "Z" ? 3
             : channel == "primId"     ? 4
             : channel == "instanceId" ? 5
+            : channel == "A"          ? 6
                                       : -1;
     if (c < 0)
         return;
@@ -344,12 +354,16 @@ void PbrtSession::_HandleMessage(const std::vector<uint8_t> &msg)
                 _primIds[pix] = f;
             else if (c == 5)
                 _instanceIds[pix] = f;
+            else if (c == 6)
+                _alpha[pix] = f;
             else
                 _image[pix * 3 + c] = f;
         }
     if (c >= 3) {
         if (c == 3)
             _hasDepth = true;
+        else if (c == 6)
+            _hasAlpha = true;
         else
             _hasIds = true;
         return;  // the RGB channels bump the version

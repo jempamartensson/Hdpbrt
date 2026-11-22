@@ -3,6 +3,7 @@ from PySide6 import QtCore
 OUT = os.environ["VPT_OUT"]
 RENDERER = os.environ.get("VPT_RENDERER", "pbrt")
 WAIT = int(os.environ.get("VPT_WAIT", "40"))
+DOME = os.environ.get("VPT_DOME", "1") != "0"  # 0: no dome (tests alpha)
 def log(*a):
     with open(OUT + ".log", "a") as f: f.write(" ".join(str(x) for x in a) + "\n")
 SCENE = """
@@ -17,6 +18,8 @@ l = UsdLux.DistantLight.Define(stage, "/lights/sun"); l.CreateIntensityAttr(3.0)
 UsdGeom.Xformable(l).AddRotateXYZOp().Set(Gf.Vec3f(-50, 30, 0))
 d = UsdLux.DomeLight.Define(stage, "/lights/dome"); d.CreateIntensityAttr(0.3)
 """
+if not DOME:
+    SCENE = SCENE.replace('d = UsdLux.DomeLight.Define(stage, "/lights/dome"); d.CreateIntensityAttr(0.3)\n', "")
 def setup():
     try:
         stage = hou.node("/stage")

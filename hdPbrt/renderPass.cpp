@@ -188,12 +188,17 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
     int iw = 0, ih = 0;
     const bool wantIds = primId || instanceId;
     if (session.Snapshot(&_image, &iw, &ih, &_imageVersion, depth ? &_depth : nullptr,
-                         wantIds ? &_primIds : nullptr, wantIds ? &_instanceIds : nullptr)) {
+                         wantIds ? &_primIds : nullptr, wantIds ? &_instanceIds : nullptr,
+                         &_alpha)) {
         if (debug)
             fprintf(stderr, "hdPbrt snapshot %dx%d (want %dx%d) v%llu\n", iw, ih, w, h,
                     (unsigned long long)_imageVersion);
         if (iw == w && ih == h) {
-            color->WriteRGB(_image.data(), iw, ih, dw.GetMinX(), dw.GetMinY());
+            // Coverage is only sent when the scene has no visible environment;
+            // pbrt's color is then already premultiplied (escaped rays are black).
+            const bool hasAlpha = _alpha.size() == size_t(iw) * ih;
+            color->WriteRGB(_image.data(), iw, ih, dw.GetMinX(), dw.GetMinY(),
+                            hasAlpha ? _alpha.data() : nullptr);
             if (depth && _depth.size() == size_t(iw) * ih) {
                 if (debug) {
                     float lo = 1e30f, hi = -1e30f; size_t hits = 0;

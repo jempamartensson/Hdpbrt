@@ -41,7 +41,7 @@ Instead:
 3. pbrt streams its progressive image (waves of 1, 2, 4, ... 64 spp) over its tev
    display-server protocol to a socket the delegate listens on. The final image is read
    from the PFM pbrt writes when it exits.
-4. pbrt is patched (branch `hdpbrt` in `src/pbrt-v4`, one commit) to exit when its parent
+4. pbrt is patched (branch `hdpbrt` in `src/pbrt-v4`; see `patches/`) to exit when its parent
    process dies (`PBRT_PARENT_PID`), so a Houdini crash doesn't leave renders running.
    The delegate strips `LD_LIBRARY_PATH` when it starts pbrt so Houdini's/Blender's
    bundled libraries don't leak into it.
@@ -81,6 +81,10 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
   in the flattened instance list, nested instancers outer-major, as Hydra expects). The film
   (`"bool hdpbrtids" true`, patch 3) keeps the ids of the nearest first hit per pixel and
   streams them as display channels `primId`/`instanceId` (float values, exact up to 2^24).
+  Alpha: with no dome light (and so no fallback white environment) the film also gets
+  `"bool hdpbrtalpha" true` (patch 4): coverage of first hits, streamed as channel `A`, goes
+  into the color AOV's alpha, so the host's viewport background shows through (pbrt's color
+  is premultiplied, escaped rays are black). With an environment, alpha is 1.
   In Houdini the scene graph select tool then selects prims and point instances. Around a
   distant light's origin Houdini's own light guide wins the pick (Karma CPU does the same).
   Depth is real: pbrt's RGBFilm (patched, `"bool hdpbrtdepth" true`) keeps the nearest
@@ -91,7 +95,7 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
 
 ## Layout (~/dev/pbrt_hydra)
 
-- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth channel).
+- `src/pbrt-v4` pbrt-v4 at 20e41fd (2026-11-15) + branch `hdpbrt` (parent-PID watchdog, RGBFilm depth, id and alpha channels).
 - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`: headers for the Blender build.
   `src/usd-blender-generated/pxr/pxr.h`: pxr.h filled in for Blender's USD
   (internal namespace `pxrBlender_v26_08`, version 2608).

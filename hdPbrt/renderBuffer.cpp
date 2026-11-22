@@ -58,7 +58,8 @@ void HdPbrtRenderBuffer::Clear(const float *value, size_t n)
         _WritePixel(_format, &_buffer[i * fs], n, value);
 }
 
-void HdPbrtRenderBuffer::WriteRGB(const float *rgb, int w, int h, int x0, int y0)
+void HdPbrtRenderBuffer::WriteRGB(const float *rgb, int w, int h, int x0, int y0,
+                                  const float *alpha)
 {
     size_t fs = HdDataSizeOfFormat(_format);
     if (!fs)
@@ -74,7 +75,7 @@ void HdPbrtRenderBuffer::WriteRGB(const float *rgb, int w, int h, int x0, int y0
             if (xx < 0 || xx >= (int)_width)
                 continue;
             const float *s = rgb + (size_t(y) * w + x) * 3;
-            float v[4] = {s[0], s[1], s[2], 1.f};
+            float v[4] = {s[0], s[1], s[2], alpha ? alpha[size_t(y) * w + x] : 1.f};
             if (cc == 1)  // single channel: luminance
                 v[0] = 0.2126f * s[0] + 0.7152f * s[1] + 0.0722f * s[2];
             _WritePixel(_format, &_buffer[(size_t(row) * _width + xx) * fs], 4, v);

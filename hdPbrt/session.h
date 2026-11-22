@@ -35,10 +35,13 @@ public:
     // primIds/instanceIds, if not null, get the ids of the nearest hit per
     // pixel (-1 for none, as float values), or are cleared when pbrt hasn't
     // sent them.
+    // alpha, if not null, gets pbrt's coverage per pixel in [0, 1], or is
+    // cleared when pbrt hasn't sent it.
     bool Snapshot(std::vector<float> *out, int *width, int *height,
                   uint64_t *version, std::vector<float> *depth = nullptr,
                   std::vector<float> *primIds = nullptr,
-                  std::vector<float> *instanceIds = nullptr) const;
+                  std::vector<float> *instanceIds = nullptr,
+                  std::vector<float> *alpha = nullptr) const;
 
     // True once the current pbrt process has exited (and its final image,
     // if any, has been loaded).
@@ -61,8 +64,8 @@ private:
 
     mutable std::mutex _imageMutex;
     std::vector<float> _image;
-    std::vector<float> _depth, _primIds, _instanceIds;
-    bool _hasDepth = false, _hasIds = false;
+    std::vector<float> _depth, _primIds, _instanceIds, _alpha;
+    bool _hasDepth = false, _hasIds = false, _hasAlpha = false;
     int _width = 0, _height = 0;
     uint64_t _version = 0;
     bool _hasData = false;  // got pixels from the current process

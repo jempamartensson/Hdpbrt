@@ -1,0 +1,142 @@
+From aa7ef0f6d63fe7da42975b8c5d9f64bd6515ab88 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sun, 22 Nov 2026 17:49:35 +0100
+Subject: [PATCH 4/4] RGBFilm: optional coverage ("bool hdpbrtalpha"), streamed
+ as display channel A (for hdPbrt)
+
+The filter-weighted share of camera samples whose first hit is a surface.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/cpu/integrators.cpp | 16 +++++++++++-----
+ src/pbrt/film.cpp            |  3 +++
+ src/pbrt/film.h              | 19 +++++++++++++++++--
+ 3 files changed, 31 insertions(+), 7 deletions(-)
+
+diff --git a/src/pbrt/cpu/integrators.cpp b/src/pbrt/cpu/integrators.cpp
+index b7e736d..f21c2fa 100644
+--- a/src/pbrt/cpu/integrators.cpp
++++ b/src/pbrt/cpu/integrators.cpp
+@@ -144,13 +144,17 @@ void ImageTileIntegrator::Render() {
+     // Connect to display server if needed
+     if (!Options->displayServer.empty()) {
+         Film film = camera.GetFilm();
+-        // hdPbrt: also stream the depth (Z) and id (primId, instanceId)
+-        // channels when the film records them. Ids are sent as float values
+-        // (exact up to 2^24).
++        // hdPbrt: also stream the coverage (A), depth (Z) and id (primId,
++        // instanceId) channels when the film records them. Ids are sent as
++        // float values (exact up to 2^24).
+         RGBFilm *rgbFilm = film.CastOrNullptr<RGBFilm>();
+-        if (rgbFilm && (rgbFilm->WritesDepth() || rgbFilm->WritesIds())) {
++        if (rgbFilm &&
++            (rgbFilm->WritesDepth() || rgbFilm->WritesIds() || rgbFilm->WritesAlpha())) {
+             const bool depth = rgbFilm->WritesDepth(), ids = rgbFilm->WritesIds();
++            const bool alpha = rgbFilm->WritesAlpha();
+             std::vector<std::string> channels = {"R", "G", "B"};
++            if (alpha)
++                channels.push_back("A");
+             if (depth)
+                 channels.push_back("Z");
+             if (ids) {
+@@ -158,7 +162,7 @@ void ImageTileIntegrator::Render() {
+                 channels.push_back("instanceId");
+             }
+             DisplayDynamic(film.GetFilename(), Point2i(pixelBounds.Diagonal()), channels,
+-                           [&, rgbFilm, depth, ids](Bounds2i b,
++                           [&, rgbFilm, depth, ids, alpha](Bounds2i b,
+                                                     pstd::span<pstd::span<float>> displayValue) {
+                                int index = 0;
+                                for (Point2i p : b) {
+@@ -167,6 +171,8 @@ void ImageTileIntegrator::Render() {
+                                    for (int c = 0; c < 3; ++c)
+                                        displayValue[c][index] = rgb[c];
+                                    int c = 3;
++                                   if (alpha)
++                                       displayValue[c++][index] = rgbFilm->GetPixelAlpha(pp);
+                                    if (depth)
+                                        displayValue[c++][index] = rgbFilm->GetPixelDepth(pp);
+                                    if (ids) {
+diff --git a/src/pbrt/film.cpp b/src/pbrt/film.cpp
+index 5379f75..cb6a560 100644
+--- a/src/pbrt/film.cpp
++++ b/src/pbrt/film.cpp
+@@ -1076,6 +1076,7 @@ Film Film::Create(const std::string &name, const ParameterDictionary &parameters
+     {
+         bool writeDepth = parameters.GetOneBool("hdpbrtdepth", false);
+         bool writeIds = parameters.GetOneBool("hdpbrtids", false);
++        bool writeAlpha = parameters.GetOneBool("hdpbrtalpha", false);
+         RGBFilm *rgbFilm = RGBFilm::Create(parameters, exposureTime, filter,
+                                            parameters.ColorSpace(), loc, alloc);
+         Transform cameraFromRender =
+@@ -1084,6 +1085,8 @@ Film Film::Create(const std::string &name, const ParameterDictionary &parameters
+             rgbFilm->EnableDepth(cameraFromRender);
+         if (writeIds)
+             rgbFilm->EnableIds(cameraFromRender);
++        if (writeAlpha)
++            rgbFilm->EnableAlpha();
+         film = rgbFilm;
+     }
+     else if (name == "gbuffer")
+diff --git a/src/pbrt/film.h b/src/pbrt/film.h
+index 0638dd8..1f7f5b7 100644
+--- a/src/pbrt/film.h
++++ b/src/pbrt/film.h
+@@ -234,7 +234,7 @@ class RGBFilm : public FilmBase {
+   public:
+     // RGBFilm Public Methods
+     PBRT_CPU_GPU
+-    bool UsesVisibleSurface() const { return writeDepth || writeIds; }
++    bool UsesVisibleSurface() const { return writeDepth || writeIds || writeAlpha; }
+ 
+     PBRT_CPU_GPU
+     void AddSample(Point2i pFilm, SampledSpectrum L, const SampledWavelengths &lambda,
+@@ -253,6 +253,10 @@ class RGBFilm : public FilmBase {
+         for (int c = 0; c < 3; ++c)
+             pixel.rgbSum[c] += weight * rgb[c];
+         pixel.weightSum += weight;
++        // hdPbrt: coverage, the weighted fraction of camera samples whose
++        // first hit is a surface (escaped rays count as 0).
++        if (writeAlpha && visibleSurface && *visibleSurface)
++            pixel.alphaSum += weight;
+         // hdPbrt: nearest camera-space depth of the first hit, and the ids of
+         // the primitive and instance hit there.
+         if ((writeDepth || writeIds) && visibleSurface && *visibleSurface) {
+@@ -274,7 +278,17 @@ class RGBFilm : public FilmBase {
+     int GetPixelPrimId(Point2i p) const { return pixels[p].primId; }
+     PBRT_CPU_GPU
+     int GetPixelInstanceId(Point2i p) const { return pixels[p].instanceId; }
++    // hdPbrt: coverage in [0, 1] (see AddSample).
++    PBRT_CPU_GPU
++    Float GetPixelAlpha(Point2i p) const {
++        const Pixel &pixel = pixels[p];
++        if (pixel.weightSum == 0)
++            return 0;
++        return Clamp(Float(pixel.alphaSum / pixel.weightSum), 0, 1);
++    }
+     bool WritesDepth() const { return writeDepth; }
++    bool WritesAlpha() const { return writeAlpha; }
++    void EnableAlpha() { writeAlpha = true; }
+     bool WritesIds() const { return writeIds; }
+     void EnableDepth(const Transform &camFromRender) {
+         writeDepth = true;
+@@ -341,6 +355,7 @@ class RGBFilm : public FilmBase {
+         AtomicDouble rgbSplat[3];
+         Float depth = Infinity;
+         int primId = -1, instanceId = -1;
++        double alphaSum = 0.;
+     };
+ 
+     // RGBFilm Private Members
+@@ -350,7 +365,7 @@ class RGBFilm : public FilmBase {
+     Float filterIntegral;
+     SquareMatrix<3> outputRGBFromSensorRGB;
+     Array2D<Pixel> pixels;
+-    bool writeDepth = false, writeIds = false;
++    bool writeDepth = false, writeIds = false, writeAlpha = false;
+     Transform cameraFromRender;
+ };
+ 
+-- 
+2.43.0
+

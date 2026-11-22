@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (3 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (4 commits, the same as `patches/`;
     regenerate with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o patches`).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
     the Blender flavor.
@@ -36,6 +36,11 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 3. RGBFilm `"bool hdpbrtids" true` records the `hdpbrtprimid` (shape parameter) and
    `hdpbrtinstanceid` (`Attribute "shape"` before `ObjectInstance`) of the nearest first hit,
    streamed as channels `primId`/`instanceId`. They fill the selection AOVs.
+4. RGBFilm `"bool hdpbrtalpha" true` records coverage (the filter-weighted share of camera
+   samples whose first hit is a surface) and streams it as channel `A`. The delegate asks for
+   it only when the scene has no dome (and no fallback white environment); then the color AOV
+   gets that alpha and pbrt's color is already premultiplied. Alpha comes only from the stream
+   (the final PFM has RGB only; pbrt sends one last update on exit).
 
 ## Done in the 2026-11-22 session
 
@@ -95,11 +100,12 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 6. Selection: `tests/viewport/vp_pick.py` clicks the viewport through QTest in the
    `scenegraphselect` state and logs `PICK ok/FAIL` lines. Houdini VK and Karma CPU work as
    controls. The default `lopview` state does not select on click.
+7. `VPT_DOME=0` leaves the dome out of the vp_test scene (alpha test). Flipbooks keep the
+   viewport's alpha: with no dome, pbrt's and Houdini VK's flipbooks are both transparent
+   outside the geometry (checked 2026-11-22).
 
 ## Open items and ideas
 
-- Alpha: the background is opaque. Coverage could become an `A` channel, so Houdini's viewport
-  background shows through when there is no dome.
 - Not translated yet: curves, points, volumes, subdivision refinement, motion blur, depth of
   field, light shaping/IES, light linking. Implicit spheres are coarse.
 - pbrt's coateddiffuse looks darker and more saturated than Karma's or Cycles' diffuse.
