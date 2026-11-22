@@ -115,8 +115,13 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 
 ## Open items and ideas
 
-- Not translated yet: curves, points, volumes, subdivision refinement, camera motion blur,
-  light shaping/IES, light linking. Implicit spheres are coarse.
+- Not translated yet: volumes (next), camera motion blur, light shaping/IES, light linking.
+- Curves, points and subdivision (done 2026-11-22): `curves.cpp`, `points.cpp`,
+  `subdiv.cpp`. All geometry rprims share `HdPbrtGeom` (`geom.cpp`: transform samples,
+  visibility, display color, instancing, and `Write()` with material, motion keys and
+  instances); a prim type only supplies object-space `Shape` lines (`_Shapes(extra)`).
+  Subdivision needs `topology.SetSubdivTags(sd->GetSubdivTags(id))` or creases are lost.
+  Tests: `tests/curves_points.usda`, `tests/subdiv_scene.usda` (`pbrt:subdivLevel=0` vs 3).
 - Curved motion (done 2026-11-22, pbrt patch 6): `pbrt:xformSamples` / `pbrt:geoSamples`
   (default 2) keys evenly spaced over the shutter. Transforms are sampled at sync on a
   1/16-frame grid over +-1 frame, each with `SampleTransform(id, t, t + 1e-3)`: a zero-width
@@ -154,3 +159,5 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
   That is the scene, not a bug.
 - `scripts/build.sh` has never run from a clean clone (pbrt clone plus submodules is a large
   download; cap downloads with `curl --limit-rate` style limits).
+- Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens
+  wants it after everything else).

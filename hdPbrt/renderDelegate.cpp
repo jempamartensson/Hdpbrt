@@ -66,7 +66,8 @@ std::string HdPbrt_Rgb(const GfVec3f &c)
 
 // --- delegate ----------------------------------------------------------------
 
-static const TfTokenVector _supportedRprims = {HdPrimTypeTokens->mesh};
+static const TfTokenVector _supportedRprims = {
+    HdPrimTypeTokens->mesh, HdPrimTypeTokens->basisCurves, HdPrimTypeTokens->points};
 static const TfTokenVector _supportedSprims = {
     HdPrimTypeTokens->camera,      HdPrimTypeTokens->material,
     HdPrimTypeTokens->distantLight, HdPrimTypeTokens->sphereLight,
@@ -104,6 +105,8 @@ void HdPbrtRenderDelegate::_Init()
     add("Motion Blur (camera shutter)", HdPbrtSettingsTokens->motionBlur, VtValue(true));
     add("Transform Motion Samples", HdPbrtSettingsTokens->xformSamples, VtValue(2));
     add("Deformation Motion Samples", HdPbrtSettingsTokens->geoSamples, VtValue(2));
+    add("Subdivision Level (catmullClark/loop meshes, 0 = off)",
+        HdPbrtSettingsTokens->subdivLevel, VtValue(2));
     add("Export .pbrt Scene To", HdPbrtSettingsTokens->exportPath, VtValue(std::string()));
     _PopulateDefaultSettings(_settingDescriptors);
 
@@ -247,6 +250,10 @@ HdRprim *HdPbrtRenderDelegate::CreateRprim(TfToken const &typeId, SdfPath const 
 {
     if (typeId == HdPrimTypeTokens->mesh)
         return new HdPbrtMesh(rprimId, this);
+    if (typeId == HdPrimTypeTokens->basisCurves)
+        return new HdPbrtCurves(rprimId, this);
+    if (typeId == HdPrimTypeTokens->points)
+        return new HdPbrtPoints(rprimId, this);
     return nullptr;
 }
 
@@ -293,15 +300,15 @@ HdBprim *HdPbrtRenderDelegate::CreateFallbackBprim(TfToken const &typeId)
 
 void HdPbrtRenderDelegate::DestroyBprim(HdBprim *bPrim) { delete bPrim; }
 
-void HdPbrtRenderDelegate::Register(HdPbrtMesh *m)
+void HdPbrtRenderDelegate::Register(HdPbrtGeom *g)
 {
     std::lock_guard<std::mutex> l(_registryMutex);
-    _meshes.insert(m);
+    _geoms.insert(g);
 }
-void HdPbrtRenderDelegate::Unregister(HdPbrtMesh *m)
+void HdPbrtRenderDelegate::Unregister(HdPbrtGeom *g)
 {
     std::lock_guard<std::mutex> l(_registryMutex);
-    _meshes.erase(m);
+    _geoms.erase(g);
 }
 void HdPbrtRenderDelegate::Register(HdPbrtLight *l)
 {
@@ -514,8 +521,8 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
     {
         os << lightText;
         std::lock_guard<std::mutex> l(_registryMutex);
-        for (HdPbrtMesh *mesh : _meshes)
-            mesh->Write(os, *index, renderTags, ctx);
+        for (HdPbrtGeom *geom : _geoms)
+            geom->Write(os, *index, renderTags, ctx);
     }
 
     const std::string text = os.str();

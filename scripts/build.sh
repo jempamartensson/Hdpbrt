@@ -7,7 +7,8 @@
 # Variables: WORK (default ./_work: pbrt source + build dirs), PREFIX (default ./install),
 # HFS (default /opt/hfs22.0), J (parallel jobs, default 8).
 # For the Blender flavor: BLENDER_LIB, USD_SOURCE (OpenUSD v26.08 source tree), TBB_INCLUDE
-# (oneTBB 2022.3 include dir), PYTHON_INCLUDE (Python 3.13 headers, e.g. Houdini's).
+# (oneTBB 2022.3 include dir), PYTHON_INCLUDE (Python 3.13 headers, e.g. Houdini's),
+# OSD_INCLUDE (a dir containing OpenSubdiv 3.7's opensubdiv/; default: a link to Houdini's).
 #
 # On a memory-tight machine run it inside a cap, e.g.
 #   systemd-run --user --scope -p MemoryMax=64G -p MemorySwapMax=0 scripts/build.sh
@@ -39,10 +40,15 @@ flavors=houdini
 
 # 3. hdPbrt for Blender 5.3 (optional)
 if [ "${BLENDER:-0}" = 1 ]; then
+  # Blender ships libosdCPU 3.7 but no headers; Houdini's are the same version.
+  osd_include="$WORK/osd-include"
+  mkdir -p "$osd_include"
+  ln -sfn "$HFS/toolkit/include/opensubdiv" "$osd_include/opensubdiv"
   cmake -G Ninja -S "$ROOT" -B "$WORK/build/hdpbrt-blender" -DHDPBRT_FLAVOR=blender \
         -DBLENDER_LIB="${BLENDER_LIB:-/opt/blender-5.3.0-linux-x64/lib}" \
         -DUSD_SOURCE="$USD_SOURCE" -DUSD_GENERATED="$ROOT/third_party/usd-blender-generated" \
         -DTBB_INCLUDE="$TBB_INCLUDE" \
+        -DOSD_INCLUDE="${OSD_INCLUDE:-$osd_include}" \
         -DPYTHON_INCLUDE="${PYTHON_INCLUDE:-$HFS/python/include/python3.13}" \
         -DCMAKE_INSTALL_PREFIX="$PREFIX/blender"
   ninja -C "$WORK/build/hdpbrt-blender" -j$J install

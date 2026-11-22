@@ -1,0 +1,116 @@
+#usda 1.0
+# Subdivision: three catmullClark cubes (checker texture on face-varying uvs).
+# Left: plain (rounds into a blob). Middle: infinitely sharp creases on the top
+# edges. Right: the top face is a hole. Compare pbrt:subdivLevel=0 and 3:
+#   hython render_settings.py out.png subdiv_scene.usda 1 pbrt:subdivLevel=3
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Scope "mtl"
+    {
+        def Material "checker"
+        {
+            token outputs:surface.connect = </World/mtl/checker/pbs.outputs:surface>
+            def Shader "pbs"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </World/mtl/checker/tex.outputs:rgb>
+                float inputs:roughness = 0.5
+                token outputs:surface
+            }
+            def Shader "tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./checker.png@
+                float2 inputs:st.connect = </World/mtl/checker/st.outputs:result>
+                float3 outputs:rgb
+            }
+            def Shader "st"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+    }
+
+    def Mesh "ground"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-5, 0, 5), (5, 0, 5), (5, 0, -5), (-5, 0, -5)]
+        uniform token subdivisionScheme = "none"
+        color3f[] primvars:displayColor = [(0.5, 0.5, 0.5)]
+    }
+
+    def Mesh "plain" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 1, 0, 1, 7, 5, 3, 6, 0, 2, 4]
+        point3f[] points = [(-0.5, -0.5, 0.5), (0.5, -0.5, 0.5), (-0.5, 0.5, 0.5), (0.5, 0.5, 0.5), (-0.5, 0.5, -0.5), (0.5, 0.5, -0.5), (-0.5, -0.5, -0.5), (0.5, -0.5, -0.5)]
+        uniform token subdivisionScheme = "catmullClark"
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        rel material:binding = </World/mtl/checker>
+        double3 xformOp:translate = (-1.6, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "creased" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 1, 0, 1, 7, 5, 3, 6, 0, 2, 4]
+        point3f[] points = [(-0.5, -0.5, 0.5), (0.5, -0.5, 0.5), (-0.5, 0.5, 0.5), (0.5, 0.5, 0.5), (-0.5, 0.5, -0.5), (0.5, 0.5, -0.5), (-0.5, -0.5, -0.5), (0.5, -0.5, -0.5)]
+        uniform token subdivisionScheme = "catmullClark"
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        rel material:binding = </World/mtl/checker>
+        double3 xformOp:translate = (0, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        int[] creaseIndices = [2, 3, 5, 4, 2]
+        int[] creaseLengths = [5]
+        float[] creaseSharpnesses = [10]
+    }
+
+    def Mesh "holed" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 1, 0, 1, 7, 5, 3, 6, 0, 2, 4]
+        point3f[] points = [(-0.5, -0.5, 0.5), (0.5, -0.5, 0.5), (-0.5, 0.5, 0.5), (0.5, 0.5, 0.5), (-0.5, 0.5, -0.5), (0.5, 0.5, -0.5), (-0.5, -0.5, -0.5), (0.5, -0.5, -0.5)]
+        uniform token subdivisionScheme = "catmullClark"
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1), (0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        rel material:binding = </World/mtl/checker>
+        double3 xformOp:translate = (1.6, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        int[] holeIndices = [1]
+    }
+
+    def DistantLight "sun"
+    {
+        float inputs:intensity = 3
+        float xformOp:rotateX = -50
+        float xformOp:rotateY = 25
+        uniform token[] xformOpOrder = ["xformOp:rotateY", "xformOp:rotateX"]
+    }
+
+    def DomeLight "sky"
+    {
+        float inputs:intensity = 0.5
+    }
+
+    def Camera "cam"
+    {
+        float focalLength = 30
+        float xformOp:rotateX = -30
+        double3 xformOp:translate = (0, 2.6, 4.2)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+    }
+}

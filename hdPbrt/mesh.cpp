@@ -13,23 +13,22 @@
 #include "pxr/imaging/pxOsd/tokens.h"
 
 #include <cstdio>
+#include <map>
 #include <cstdlib>
 #include <unistd.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
 TF_DEFINE_PRIVATE_TOKENS(_tokens,
-    (st)(uv)(st0)(UVMap)(map1)(displayColor)(displayOpacity));
+    (st)(uv)(st0)(UVMap)(map1));
 
 HdPbrtMesh::HdPbrtMesh(SdfPath const &id, HdPbrtRenderDelegate *delegate)
-    : HdMesh(id), _delegate(delegate)
+    : HdMesh(id), HdPbrtGeom(delegate)
 {
-    _delegate->Register(this);
 }
 
 HdPbrtMesh::~HdPbrtMesh()
 {
-    _delegate->Unregister(this);
     if (!_plyPath.empty() && !getenv("HDPBRT_KEEP_TMP"))
         unlink(_plyPath.c_str());
 }
@@ -51,64 +50,6 @@ HdDirtyBits HdPbrtMesh::GetInitialDirtyBitsMask() const
 
 namespace {
 
-struct _Primvar {
-    VtValue value;
-    HdInterpolation interp = HdInterpolationConstant;
-    bool valid = false;
-};
-
-template <typename T>
-bool _Flatten(VtValue *v, VtIntArray const &indices)
-{
-    if (!v->IsHolding<VtArray<T>>())
-        return false;
-    const VtArray<T> &src = v->UncheckedGet<VtArray<T>>();
-    VtArray<T> out(indices.size());
-    for (size_t i = 0; i < indices.size(); ++i) {
-        int k = indices[i];
-        out[i] = (k >= 0 && size_t(k) < src.size()) ? src[k] : T();
-    }
-    *v = VtValue(out);
-    return true;
-}
-
-// Get a primvar, expanding indexed primvars to one value per element.
-VtValue _GetFlat(HdSceneDelegate *sd, SdfPath const &id, TfToken const &name)
-{
-    VtIntArray indices;
-    VtValue v = sd->GetIndexedPrimvar(id, name, &indices);
-    if (v.IsEmpty())
-        return sd->Get(id, name);
-    if (!indices.empty()) {
-        _Flatten<GfVec3f>(&v, indices) || _Flatten<GfVec2f>(&v, indices) ||
-            _Flatten<float>(&v, indices);
-    }
-    return v;
-}
-
-_Primvar _FindPrimvar(HdSceneDelegate *sd, SdfPath const &id,
-                      const std::vector<TfToken> &names, bool anyVec2 = false)
-{
-    static const HdInterpolation interps[] = {
-        HdInterpolationFaceVarying, HdInterpolationVertex, HdInterpolationVarying,
-        HdInterpolationUniform, HdInterpolationConstant};
-    for (const TfToken &name : names)
-        for (HdInterpolation interp : interps)
-            for (const HdPrimvarDescriptor &pv : sd->GetPrimvarDescriptors(id, interp))
-                if (pv.name == name)
-                    return {_GetFlat(sd, id, pv.name), interp, true};
-    if (anyVec2) {
-        for (HdInterpolation interp : {HdInterpolationFaceVarying, HdInterpolationVertex,
-                                       HdInterpolationVarying})
-            for (const HdPrimvarDescriptor &pv : sd->GetPrimvarDescriptors(id, interp)) {
-                VtValue v = _GetFlat(sd, id, pv.name);
-                if (v.IsHolding<VtVec2fArray>())
-                    return {v, interp, true};
-            }
-    }
-    return {};
-}
-
 template <typename T>
 VtArray<T> _Triangulated(HdMeshUtil &util, VtArray<T> const &src, HdType type)
 {
@@ -122,26 +63,6 @@ VtArray<T> _Triangulated(HdMeshUtil &util, VtArray<T> const &src, HdType type)
     return {};
 }
 
-GfVec3f _AverageColor(VtValue const &v, bool *ok)
-{
-    *ok = false;
-    if (v.IsHolding<VtVec3fArray>()) {
-        const VtVec3fArray &a = v.UncheckedGet<VtVec3fArray>();
-        if (a.empty())
-            return GfVec3f(0.18f);
-        GfVec3d sum(0);
-        for (const GfVec3f &c : a)
-            sum += GfVec3d(c);
-        *ok = true;
-        return GfVec3f(sum / double(a.size()));
-    }
-    if (v.IsHolding<GfVec3f>()) {
-        *ok = true;
-        return v.UncheckedGet<GfVec3f>();
-    }
-    return GfVec3f(0.18f);
-}
-
 }  // namespace
 
 void HdPbrtMesh::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
@@ -153,28 +74,10 @@ void HdPbrtMesh::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam
     if (*dirtyBits & HdChangeTracker::DirtyMaterialId)
         SetMaterialId(sceneDelegate->GetMaterialId(id));
 
+    if (HdChangeTracker::IsTransformDirty(*dirtyBits, id))
+        _SyncTransform(sceneDelegate);
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        if (HdChangeTracker::IsTransformDirty(*dirtyBits, id)) {
-            // Motion blur: sample over a window around the current time and
-            // resample at the shutter when the scene is written.
-            const float w = HdPbrt_SampleWindow;
-            (void)w;
-            HdPbrt_SampleXform(
-                [&](float a, float b, HdTimeSampleArray<GfMatrix4d, 4> *sa) {
-                    sceneDelegate->SampleTransform(id, a, b, sa);
-                },
-                &_xform);
-            if (_xform.count == 0) {
-                _xform.Resize(1);
-                _xform.times[0] = 0.f;
-                _xform.values[0] = sceneDelegate->GetTransform(id);
-            }
-            static const bool debug = getenv("HDPBRT_DEBUG") != nullptr;
-            if (debug && _xform.count > 1)
-                fprintf(stderr, "hdPbrt %s: %zu transform samples (%g..%g)\n", id.GetText(),
-                        _xform.count, _xform.times[0], _xform.times[_xform.count - 1]);
-        }
         if (HdChangeTracker::IsVisibilityDirty(*dirtyBits, id))
             _UpdateVisibility(sceneDelegate, dirtyBits);
         _visible = IsVisible();
@@ -192,16 +95,7 @@ void HdPbrtMesh::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam
     _UpdateInstancer(sceneDelegate, dirtyBits);
     HdInstancer::_SyncInstancerAndParents(sceneDelegate->GetRenderIndex(),
                                           GetInstancerId());
-    {
-        bool instanced = !GetInstancerId().IsEmpty();
-        if (instanced) {
-            if (HdInstancer *instancer =
-                    sceneDelegate->GetRenderIndex().GetInstancer(GetInstancerId()))
-                static_cast<HdPbrtInstancer *>(instancer)->UpdateInstanceIndices(id);
-        }
-        std::lock_guard<std::mutex> lock(_mutex);
-        _instanced = instanced;
-    }
+    _SyncInstancing(sceneDelegate);
 
     *dirtyBits &= ~HdChangeTracker::AllSceneDirtyBits;
 }
@@ -278,6 +172,67 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
         points = pointsValue.UncheckedGet<VtVec3fArray>();
 
     HdMeshTopology topology = GetMeshTopology(sd);
+    const size_t numBasePoints = points.size();
+
+    // Texture coordinates (fetched before subdivision, which refines them).
+    HdPbrtPrimvar uvPv = HdPbrt_FindPrimvar(sd, id, {_tokens->st, _tokens->uv, _tokens->st0,
+                                          _tokens->UVMap, _tokens->map1}, true);
+
+    // Subdivision: catmullClark and loop meshes are refined uniformly and then
+    // treated as plain polygons (smooth normals; authored normals are ignored,
+    // as for any subdivision surface).
+    std::shared_ptr<HdPbrtSubdiv> subdiv;
+    const int subdivLevel = std::min(
+        6, _delegate->GetSetting<int>(HdPbrtSettingsTokens->subdivLevel, 2));
+    if (subdivLevel > 0 && !points.empty()) {
+        // Face-varying uvs: weld equal values per vertex into OpenSubdiv's
+        // value indices, so shared corners refine smoothly and seams stay.
+        VtIntArray fvIndices;
+        VtVec2fArray fvValues;
+        const VtIntArray &fvi = topology.GetFaceVertexIndices();
+        const bool uvFV = uvPv.valid && uvPv.interp == HdInterpolationFaceVarying &&
+                          uvPv.value.IsHolding<VtVec2fArray>() &&
+                          uvPv.value.UncheckedGet<VtVec2fArray>().size() == fvi.size();
+        if (uvFV) {
+            const VtVec2fArray &uv = uvPv.value.UncheckedGet<VtVec2fArray>();
+            std::map<std::pair<int, std::pair<float, float>>, int> weld;
+            fvIndices.resize(fvi.size());
+            for (size_t c = 0; c < fvi.size(); ++c) {
+                auto key = std::make_pair(fvi[c], std::make_pair(uv[c][0], uv[c][1]));
+                auto it = weld.find(key);
+                if (it == weld.end()) {
+                    it = weld.emplace(key, int(fvValues.size())).first;
+                    fvValues.push_back(uv[c]);
+                }
+                fvIndices[c] = it->second;
+            }
+        }
+        // Creases, corners and interpolation rules come separately from the
+        // topology.
+        topology.SetSubdivTags(sd->GetSubdivTags(id));
+        subdiv = HdPbrtSubdiv::Create(topology, subdivLevel, uvFV ? &fvIndices : nullptr, id);
+        if (subdiv) {
+            VtVec3fArray refined = subdiv->RefinePoints(points);
+            if (refined.empty()) {
+                subdiv.reset();
+            } else {
+                points = refined;
+                if (uvFV) {
+                    uvPv.value = VtValue(subdiv->RefineFaceVaryingUV(fvValues));
+                } else if (uvPv.valid && uvPv.value.IsHolding<VtVec2fArray>() &&
+                           (uvPv.interp == HdInterpolationVertex ||
+                            uvPv.interp == HdInterpolationVarying)) {
+                    uvPv.value = VtValue(subdiv->RefineVertexUV(
+                        uvPv.value.UncheckedGet<VtVec2fArray>(),
+                        uvPv.interp == HdInterpolationVarying));
+                } else if (uvPv.valid && uvPv.interp != HdInterpolationConstant) {
+                    uvPv = HdPbrtPrimvar();  // uniform uvs: not refined
+                }
+                topology = subdiv->RefinedTopology();
+            }
+        }
+    }
+
     HdMeshUtil util(&topology, id);
     VtVec3iArray tris;
     VtIntArray primParams;
@@ -303,12 +258,13 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
                 fprintf(stderr, "hdPbrt: %s primvar %s interp %d role %s type %s\n",
                         id.GetText(), pv.name.GetText(), int(i), pv.role.GetText(),
                         sd->Get(id, pv.name).GetTypeName().c_str());
-        fprintf(stderr, "hdPbrt: %s scheme %s points %zu\n", id.GetText(),
-                topology.GetScheme().GetText(), points.size());
+        fprintf(stderr, "hdPbrt: %s scheme %s points %zu (subdivided %d)\n", id.GetText(),
+                topology.GetScheme().GetText(), points.size(), subdiv ? subdivLevel : 0);
     }
 
     // Normals.
-    _Primvar nPv = _FindPrimvar(sd, id, {HdTokens->normals});
+    HdPbrtPrimvar nPv =
+        subdiv ? HdPbrtPrimvar() : HdPbrt_FindPrimvar(sd, id, {HdTokens->normals});
     VtVec3fArray normals;
     HdInterpolation nInterp = HdInterpolationVertex;
     if (nPv.valid && nPv.value.IsHolding<VtVec3fArray>()) {
@@ -333,8 +289,6 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
         normals = _Triangulated(util, normals, HdTypeFloatVec3);
 
     // Texture coordinates.
-    _Primvar uvPv = _FindPrimvar(sd, id, {_tokens->st, _tokens->uv, _tokens->st0,
-                                          _tokens->UVMap, _tokens->map1}, true);
     VtVec2fArray uvs;
     bool uvVertex = false, uvFaceVarying = false;
     if (uvPv.valid && uvPv.value.IsHolding<VtVec2fArray>()) {
@@ -360,24 +314,7 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
     const bool hasUV = uvVertex || uvFaceVarying;
     const bool unweld = nFaceVarying || uvFaceVarying;
 
-    // Display color / opacity.
-    {
-        _Primvar c = _FindPrimvar(sd, id, {_tokens->displayColor});
-        bool ok = false;
-        GfVec3f col = c.valid ? _AverageColor(c.value, &ok) : GfVec3f(0.18f);
-        _Primvar o = _FindPrimvar(sd, id, {_tokens->displayOpacity});
-        float op = 1.f;
-        if (o.valid) {
-            if (o.value.IsHolding<VtFloatArray>() && !o.value.UncheckedGet<VtFloatArray>().empty())
-                op = o.value.UncheckedGet<VtFloatArray>()[0];
-            else if (o.value.IsHolding<float>())
-                op = o.value.UncheckedGet<float>();
-        }
-        std::lock_guard<std::mutex> lock(_mutex);
-        _displayColor = col;
-        _hasDisplayColor = ok;
-        _displayOpacity = op;
-    }
+    _SyncDisplayColor(sd);
 
     // PLY vertex arrays. Face-varying data unwelds the mesh into three
     // vertices per triangle.
@@ -437,7 +374,7 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
         bool moving = false, ok = sa.count > 1;
         for (size_t k = 0; ok && k < sa.count; ++k) {
             ok = sa.values[k].IsHolding<VtVec3fArray>() &&
-                 sa.values[k].UncheckedGet<VtVec3fArray>().size() == points.size();
+                 sa.values[k].UncheckedGet<VtVec3fArray>().size() == numBasePoints;
             if (ok && k > 0)
                 moving |= sa.values[k].UncheckedGet<VtVec3fArray>() !=
                           sa.values[0].UncheckedGet<VtVec3fArray>();
@@ -457,6 +394,7 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
                 motion->topology = topology;
             else if (hasN)
                 motion->normals.assign(plyN.begin(), plyN.end());
+            motion->subdiv = subdiv;
             motion->uvs = plyUV;
             if (debug)
                 fprintf(stderr, "hdPbrt: %s deforms (%zu point samples, %g..%g)\n",
@@ -489,7 +427,11 @@ void HdPbrtMesh::_UpdateMotionPlys(std::vector<float> const &times) const
     const _Motion &mo = *_motion;
     std::vector<std::string> paths;
     for (size_t e = 0; e < times.size(); ++e) {
-        const VtVec3fArray pts = _PointsAt(mo.points, times[e]);
+        VtVec3fArray pts = _PointsAt(mo.points, times[e]);
+        if (mo.subdiv)
+            pts = mo.subdiv->RefinePoints(pts);
+        if (pts.empty())
+            return;
         std::vector<GfVec3f> p(mo.source.size()), n;
         for (size_t v = 0; v < mo.source.size(); ++v)
             p[v] = pts[mo.source[v]];
@@ -518,142 +460,22 @@ void HdPbrtMesh::_UpdateMotionPlys(std::vector<float> const &times) const
     _motionPlys = paths;
 }
 
-GfMatrix4d HdPbrt_InterpolateXform(const GfMatrix4d &a, const GfMatrix4d &b, double u)
+std::string HdPbrtMesh::_Shapes(std::string const &extra) const
 {
-    if (a == b || u <= 0)
-        return a;
-    if (u >= 1)
-        return b;
-    GfTransform ta(a), tb(b);
-    GfTransform r;
-    r.SetScale(ta.GetScale() + u * (tb.GetScale() - ta.GetScale()));
-    r.SetTranslation(ta.GetTranslation() + u * (tb.GetTranslation() - ta.GetTranslation()));
-    r.SetPivotPosition(ta.GetPivotPosition() +
-                       u * (tb.GetPivotPosition() - ta.GetPivotPosition()));
-    r.SetPivotOrientation(ta.GetPivotOrientation());
-    r.SetScaleOrientation(ta.GetScaleOrientation());
-    const GfQuatd qa = ta.GetRotation().GetQuat(), qb = tb.GetRotation().GetQuat();
-    r.SetRotation(GfRotation(GfSlerp(u, qa, qb)));
-    return r.GetMatrix();
-}
-
-GfMatrix4d HdPbrt_XformAt(const HdTimeSampleArray<GfMatrix4d, 4> &sa, float t)
-{
-    if (sa.count == 0)
-        return GfMatrix4d(1.0);
-    if (sa.count == 1 || t <= sa.times[0])
-        return sa.values[0];
-    if (t >= sa.times[sa.count - 1])
-        return sa.values[sa.count - 1];
-    size_t i = 0;
-    while (i + 1 < sa.count && sa.times[i + 1] < t)
-        ++i;
-    const float t0 = sa.times[i], t1 = sa.times[i + 1];
-    const double u = t1 > t0 ? double(t - t0) / double(t1 - t0) : 0.0;
-    return HdPbrt_InterpolateXform(sa.values[i], sa.values[i + 1], u);
-}
-
-// pbrt transform text for keys at the shutter times: a plain Transform when
-// they're all equal, pbrt's own two-key ActiveTransform pair for two keys.
-// For more keys it returns "" and *motionAttr gets the Attribute line for
-// pbrt patch 6 (N-key instance motion; it must precede an ObjectInstance).
-static std::string _MotionTransform(const std::vector<GfMatrix4d> &keys,
-                                    const std::vector<float> &times,
-                                    std::string *motionAttr)
-{
-    bool moving = false;
-    for (size_t k = 1; k < keys.size(); ++k)
-        moving |= keys[k] != keys[0];
-    if (!moving)
-        return "Transform " + HdPbrt_Matrix(keys[0]);
-    if (keys.size() == 2)
-        return "ActiveTransform StartTime Transform " + HdPbrt_Matrix(keys[0]) +
-               " ActiveTransform EndTime Transform " + HdPbrt_Matrix(keys[1]) +
-               " ActiveTransform All";
-    std::string m = "Attribute \"shape\" \"float hdpbrtmotionxforms\" [";
-    for (const GfMatrix4d &k : keys) {
-        std::string one = HdPbrt_Matrix(k);  // "[a b ...]"
-        m += " " + one.substr(1, one.size() - 2);
-    }
-    m += " ] \"float hdpbrtmotiontimes\" [";
-    char buf[32];
-    for (float t : times) {
-        snprintf(buf, sizeof(buf), " %.9g", t);
-        m += buf;
-    }
-    m += " ]";
-    *motionAttr = m;
-    return "";
-}
-
-// N evenly spaced times over the shutter (N >= 2), or {open} without blur.
-static std::vector<float> _ShutterTimes(GfVec2f shutter, int n)
-{
-    if (shutter[0] == shutter[1] || n < 2)
-        return {shutter[0]};
-    std::vector<float> t(n);
-    for (int k = 0; k < n; ++k)
-        t[k] = shutter[0] + (shutter[1] - shutter[0]) * float(k) / float(n - 1);
-    return t;
-}
-
-void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
-                       TfTokenVector const &renderTags, HdPbrtWriteContext &ctx) const
-{
-    std::lock_guard<std::mutex> lock(_mutex);
-    if (!_visible || _plyPath.empty())
-        return;
-    if (!renderTags.empty() &&
-        std::find(renderTags.begin(), renderTags.end(), GetRenderTag()) == renderTags.end())
-        return;
-    // Transform keys over the shutter (one without motion blur).
-    const GfVec2f shutter = _delegate->GetShutter();
-    const bool blur = shutter[0] != shutter[1];
-    const std::vector<float> xTimes = _ShutterTimes(
-        shutter, std::max(2, _delegate->GetSetting<int>(HdPbrtSettingsTokens->xformSamples, 2)));
-    const size_t nx = xTimes.size();
-    std::vector<GfMatrix4d> xf(nx);
-    for (size_t k = 0; k < nx; ++k)
-        xf[k] = HdPbrt_XformAt(_xform, xTimes[k]);
-    std::vector<VtMatrix4dArray> inst;
-    if (_instanced) {
-        if (auto *pi = static_cast<HdPbrtInstancer *>(index.GetInstancer(GetInstancerId())))
-            for (size_t k = 0; k < nx; ++k)
-                inst.push_back(pi->ComputeInstanceTransforms(GetId(), xTimes[k]));
-        if (inst.empty() || inst[0].empty())
-            return;
-        for (size_t k = 1; k < nx; ++k)
-            if (inst[k].size() != inst[0].size())  // the instance count changes
-                inst[k] = inst[0];
-    }
-
-    HdPbrtMaterialDesc mat = HdPbrt_DefaultMaterial();
-    const SdfPath &matId = GetMaterialId();
-    if (!matId.IsEmpty()) {
-        if (auto *m = static_cast<HdPbrtMaterial *>(
-                index.GetSprim(HdPrimTypeTokens->material, matId))) {
-            mat = m->GetDesc();
-            if (!mat.textures.empty() && ctx.texturesWritten.insert(matId).second)
-                os << mat.textures;
-        }
-    }
-    const std::string matLine =
-        HdPbrt_MaterialLine(mat, _hasDisplayColor ? &_displayColor : nullptr);
-    const bool emissive = mat.emission[0] > 0 || mat.emission[1] > 0 || mat.emission[2] > 0;
-
+    if (_plyPath.empty())
+        return "";
     // Deformation blur: the poses at the geo sample times (pbrt patches 5/6:
     // filename = first pose, motionfilenames = the rest).
+    const GfVec2f shutter = _delegate->GetShutter();
+    const bool blur = shutter[0] != shutter[1];
     if (blur && _motion)
-        _UpdateMotionPlys(_ShutterTimes(
+        _UpdateMotionPlys(HdPbrt_ShutterTimes(
             shutter,
             std::max(2, _delegate->GetSetting<int>(HdPbrtSettingsTokens->geoSamples, 2))));
     const bool deforming = blur && _motion && _motionPlys.size() >= 2;
     std::ostringstream shape;
-    // hdpbrtprimid: Hydra's prim id, streamed back by pbrt for the primId AOV
-    // (selection).
     shape << "Shape \"plymesh\" \"string filename\" "
-          << HdPbrt_Quote(deforming ? _motionPlys[0] : _plyPath) << " \"integer hdpbrtprimid\" "
-          << GetPrimId();
+          << HdPbrt_Quote(deforming ? _motionPlys[0] : _plyPath);
     if (deforming) {
         shape << " \"string motionfilenames\" [";
         for (size_t k = 1; k < _motionPlys.size(); ++k)
@@ -666,55 +488,8 @@ void HdPbrtMesh::Write(std::ostream &os, HdRenderIndex &index,
         }
         shape << " ]";
     }
-    float alpha = mat.opacity * _displayOpacity;
-    if (!mat.opacityTexture.empty())
-        shape << " \"texture alpha\" " << HdPbrt_Quote(mat.opacityTexture);
-    else if (alpha < 0.999f)
-        shape << " \"float alpha\" " << std::max(alpha, 0.f);
-    shape << "\n";
-
-    os << "# " << GetId().GetString() << "\n";
-    if (!_instanced) {
-        std::string motionAttr;
-        // Area lights can't be instanced in pbrt: emissive meshes get two keys.
-        const std::vector<GfMatrix4d> keys =
-            emissive && nx > 2 ? std::vector<GfMatrix4d>{xf.front(), xf.back()} : xf;
-        const std::vector<float> keyTimes =
-            emissive && nx > 2 ? std::vector<float>{xTimes.front(), xTimes.back()} : xTimes;
-        const std::string xform = _MotionTransform(keys, keyTimes, &motionAttr);
-        if (motionAttr.empty()) {
-            os << "AttributeBegin\n  " << xform << "\n  " << matLine;
-            if (emissive)
-                os << "  AreaLightSource \"diffuse\" \"rgb L\" " << HdPbrt_Rgb(mat.emission)
-                   << "\n";
-            os << "  " << shape.str() << "AttributeEnd\n";
-        } else {
-            // N-key transform motion only exists for object instances.
-            std::string name = "hdpbrt_obj_" + std::to_string(ctx.objectCounter++);
-            os << "ObjectBegin " << HdPbrt_Quote(name) << "\n  Identity\n  " << matLine << "  "
-               << shape.str() << "ObjectEnd\nAttributeBegin " << motionAttr
-               << " ObjectInstance " << HdPbrt_Quote(name) << " AttributeEnd\n";
-        }
-        ++ctx.numMeshes;
-    } else {
-        std::string name = "hdpbrt_obj_" + std::to_string(ctx.objectCounter++);
-        os << "ObjectBegin " << HdPbrt_Quote(name) << "\n  Identity\n  " << matLine << "  "
-           << shape.str() << "ObjectEnd\n";
-        // hdpbrtinstanceid: the instance index Hydra expects in the instanceId
-        // AOV (flattened over nested instancers, see HdPbrtInstancer).
-        std::vector<GfMatrix4d> keys(nx);
-        for (size_t i = 0; i < inst[0].size(); ++i) {
-            for (size_t k = 0; k < nx; ++k)
-                keys[k] = xf[k] * inst[k][i];
-            std::string motionAttr;
-            const std::string xform = _MotionTransform(keys, xTimes, &motionAttr);
-            os << "AttributeBegin " << xform << (xform.empty() ? "" : " ") << motionAttr
-               << (motionAttr.empty() ? "" : " ")
-               << "Attribute \"shape\" \"integer hdpbrtinstanceid\" " << i
-               << " ObjectInstance " << HdPbrt_Quote(name) << " AttributeEnd\n";
-        }
-        ctx.numInstances += inst[0].size();
-    }
+    shape << extra << "\n";
+    return shape.str();
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

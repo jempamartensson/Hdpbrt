@@ -24,7 +24,11 @@ add_library(hdPbrt SHARED
   hdPbrt/renderDelegate.cpp
   hdPbrt/renderPass.cpp
   hdPbrt/rendererPlugin.cpp
+  hdPbrt/geom.cpp
   hdPbrt/mesh.cpp
+  hdPbrt/curves.cpp
+  hdPbrt/points.cpp
+  hdPbrt/subdiv.cpp
   hdPbrt/material.cpp
   hdPbrt/light.cpp
   hdPbrt/instancer.cpp
@@ -43,7 +47,8 @@ if(HDPBRT_FLAVOR STREQUAL "houdini")
   foreach(l ${_libs})
     target_link_libraries(hdPbrt PRIVATE ${HFS}/dsolib/libpxr_${l}.so)
   endforeach()
-  target_link_libraries(hdPbrt PRIVATE ${HFS}/dsolib/libtbb.so ${HFS}/python/lib/libpython3.13.so)
+  target_link_libraries(hdPbrt PRIVATE ${HFS}/dsolib/libtbb.so ${HFS}/python/lib/libpython3.13.so
+    ${HFS}/dsolib/libosdCPU.so)
   set_target_properties(hdPbrt PROPERTIES INSTALL_RPATH "${HFS}/dsolib" BUILD_RPATH "${HFS}/dsolib")
 elseif(HDPBRT_FLAVOR STREQUAL "blender")
   set(BLENDER_LIB "/opt/blender-5.3.0-linux-x64/lib" CACHE PATH "Blender lib dir")
@@ -51,9 +56,13 @@ elseif(HDPBRT_FLAVOR STREQUAL "blender")
   set(USD_GENERATED "" CACHE PATH "Directory containing the generated pxr/pxr.h")
   set(TBB_INCLUDE "" CACHE PATH "oneTBB include directory")
   set(PYTHON_INCLUDE "" CACHE PATH "Python 3.13 include directory")
+  # OpenSubdiv headers matching Blender's libosdCPU (3.7): a directory that
+  # contains opensubdiv/ (e.g. a link to Houdini's toolkit/include/opensubdiv).
+  set(OSD_INCLUDE "" CACHE PATH "Directory containing opensubdiv/far/...")
   target_include_directories(hdPbrt SYSTEM BEFORE PRIVATE
-    ${USD_GENERATED} ${USD_SOURCE} ${TBB_INCLUDE} ${PYTHON_INCLUDE})
-  target_link_libraries(hdPbrt PRIVATE ${BLENDER_LIB}/libusd_ms.so ${BLENDER_LIB}/libtbb.so)
+    ${USD_GENERATED} ${USD_SOURCE} ${TBB_INCLUDE} ${PYTHON_INCLUDE} ${OSD_INCLUDE})
+  target_link_libraries(hdPbrt PRIVATE ${BLENDER_LIB}/libusd_ms.so ${BLENDER_LIB}/libtbb.so
+    ${BLENDER_LIB}/libosdCPU.so)
   # Python symbols come from the Blender executable at run time.
 else()
   message(FATAL_ERROR "HDPBRT_FLAVOR must be houdini or blender")

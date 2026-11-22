@@ -21,6 +21,8 @@
 #include "pxr/imaging/hd/light.h"
 #include "pxr/imaging/hd/material.h"
 #include "pxr/imaging/hd/mesh.h"
+#include "pxr/imaging/hd/basisCurves.h"
+#include "pxr/imaging/hd/points.h"
 #include "pxr/imaging/hd/renderDelegate.h"
 #include "pxr/imaging/hd/renderPass.h"
 #include "pxr/imaging/hd/rendererPlugin.h"
@@ -51,6 +53,7 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((motionBlur, "pbrt:motionBlur"))           \
     ((xformSamples, "pbrt:xformSamples"))       \
     ((geoSamples, "pbrt:geoSamples"))           \
+    ((subdivLevel, "pbrt:subdivLevel"))         \
     ((exportPath, "pbrt:exportPath"))           \
     ((pbrtExecutable, "pbrt:executable"))
 
@@ -118,6 +121,7 @@ struct HdPbrtLens {
 
 class HdPbrtRenderDelegate;
 class HdPbrtMesh;
+class HdPbrtGeom;
 class HdPbrtLight;
 
 // Format helpers shared by the scene writers.
@@ -200,8 +204,84 @@ private:
     bool _visible = true;
 };
 
+// Primvar lookup shared by the geometry prims: the first of names found (by
+// interpolation, face-varying first), indexed primvars expanded. anyVec2:
+// fall back to any float2 primvar (texture coordinates).
+struct HdPbrtPrimvar {
+    VtValue value;
+    HdInterpolation interp = HdInterpolationConstant;
+    bool valid = false;
+};
+HdPbrtPrimvar HdPbrt_FindPrimvar(HdSceneDelegate *sd, SdfPath const &id,
+                                 const std::vector<TfToken> &names, bool anyVec2 = false);
+GfVec3f HdPbrt_AverageColor(VtValue const &v, bool *ok);
+// N evenly spaced times over the shutter (N >= 2), or {open} without blur.
+std::vector<float> HdPbrt_ShutterTimes(GfVec2f shutter, int n);
+
 // ---------------------------------------------------------------------------
-class HdPbrtMesh final : public HdMesh {
+// Uniform subdivision of a catmullClark or loop mesh (OpenSubdiv).
+class HdPbrtSubdiv {
+public:
+    // nullptr when the scheme isn't refined or the topology is invalid.
+    // fvarIndices: one face-varying channel (uv value index per face corner).
+    static std::shared_ptr<HdPbrtSubdiv> Create(HdMeshTopology const &topology, int level,
+                                                VtIntArray const *fvarIndices,
+                                                SdfPath const &id);
+    ~HdPbrtSubdiv();
+    // The refined faces (holes dropped), same scheme and orientation.
+    HdMeshTopology const &RefinedTopology() const { return _topology; }
+    VtVec3fArray RefinePoints(VtVec3fArray const &points) const;
+    VtVec2fArray RefineVertexUV(VtVec2fArray const &uv, bool varying) const;
+    // values per face-varying value index; result per refined face corner.
+    VtVec2fArray RefineFaceVaryingUV(VtVec2fArray const &values) const;
+
+private:
+    HdPbrtSubdiv();
+    struct _Impl;
+    std::unique_ptr<_Impl> _impl;
+    HdMeshTopology _topology;
+    bool _hasFVar = false;
+};
+
+// ---------------------------------------------------------------------------
+// Shared by the geometry rprims (mesh, curves, points): transform samples,
+// visibility, display color and instancing, and writing the shapes with their
+// material, motion keys and instances. The rprim supplies its pbrt shapes.
+class HdPbrtGeom {
+public:
+    explicit HdPbrtGeom(HdPbrtRenderDelegate *delegate);
+    virtual ~HdPbrtGeom();
+
+    // Append this prim's pbrt description to the scene.
+    void Write(std::ostream &os, HdRenderIndex &index, TfTokenVector const &renderTags,
+               HdPbrtWriteContext &ctx) const;
+
+protected:
+    virtual HdRprim const &_Prim() const = 0;
+    // pbrt Shape lines in object space ("" for nothing); extra goes on every
+    // Shape (prim id, alpha). Called with _mutex held.
+    virtual std::string _Shapes(std::string const &extra) const = 0;
+    // Emissive materials become area lights on these shapes (meshes).
+    virtual bool _CanEmit() const { return false; }
+
+    void _SyncTransform(HdSceneDelegate *sd);
+    void _SyncInstancing(HdSceneDelegate *sd);  // after the instancer synced
+    void _SyncDisplayColor(HdSceneDelegate *sd);
+
+    HdPbrtRenderDelegate *_delegate;
+    mutable std::mutex _mutex;
+    // Transform samples over HdPbrt_SampleWindow, resampled at the shutter
+    // when the scene is written.
+    HdTimeSampleArray<GfMatrix4d, 4> _xform;
+    bool _visible = true;
+    GfVec3f _displayColor{0.18f, 0.18f, 0.18f};
+    bool _hasDisplayColor = false;
+    float _displayOpacity = 1.f;
+    bool _instanced = false;
+};
+
+// ---------------------------------------------------------------------------
+class HdPbrtMesh final : public HdMesh, public HdPbrtGeom {
 public:
     HdPbrtMesh(SdfPath const &id, HdPbrtRenderDelegate *delegate);
     ~HdPbrtMesh() override;
@@ -211,11 +291,10 @@ public:
               HdDirtyBits *dirtyBits, TfToken const &reprToken) override;
     void Finalize(HdRenderParam *renderParam) override;
 
-    // Append this mesh's pbrt description to the scene.
-    void Write(std::ostream &os, HdRenderIndex &index,
-               TfTokenVector const &renderTags, HdPbrtWriteContext &ctx) const;
-
 protected:
+    HdRprim const &_Prim() const override { return *this; }
+    std::string _Shapes(std::string const &extra) const override;
+    bool _CanEmit() const override { return true; }
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override { return bits; }
     void _InitRepr(TfToken const &reprToken, HdDirtyBits *dirtyBits) override {}
 
@@ -225,18 +304,8 @@ private:
     // when they changed. Called with _mutex held.
     void _UpdateMotionPlys(std::vector<float> const &times) const;
 
-    HdPbrtRenderDelegate *_delegate;
-    mutable std::mutex _mutex;
     std::string _plyPath;
     size_t _numTriangles = 0;
-    // Transform samples over HdPbrt_SampleWindow, resampled at the shutter
-    // when the scene is written.
-    HdTimeSampleArray<GfMatrix4d, 4> _xform;
-    bool _visible = true;
-    GfVec3f _displayColor{0.18f, 0.18f, 0.18f};
-    bool _hasDisplayColor = false;
-    float _displayOpacity = 1.f;
-    bool _instanced = false;
     int _plyVersion = 0;
 
     // Deformation blur (only for meshes whose points are time-sampled): the
@@ -247,12 +316,54 @@ private:
         std::vector<int32_t> indices;  // PLY triangle vertex indices
         VtVec3fArray normals;          // per PLY vertex: authored (static) normals
         bool smoothNormals = false;    // recompute vertex normals per pose
-        HdMeshTopology topology;       // for smoothNormals
+        HdMeshTopology topology;       // for smoothNormals (refined when subdivided)
+        std::shared_ptr<HdPbrtSubdiv> subdiv;  // refines each pose's points
         std::vector<GfVec2f> uvs;      // per PLY vertex (empty: none)
     };
     std::unique_ptr<_Motion> _motion;
     mutable std::vector<float> _motionTimes;
     mutable std::vector<std::string> _motionPlys;
+};
+
+// ---------------------------------------------------------------------------
+class HdPbrtCurves final : public HdBasisCurves, public HdPbrtGeom {
+public:
+    HdPbrtCurves(SdfPath const &id, HdPbrtRenderDelegate *delegate);
+    ~HdPbrtCurves() override;
+    HdDirtyBits GetInitialDirtyBitsMask() const override;
+    void Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
+              HdDirtyBits *dirtyBits, TfToken const &reprToken) override;
+    void Finalize(HdRenderParam *renderParam) override;
+
+protected:
+    HdRprim const &_Prim() const override { return *this; }
+    std::string _Shapes(std::string const &extra) const override;
+    HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override { return bits; }
+    void _InitRepr(TfToken const &reprToken, HdDirtyBits *dirtyBits) override {}
+
+private:
+    void _BuildShapes(HdSceneDelegate *sceneDelegate);
+    std::vector<std::string> _shapes;  // one pbrt curve per USD curve, object space
+};
+
+// ---------------------------------------------------------------------------
+class HdPbrtPoints final : public HdPoints, public HdPbrtGeom {
+public:
+    HdPbrtPoints(SdfPath const &id, HdPbrtRenderDelegate *delegate);
+    ~HdPbrtPoints() override;
+    HdDirtyBits GetInitialDirtyBitsMask() const override;
+    void Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
+              HdDirtyBits *dirtyBits, TfToken const &reprToken) override;
+    void Finalize(HdRenderParam *renderParam) override;
+
+protected:
+    HdRprim const &_Prim() const override { return *this; }
+    std::string _Shapes(std::string const &extra) const override;
+    HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override { return bits; }
+    void _InitRepr(TfToken const &reprToken, HdDirtyBits *dirtyBits) override {}
+
+private:
+    std::vector<std::string> _shapes;  // one sphere per point, object space
 };
 
 // ---------------------------------------------------------------------------
@@ -342,8 +453,8 @@ public:
     void SetRenderSetting(TfToken const &key, VtValue const &value) override;
 
     // --- used by the prims and the render pass ---
-    void Register(HdPbrtMesh *m);
-    void Unregister(HdPbrtMesh *m);
+    void Register(HdPbrtGeom *g);
+    void Unregister(HdPbrtGeom *g);
     void Register(HdPbrtLight *l);
     void Unregister(HdPbrtLight *l);
 
@@ -378,7 +489,7 @@ private:
     std::unique_ptr<HdPbrtRenderParam> _renderParam;
     HdRenderSettingDescriptorList _settingDescriptors;
     std::mutex _registryMutex;
-    std::set<HdPbrtMesh *> _meshes;
+    std::set<HdPbrtGeom *> _geoms;
     std::set<HdPbrtLight *> _lights;
     std::string _tempDir;
     std::atomic<int> _tempCounter{0};

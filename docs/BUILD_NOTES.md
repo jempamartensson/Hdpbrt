@@ -55,11 +55,29 @@ Debug: `HDPBRT_KEEP_TMP=1` keeps them (scene_N.pbrt, mesh_N.ply, pbrt.log);
 
 ## What is translated
 
-- **Geometry:** meshes (incl. holes, left-handed orientation, smooth normals for subdiv
-  scheme meshes without normals), UsdGeom implicit shapes (converted to meshes by an
-  `HdsiImplicitSurfaceSceneIndex` plugin: coarse tessellation), point instancers and
-  nested instancers (pbrt ObjectBegin/ObjectInstance). No curves, points, volumes, subdiv
-  refinement or camera motion blur yet.
+- **Geometry:** meshes (incl. holes, left-handed orientation), UsdGeom implicit shapes
+  (converted to meshes by an `HdsiImplicitSurfaceSceneIndex` plugin), point instancers and
+  nested instancers (pbrt ObjectBegin/ObjectInstance), basis curves and points. No volumes
+  or camera motion blur yet.
+  - **Subdivision:** catmullClark and loop meshes are refined uniformly to
+    `pbrt:subdivLevel` (default 2, max 6, 0 = off) with OpenSubdiv through USD's
+    `PxOsdRefinerFactory` (creases, corners, holes and interpolation rules from
+    `GetSubdivTags`, which Hydra delivers separately from the topology). Points and uvs
+    (vertex, varying, face-varying; face-varying values are welded per vertex so shared
+    corners refine smoothly) are refined; authored normals are ignored and smooth normals
+    computed on the refined mesh. Deforming subdivision meshes refine every pose. The
+    implicit spheres (catmullClark meshes from the implicit-surface scene index) come out
+    round. Houdini links `libosdCPU`; Blender has `libosdCPU` 3.7 but no headers, so the
+    build uses Houdini's (`OSD_INCLUDE`).
+  - **Curves:** one pbrt `curve` per USD curve. bspline and cubic bezier map directly
+    (periodic curves wrap, pinned bsplines get phantom end points); catmullRom (and
+    centripetal, treated as uniform) and linear curves become bezier segments; hermite is
+    treated as bezier. pbrt has a start and end width per curve, so vertex widths taper from
+    the first to the last; no widths: 1 (Storm's fallback). With normals: `ribbon`
+    (one normal per segment boundary picked from the vertices), else round `cylinder`.
+    Curves don't deform (pbrt curves have no motion); transforms move.
+  - **Points:** a sphere per point (diameter = width, fallback 1). Per-point colors are
+    averaged like displayColor on meshes.
 - **Materials:** UsdPreviewSurface, MaterialX `ND_standard_surface` and `ND_open_pbr_surface`
   (what Houdini's MtlX nodes and Blender's MaterialX export produce). pbrt has no uber
   material, so: metallic >= 0.5 -> `conductor` (reflectance = base color); transmission >= 0.5
