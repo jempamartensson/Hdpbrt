@@ -274,6 +274,63 @@ std::string _MediumSpectrum(const char *name, const GfVec3f &c)
     return os.str();
 }
 
+// Subsurface random walk medium (pbrt patch 23): Chiang et al. 2016's remap
+// from the multiple-scattering albedo (diffuse reflectance of the walk) and the
+// mean free path to extinction and single-scattering albedo, with the
+// anisotropy terms, as Cycles and Typhoon (radius used as the physical mean
+// free path, no 1/(4 pi) shim).
+static void _ChiangRemap(float albedo, float radius, float g, float *extinction, float *alpha)
+{
+    const float g2 = g * g, g3 = g2 * g, g4 = g3 * g, g5 = g4 * g, g6 = g5 * g, g7 = g6 * g;
+    const float A = 1.8260523782f - 1.28451056436f * g - 1.79904629312f * g2 +
+                    9.19393289202f * g3 - 22.8215585862f * g4 + 32.0234874259f * g5 -
+                    23.6264803333f * g6 + 7.21067002658f * g7;
+    const float B = 4.98511194385f +
+                    0.127355959438f * std::exp(31.1491581433f * g - 201.847017512f * g2 +
+                                               841.576016723f * g3 - 2018.09288505f * g4 +
+                                               2731.71560286f * g5 - 1935.41424244f * g6 +
+                                               559.009054474f * g7);
+    const float C = 1.09686102424f - 0.394704063468f * g + 1.05258115941f * g2 -
+                    8.83963712726f * g3 + 28.8643230661f * g4 - 46.8802913581f * g5 +
+                    38.5402837518f * g6 - 12.7181042538f * g7;
+    const float D = 0.496310210422f + 0.360146581622f * g - 2.15139309747f * g2 +
+                    17.8896899217f * g3 - 55.2984010333f * g4 + 82.065982243f * g5 -
+                    58.5106008578f * g6 + 15.8478295021f * g7;
+    const float E = 4.23190299701f +
+                    0.00310603949088f * std::exp(76.7316253952f * g - 594.356773233f * g2 +
+                                                 2448.8834203f * g3 - 5576.68528998f * g4 +
+                                                 7116.60171912f * g5 - 4763.54467887f * g6 +
+                                                 1303.5318055f * g7);
+    const float F = 2.40602999408f - 2.51814844609f * g + 9.18494908356f * g2 -
+                    79.2191708682f * g3 + 259.082868209f * g4 - 403.613804597f * g5 +
+                    302.85712436f * g6 - 87.4370473567f * g7;
+    const float blend = std::pow(albedo, 0.25f);
+    const float a = (1 - blend) * A * std::pow(std::atan(B * albedo), C) +
+                    blend * D * std::pow(std::atan(E * albedo), F);
+    *alpha = std::min(std::max(a, 0.f), 0.999999f);
+    *extinction = (1 / std::max(radius, 1e-6f)) / std::max(1 - g, 1e-6f);
+}
+
+// "MakeNamedMedium" line for a subsurface interior (color = walk albedo,
+// radius = mean free path per channel, in scene units).
+std::string HdPbrt_SubsurfaceMedium(const std::string &name, const GfVec3f &color,
+                                    const GfVec3f &radius, float anisotropy)
+{
+    const float g = std::min(std::max(anisotropy, -0.99f), 0.99f);
+    GfVec3f sigA, sigS;
+    for (int i = 0; i < 3; ++i) {
+        float ext, alpha;
+        _ChiangRemap(std::min(std::max(color[i], 0.f), 1.f), radius[i], g, &ext, &alpha);
+        sigS[i] = ext * alpha;
+        sigA[i] = ext - sigS[i];
+    }
+    std::ostringstream m;
+    m << "MakeNamedMedium " << HdPbrt_Quote(name) << " \"string type\" \"homogeneous\""
+      << _MediumSpectrum("sigma_a", sigA) << _MediumSpectrum("sigma_s", sigS)
+      << " \"float scale\" 1 \"float g\" " << g << " \"bool hdpbrtsss\" true\n";
+    return m.str();
+}
+
 GfVec3f _Clamp01(GfVec3f c)
 {
     for (int i = 0; i < 3; ++i)
@@ -338,6 +395,23 @@ struct _MtlxMapper {
         return os.str();
     }
 
+    // subsurface_bsdf as hdpbrtlayered's base: a random walk in an interior
+    // medium (pbrt patch 23). Returns the parameters to add (or nothing).
+    std::string SubsurfaceBase(const HdMaterialNode2 *n, HdPbrtMaterialDesc &d) {
+        if (!_Is(n, "ND_subsurface_bsdf"))
+            return {};
+        const float w = std::min(std::max(_Float(*n, "weight", 1), 0.f), 1.f);
+        d.baseColor = GfVec3f(0);
+        d.baseColorTexture.clear();
+        d.mediumName = b.prefix + "_sss";
+        d.textures += HdPbrt_SubsurfaceMedium(d.mediumName, _Color(*n, "color", GfVec3f(0.18f)),
+                                              _Color(*n, "radius", GfVec3f(1)),
+                                              _Float(*n, "anisotropy", 0));
+        std::ostringstream os;
+        os << " \"float subsurface\" " << w;
+        return os.str();
+    }
+
     // Dielectric reflection over a diffuse base (or over black).
     void Layered(const HdMaterialNode2 &spec, const HdMaterialNode2 *base,
                  HdPbrtMaterialDesc &d) {
@@ -355,7 +429,7 @@ struct _MtlxMapper {
         GfVec3f tint = _Clamp01(_Color(spec, "tint", GfVec3f(1)));
         if (tint != GfVec3f(1))
             os << " \"rgb speculartint\" " << HdPbrt_Rgb(tint);
-        os << DiffuseRough(base, "diffuseroughness");
+        os << DiffuseRough(base, "diffuseroughness") << SubsurfaceBase(base, d);
         d.otherParams = os.str();
     }
 
@@ -375,7 +449,7 @@ struct _MtlxMapper {
            << " \"float sheenroughness\" "
            << std::min(std::max(_Float(sheen, "roughness", 0.3f), 0.f), 1.f)
            << " \"bool sheenontop\" true";
-        os << DiffuseRough(base, "diffuseroughness");
+        os << DiffuseRough(base, "diffuseroughness") << SubsurfaceBase(base, d);
         d.otherParams = os.str();
     }
 
@@ -443,6 +517,9 @@ struct _MtlxMapper {
             Map(a ? a : b.net.Upstream(*n, TfToken("in2")), d);
         } else if (_Is(n, "ND_sheen_bsdf")) {
             Sheen(*n, nullptr, d);
+        } else if (_Is(n, "ND_subsurface_bsdf")) {
+            d.type = "hdpbrtlayered";
+            d.otherParams = " \"float specularweight\" 0" + SubsurfaceBase(n, d);
         } else if (IsDiffuse(n)) {
             d.type = "diffuse";
             DiffuseBase(*n, d);
@@ -606,6 +683,12 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             // Thin film on the specular layer (patch 22; hdpbrtlayered only):
             // weight, thickness in nm, film IOR.
             float filmW = 0, filmNm = 0, filmIor = 1.4f;
+            // Subsurface (patch 23): weight, walk albedo, mean free path,
+            // anisotropy. A random walk in an interior medium for closed
+            // (not thin-walled) surfaces; thin walls blend the albedo.
+            float sssW = 0, sssAniso = 0;
+            GfVec3f sssColor(0.8f), sssRadius(1.f);
+            bool sssWalk = false;
             // No specular lobe at all (specular weight or color 0, or ior 1,
             // i.e. no Fresnel reflection): a plain Lambertian "diffuse".
             bool noSpecular = false;
@@ -640,16 +723,11 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 opacity = _Float(*surf, "opacity", 1);
                 emission = _Color(*surf, "emission_color", GfVec3f(1)) * _Float(*surf, "emission", 0);
                 baseIn = "base_color"; roughIn = "specular_roughness"; opacityIn = "opacity";
-                // No subsurface scattering yet: its weight blends the diffuse
-                // albedo toward subsurface_color, which is what it converges to.
-                {
-                    const float w = std::min(std::max(_Float(*surf, "subsurface", 0), 0.f), 1.f);
-                    if (w > 0) {
-                        base = base * (1 - w) + _Color(*surf, "subsurface_color", GfVec3f(1)) * w;
-                        if (w >= 0.5f)
-                            baseIn = "subsurface_color";
-                    }
-                }
+                sssW = std::min(std::max(_Float(*surf, "subsurface", 0), 0.f), 1.f);
+                sssColor = _Color(*surf, "subsurface_color", GfVec3f(1));
+                sssRadius = _Color(*surf, "subsurface_radius", GfVec3f(1)) *
+                            _Float(*surf, "subsurface_scale", 1);
+                sssAniso = _Float(*surf, "subsurface_anisotropy", 0);
                 specWeight = _Float(*surf, "specular", 1);
                 specTint = _Color(*surf, "specular_color", GfVec3f(1));
                 transColor = _Color(*surf, "transmission_color", GfVec3f(1));
@@ -695,16 +773,14 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 emission = _Color(*surf, "emission_color", GfVec3f(1)) *
                            _Float(*surf, "emission_luminance", 0);
                 baseIn = "base_color"; roughIn = "specular_roughness"; opacityIn = "geometry_opacity";
+                sssW = std::min(std::max(_Float(*surf, "subsurface_weight", 0), 0.f), 1.f);
+                sssColor = _Color(*surf, "subsurface_color", GfVec3f(0.8f));
                 {
-                    const float w =
-                        std::min(std::max(_Float(*surf, "subsurface_weight", 0), 0.f), 1.f);
-                    if (w > 0) {
-                        base = base * (1 - w) +
-                               _Color(*surf, "subsurface_color", GfVec3f(0.8f)) * w;
-                        if (w >= 0.5f)
-                            baseIn = "subsurface_color";
-                    }
+                    const GfVec3f sc = _Color(*surf, "subsurface_radius_scale", GfVec3f(1, 0.5f, 0.25f));
+                    const float r = _Float(*surf, "subsurface_radius", 1);
+                    sssRadius = GfVec3f(r * sc[0], r * sc[1], r * sc[2]);
                 }
+                sssAniso = _Float(*surf, "subsurface_scatter_anisotropy", 0);
                 specWeight = _Float(*surf, "specular_weight", 1);
                 specTint = _Color(*surf, "specular_color", GfVec3f(1));
                 transColor = _Color(*surf, "transmission_color", GfVec3f(1));
@@ -761,6 +837,20 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                         type.c_str(), GetId().GetText());
             }
 
+            if (sssW > 0) {
+                if (thinWalled || std::max({sssRadius[0], sssRadius[1], sssRadius[2]}) <= 0) {
+                    base = base * (1 - sssW) + sssColor * sssW;
+                    if (sssW >= 0.5f)
+                        baseIn = "subsurface_color";
+                } else {
+                    // The diffuse base keeps 1 - w (a base texture stays
+                    // unscaled unless the walk takes it all).
+                    base *= 1 - sssW;
+                    sssWalk = true;
+                    if (sssW > 0.999f)
+                        baseIn = nullptr;
+                }
+            }
             bool fromPrimvar = false;
             std::string baseTex = baseIn ? b.Texture(*surf, baseIn, true, &fromPrimvar) : "";
             std::string roughTex = roughIn ? b.Texture(*surf, roughIn, false) : "";
@@ -871,7 +961,8 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 }
                 if ((!medium || tintWithMedium) && transColor != GfVec3f(1.f))
                     other << " \"rgb transmissiontint\" " << HdPbrt_Rgb(_Clamp01(transColor));
-            } else if (noSpecular && sheenW <= 0 && coatW <= 0 && !(thinWalled && transmission > 0)) {
+            } else if (noSpecular && sheenW <= 0 && coatW <= 0 && !sssWalk &&
+                       !(thinWalled && transmission > 0)) {
                 d.type = "diffuse";
             } else {
                 d.type = "hdpbrtlayered";
@@ -912,6 +1003,11 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 other << " \"float roughness\" " << diffRough;
             else if (diffRough > 0 && d.type == "hdpbrtlayered")
                 other << " \"float diffuseroughness\" " << diffRough;
+            if (sssWalk && d.type == "hdpbrtlayered" && d.mediumName.empty()) {
+                other << " \"float subsurface\" " << sssW;
+                d.mediumName = pfx + "_sss";
+                d.textures += HdPbrt_SubsurfaceMedium(d.mediumName, sssColor, sssRadius, sssAniso);
+            }
             if (filmW > 0 && filmNm > 0 && d.type == "hdpbrtlayered")
                 other << " \"float filmweight\" " << filmW << " \"float filmthickness\" " << filmNm
                       << " \"float filmeta\" " << filmIor;

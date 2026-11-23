@@ -1,0 +1,291 @@
+From e0b8595fd61c75e69a9f3d85e59053ec7434330d Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Mon, 23 Nov 2026 19:08:08 +0100
+Subject: [PATCH] Subsurface random walk: hdpbrtlayered "subsurface" boundary +
+ "hdpbrtsss" media with their own step budget (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/bxdfs.h             | 58 ++++++++++++++++++++++++++++++++++--
+ src/pbrt/cpu/integrators.cpp | 14 +++++++--
+ src/pbrt/materials.cpp       |  1 +
+ src/pbrt/materials.h         |  6 ++++
+ src/pbrt/media.cpp           |  6 ++--
+ src/pbrt/media.h             |  8 ++++-
+ 6 files changed, 85 insertions(+), 8 deletions(-)
+
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index 1728cf7..fd96248 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -1306,6 +1306,12 @@ class HdPbrtLayeredBxDF {
+ 
+     // Thin film on the specular layer: weight, thickness (nm), film index and
+     // the sampled wavelengths (nm).
++    // Subsurface scattering (random walk in the interior medium): from
++    // outside, weight w of the base enters by cosine-weighted transmission;
++    // from inside (wo.z < 0) the surface is a Lambertian exit, nothing else.
++    PBRT_CPU_GPU
++    void SetSubsurface(Float w) { sssWeight = Clamp(w, 0, 1); }
++
+     PBRT_CPU_GPU
+     void SetFilm(Float weight, Float thicknessNm, Float eta, const SampledSpectrum &lambdaNm) {
+         filmWeight = Clamp(weight, 0, 1);
+@@ -1323,6 +1329,8 @@ class HdPbrtLayeredBxDF {
+                                              : BxDFFlags::GlossyReflection);
+         if (T)
+             flags = flags | BxDFFlags::SpecularTransmission;
++        if (sssWeight > 0)
++            flags = flags | BxDFFlags::DiffuseTransmission;
+         if (HasMetal())
+             flags = flags | (spec.Smooth() ? BxDFFlags::SpecularReflection
+                                            : BxDFFlags::GlossyReflection);
+@@ -1331,6 +1339,12 @@ class HdPbrtLayeredBxDF {
+ 
+     PBRT_CPU_GPU
+     SampledSpectrum f(Vector3f wo, Vector3f wi, TransportMode mode) const {
++        if (sssWeight > 0 && wo.z != 0) {
++            if (wo.z < 0)  // leaving the interior
++                return wi.z > 0 ? SampledSpectrum(InvPi) : SampledSpectrum(0.f);
++            if (wi.z < 0)
++                return SSSEntry(LayerWeights(wo));
++        }
+         if (!SameHemisphere(wo, wi) || wo.z == 0)
+             return SampledSpectrum(0.f);
+         if (wo.z < 0) {
+@@ -1346,6 +1360,16 @@ class HdPbrtLayeredBxDF {
+         BxDFReflTransFlags sampleFlags = BxDFReflTransFlags::All) const {
+         if (wo.z == 0)
+             return {};
++        if (sssWeight > 0 && wo.z < 0) {
++            // Leaving the interior: Lambertian exit.
++            if (!(sampleFlags & BxDFReflTransFlags::Transmission))
++                return {};
++            Vector3f wi = SampleCosineHemisphere(u);
++            if (wi.z <= 0)
++                return {};
++            return BSDFSample(SampledSpectrum(InvPi), wi, CosineHemispherePDF(wi.z),
++                              BxDFFlags::DiffuseTransmission);
++        }
+         bool flip = wo.z < 0;
+         if (flip)
+             wo = -wo;
+@@ -1353,6 +1377,15 @@ class HdPbrtLayeredBxDF {
+         Probs p = LobeProbs(wo, k, sampleFlags);
+         if (p.sum == 0)
+             return {};
++        if (uc >= 1 - p.sss) {
++            // Into the interior: cosine-weighted transmission.
++            Vector3f wi = SampleCosineHemisphere(u);
++            if (wi.z <= 0)
++                return {};
++            wi.z = -wi.z;
++            return BSDFSample(SSSEntry(k), wi, p.sss * CosineHemispherePDF(-wi.z),
++                              BxDFFlags::DiffuseTransmission);
++        }
+         pstd::optional<BSDFSample> bs;
+         // Dielectric lobes: coat, then specular.
+         const HdPbrtDielectricLobe *lobe = nullptr;
+@@ -1419,6 +1452,16 @@ class HdPbrtLayeredBxDF {
+     PBRT_CPU_GPU
+     Float PDF(Vector3f wo, Vector3f wi, TransportMode mode,
+               BxDFReflTransFlags sampleFlags = BxDFReflTransFlags::All) const {
++        if (sssWeight > 0 && wo.z != 0) {
++            if (wo.z < 0)
++                return (wi.z > 0 && (sampleFlags & BxDFReflTransFlags::Transmission))
++                           ? CosineHemispherePDF(wi.z)
++                           : 0;
++            if (wi.z < 0) {
++                Probs p = LobeProbs(wo, LayerWeights(wo), sampleFlags);
++                return p.sum > 0 ? p.sss * CosineHemispherePDF(-wi.z) : 0;
++            }
++        }
+         if (!SameHemisphere(wo, wi) || wo.z == 0)
+             return 0;
+         if (wo.z < 0) {
+@@ -1456,7 +1499,7 @@ class HdPbrtLayeredBxDF {
+     };
+     // Lobe selection probabilities.
+     struct Probs {
+-        Float coat = 0, spec = 0, metal = 0, cos = 0, trans = 0, sum = 0;
++        Float coat = 0, spec = 0, metal = 0, cos = 0, trans = 0, sss = 0, sum = 0;
+     };
+ 
+     PBRT_CPU_GPU
+@@ -1540,8 +1583,11 @@ class HdPbrtLayeredBxDF {
+         }
+         if ((flags & BxDFReflTransFlags::Transmission) && T)
+             p.trans = std::max<Float>(k.base * under * k.film.Average() * T.Average(), 1e-3f);
+-        p.sum = p.coat + p.spec + p.metal + p.cos + p.trans;
++        if ((flags & BxDFReflTransFlags::Transmission) && sssWeight > 0)
++            p.sss = std::max<Float>(k.base * under * k.film.Average() * sssWeight, 1e-3f);
++        p.sum = p.coat + p.spec + p.metal + p.cos + p.trans + p.sss;
+         if (p.sum > 0) {
++            p.sss /= p.sum;
+             p.coat /= p.sum;
+             p.spec /= p.sum;
+             p.metal /= p.sum;
+@@ -1551,6 +1597,13 @@ class HdPbrtLayeredBxDF {
+         return p;
+     }
+ 
++    // Entry into the interior: the base layer's share times the weight
++    // (the medium gives the color), cosine-weighted.
++    PBRT_CPU_GPU
++    SampledSpectrum SSSEntry(const Weights &k) const {
++        return k.under * k.film * (k.base * sssWeight * InvPi);
++    }
++
+     PBRT_CPU_GPU
+     SampledSpectrum FUpper(Vector3f wo, Vector3f wi, const Weights &k) const {
+         SampledSpectrum result =
+@@ -1619,6 +1672,7 @@ class HdPbrtLayeredBxDF {
+     Float sheenWeight, sheenAlpha, metalWeight, metalScale, diffuseRoughness;
+     Float filmWeight = 0, filmThickness = 0, filmEta = 1.4f;
+     SampledSpectrum filmLambda;
++    Float sssWeight = 0;
+     int metalMode;
+     bool sheenOnTop;
+ };
+diff --git a/src/pbrt/cpu/integrators.cpp b/src/pbrt/cpu/integrators.cpp
+index c25792f..422e926 100644
+--- a/src/pbrt/cpu/integrators.cpp
++++ b/src/pbrt/cpu/integrators.cpp
+@@ -1011,6 +1011,8 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+     SampledSpectrum L(0.f), beta(1.f), r_u(1.f), r_l(1.f);
+     bool specularBounce = false, anyNonSpecularBounces = false;
+     int depth = 0;
++    // hdPbrt: scattering steps in the current subsurface walk (reset at surfaces).
++    int sssSteps = 0;
+     Float etaScale = 1;
+ 
+     LightSampleContext prevIntrContext;
+@@ -1071,8 +1073,10 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+ 
+                     } else if (mode == 1) {
+                         // Handle scattering along ray path
+-                        // Stop path sampling if maximum depth has been reached
+-                        if (depth++ >= maxDepth) {
++                        // Stop path sampling if maximum depth has been reached.
++                        // hdPbrt: a subsurface walk has its own budget (256
++                        // steps, as Typhoon and Cycles).
++                        if (mp.sss ? sssSteps++ >= 256 : depth++ >= maxDepth) {
+                             terminated = true;
+                             return false;
+                         }
+@@ -1084,9 +1088,12 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+ 
+                         if (beta && r_u) {
+                             // Sample direct lighting at volume-scattering event
++                            // (not inside a subsurface walk: its boundary blocks
++                            // every light).
+                             MediumInteraction intr(p, -ray.d, ray.time, ray.medium,
+                                                    mp.phase);
+-                            L += SampleLd(intr, nullptr, lambda, sampler, beta, r_u);
++                            if (!mp.sss)
++                                L += SampleLd(intr, nullptr, lambda, sampler, beta, r_u);
+ 
+                             // Sample new direction at real-scattering event
+                             Point2f u = sampler.Get2D();
+@@ -1228,6 +1235,7 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+         // Terminate path if maximum depth reached
+         if (depth++ >= maxDepth)
+             return L;
++        sssSteps = 0;
+ 
+         ++surfaceInteractions;
+         // Possibly regularize the BSDF
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index 97d9438..4d6b081 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -733,6 +733,7 @@ HdPbrtLayeredMaterial *HdPbrtLayeredMaterial::Create(
+     m->SetFilm(Clamp(parameters.GetOneFloat("filmweight", 0.f), 0, 1),
+                parameters.GetOneFloat("filmthickness", 0.f),
+                parameters.GetOneFloat("filmeta", 1.4f));
++    m->SetSubsurface(Clamp(parameters.GetOneFloat("subsurface", 0.f), 0, 1));
+     return m;
+ }
+ 
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index ec4e270..c48c568 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -726,9 +726,14 @@ class HdPbrtLayeredMaterial {
+                 lambdaNm[i] = lambda[i];
+             bxdf.SetFilm(filmWeight, filmThickness, filmEta, lambdaNm);
+         }
++        if (sssWeight > 0)
++            bxdf.SetSubsurface(sssWeight);
+         return bxdf;
+     }
+ 
++    // Subsurface weight ("subsurface"; the interior medium does the rest).
++    void SetSubsurface(Float w) { sssWeight = w; }
++
+     // Thin film on the specular layer ("filmweight", "filmthickness" in nm,
+     // "filmeta"); for hdPbrt.
+     void SetFilm(Float weight, Float thicknessNm, Float eta) {
+@@ -765,6 +770,7 @@ class HdPbrtLayeredMaterial {
+     FloatTexture metalWeight, diffuseRoughness;
+     Float eta, coatEta, metalScale;
+     Float filmWeight = 0, filmThickness = 0, filmEta = 1.4f;
++    Float sssWeight = 0;
+     int metalMode;
+     bool sheenOnTop;
+     bool remapRoughness;
+diff --git a/src/pbrt/media.cpp b/src/pbrt/media.cpp
+index 990f57e..0b152d9 100644
+--- a/src/pbrt/media.cpp
++++ b/src/pbrt/media.cpp
+@@ -196,8 +196,10 @@ HomogeneousMedium *HomogeneousMedium::Create(const ParameterDictionary &paramete
+     Float sigmaScale = parameters.GetOneFloat("scale", 1.f);
+     Float g = parameters.GetOneFloat("g", 0.0f);
+ 
+-    return alloc.new_object<HomogeneousMedium>(sig_a, sig_s, sigmaScale, Le, LeScale, g,
+-                                               alloc);
++    HomogeneousMedium *m =
++        alloc.new_object<HomogeneousMedium>(sig_a, sig_s, sigmaScale, Le, LeScale, g, alloc);
++    m->SetSSS(parameters.GetOneBool("hdpbrtsss", false));
++    return m;
+ }
+ 
+ std::string HomogeneousMedium::ToString() const {
+diff --git a/src/pbrt/media.h b/src/pbrt/media.h
+index 8a5677a..dce61da 100644
+--- a/src/pbrt/media.h
++++ b/src/pbrt/media.h
+@@ -74,6 +74,8 @@ struct MediumProperties {
+     SampledSpectrum sigma_a, sigma_s;
+     PhaseFunction phase;
+     SampledSpectrum Le;
++    // hdPbrt: subsurface random walk (own step budget, no light sampling).
++    bool sss = false;
+ };
+ 
+ // HomogeneousMajorantIterator Definition
+@@ -242,9 +244,12 @@ class HomogeneousMedium {
+         SampledSpectrum sigma_a = sigma_a_spec.Sample(lambda);
+         SampledSpectrum sigma_s = sigma_s_spec.Sample(lambda);
+         SampledSpectrum Le = Le_spec.Sample(lambda);
+-        return MediumProperties{sigma_a, sigma_s, &phase, Le};
++        return MediumProperties{sigma_a, sigma_s, &phase, Le, sss};
+     }
+ 
++    // hdPbrt: "hdpbrtsss": the interior of a subsurface-scattering surface.
++    void SetSSS(bool s) { sss = s; }
++
+     PBRT_CPU_GPU
+     HomogeneousMajorantIterator SampleRay(Ray ray, Float tMax,
+                                           const SampledWavelengths &lambda) const {
+@@ -259,6 +264,7 @@ class HomogeneousMedium {
+     // HomogeneousMedium Private Data
+     DenselySampledSpectrum sigma_a_spec, sigma_s_spec, Le_spec;
+     HGPhaseFunction phase;
++    bool sss = false;
+ };
+ 
+ // GridMedium Definition
+-- 
+2.43.0
+

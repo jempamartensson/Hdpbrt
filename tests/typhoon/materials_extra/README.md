@@ -26,3 +26,6 @@ them and point SUITE at a directory whose `materials/` holds both:
   (Typhoon 1.001 / 0.998).
 - `thin_film`: standard_surface thin_film_thickness 400 nm / IOR 1.33 and OpenPBR
   thin_film_weight 0.5 / 0.3 um (pbrt patch 22). RMSE 0.061 -> 0.039 and 0.042 -> 0.036.
+  f_sss_white / f_sss_08: OpenPBR subsurface (weight 1, radius 0.3, no specular) with walk
+  albedo 1 / 0.8 (pbrt patch 23): hdPbrt 1.000 / 0.971, Typhoon 0.999 / 0.965 (above 0.8:
+  light crosses a sphere only ~3 mean free paths thick).

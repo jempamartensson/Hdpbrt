@@ -351,6 +351,17 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   soapbubble stays close (0.891, RMSE 0.212): the film matches (bubble centre 0.784 vs
   0.779), but what's seen through it is darker (0.55 vs 0.70): pbrt shadow rays stop at
   thin-walled straight transmission; Typhoon's pass. Same suspect for input_thin_walled.
+  Subsurface (patch 23): a random walk, as Typhoon/Cycles. hdpbrtlayered "subsurface" w: from
+  outside the base's share w enters by cosine-weighted transmission (no Fresnel); from inside
+  (wo.z < 0) the surface is a Lambertian exit only. The interior is a homogeneous medium
+  ("bool hdpbrtsss" true) from Chiang 2016's remap of walk albedo + mean free path (+ g), the
+  radius used as the physical mfp (no Cycles 1/(4 pi)). volpath: scattering in such media
+  counts against its own 256-step budget (reset at surfaces), not maxdepth, and does no NEE.
+  From standard_surface subsurface*, OpenPBR subsurface_* (radius * radius_scale), pbrlib
+  subsurface_bsdf; thin-walled (or zero radius) keeps the albedo blend. Base keeps 1 - w; a
+  base texture stays unscaled unless w ~ 1. Other objects inside the mesh aren't handled
+  (Typhoon walks only against the owner mesh). long_radius_anisotropic close -> match
+  (0.159 -> 0.082); 33 match / 9 close. White furnace walk: 1.000.
   Open: thin-walled straight transmission in shadow rays;
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
