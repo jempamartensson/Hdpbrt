@@ -1,0 +1,36 @@
+From 6da9a4d295e932c9b97408a1c41bab7c2ed95cb1 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Mon, 23 Nov 2026 07:16:37 +0100
+Subject: [PATCH 14/14] volpath: a scattered ray that reaches an emitting
+ interface shape ends there (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/cpu/integrators.cpp | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/pbrt/cpu/integrators.cpp b/src/pbrt/cpu/integrators.cpp
+index 676b702..c25792f 100644
+--- a/src/pbrt/cpu/integrators.cpp
++++ b/src/pbrt/cpu/integrators.cpp
+@@ -1186,6 +1186,17 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+         // Get BSDF and skip over medium boundaries
+         BSDF bsdf = isect.GetBSDF(ray, lambda, camera, scratchBuffer, sampler);
+         if (!bsdf) {
++            // hdPbrt: an emitter on an interface shape (a USD light) ends
++            // the path when a scattered ray (or a camera ray that sees it)
++            // reaches it from either side, as in USD's reference renderer.
++            // Camera-hidden emitters let camera rays through; shadow rays
++            // never stop at them.
++            if (isect.areaLight) {
++                const DiffuseAreaLight *dl =
++                    Light(isect.areaLight).CastOrNullptr<DiffuseAreaLight>();
++                if (depth > 0 || !dl || dl->hdpbrtCameraVisible)
++                    break;
++            }
+             isect.SkipIntersection(&ray, si->tHit);
+             continue;
+         }
+-- 
+2.43.0
+

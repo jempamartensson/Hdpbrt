@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (13 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (14 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -81,6 +81,12 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    exactly 1 at every roughness (pbrt's coateddiffuse: 0.44-0.87, why it looked dark).
 13. `DielectricMaterial` `"spectrum transmissiontint"` (texture ok): multiplies every
    transmission event (in and out), like MaterialX's dielectric tint.
+14. volpath: a scattered ray (depth > 0), or a camera ray at a camera-visible emitter, that
+   reaches an emitting `interface` shape (a USD light) ends the path there after adding its
+   MIS-weighted emission, from either side, as Typhoon does. Before, rays passed through the
+   light: in the shader-ball box they reached the grey backplanes behind the rect lights,
+   +15-19% light per bounce from bounce 2 on, ~1.07x overall. Shadow rays still pass, and
+   camera rays still pass camera-hidden lights.
 
 ## Done in the 2026-11-22 session
 
@@ -249,8 +255,9 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   Typhoon to 4 decimals. render_hdpbrt.py reuses the previous image when a frame changes
   nothing (hdPbrt doesn't re-render then).
 - Materials vs Typhoon (2026-11-22): `tests/typhoon/run_materials.sh` renders clean Typhoon
-  references (clamps off, caustics on) and compares; `MATERIALS_RESULTS.txt` 18 match /
-  20 close / 4 differ (4 / 15 / 23 before patch 12; 12 / 9 / 21 after it). Still differ:
+  references (clamps off, caustics on) and compares; `MATERIALS_RESULTS.txt` 27 match /
+  11 close / 4 differ, median ratio 1.03 (4 / 15 / 23 before patch 12; 12 / 9 / 21 after it;
+  18 / 20 / 4 after the BSDF graphs and media; patch 14 took the median from 1.08). Still differ:
   open_pbr honey, pbr sheen_bsdf(_zeltner), standard_surface input_thin_walled. Fixed so far: subsurface weight blends
   toward subsurface_color, MaterialX tiledimage uvtiling (pbrt uscale/vscale), MaterialX images
   default to linear (only an authored sRGB colorspace decodes), (1) the layered BSDF
@@ -274,7 +281,11 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   with its textures; shapes get `MediumInterface "<mat>_interior" ""` (only right when the
   camera is outside). Tint (patch 13): standard_surface always, OpenPBR only without a
   medium (Typhoon's rules); transmission_extra_roughness adds to the roughness.
-  Open: layered fixtures read ~1.08x Typhoon; sheen; thin-walled; honey; coat;
+  Brightness (2026-11-23): fixed by patch 14. The rest (~1.7% on the shader ball) is a
+  Typhoon quirk: it ends paths at geometry with no material bound (the backplanes), where
+  we use displayColor diffuse; not copied. Bisect such gaps per bounce
+  (`ty:maxBounces` b vs `pbrt:maxDepth` b+1).
+  Open: sheen; thin-walled; honey; coat;
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens
