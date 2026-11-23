@@ -1,0 +1,136 @@
+From 6a28b699e9c01c9f2e6c8e38ab227774da96467e Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Mon, 23 Nov 2026 07:52:48 +0100
+Subject: [PATCH 17/17] Dielectric: "hdpbrttopweight" scales transmission by a
+ reflection layer's 1 - w E_R (MaterialX layering) (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/bxdfs.cpp     | 14 +++++++++++---
+ src/pbrt/bxdfs.h       |  8 ++++++--
+ src/pbrt/materials.cpp |  5 ++++-
+ src/pbrt/materials.h   |  6 ++++--
+ 4 files changed, 25 insertions(+), 8 deletions(-)
+
+diff --git a/src/pbrt/bxdfs.cpp b/src/pbrt/bxdfs.cpp
+index 3d11ef3..55b2a9e 100644
+--- a/src/pbrt/bxdfs.cpp
++++ b/src/pbrt/bxdfs.cpp
+@@ -108,7 +108,7 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
+                 return {};
+ 
+             SampledSpectrum ft(T / AbsCosTheta(wi));
+-            ft *= tint;
++            ft *= tint * TopThroughput(wo);
+             // Account for non-symmetry with transmission to different medium
+             if (mode == TransportMode::Radiance)
+                 ft /= Sqr(etap);
+@@ -163,7 +163,7 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
+             SampledSpectrum ft(T * mfDistrib.D(wm) * mfDistrib.G(wo, wi) *
+                                std::abs(Dot(wi, wm) * Dot(wo, wm) /
+                                         (CosTheta(wi) * CosTheta(wo) * denom)));
+-            ft *= tint;
++            ft *= tint * TopThroughput(wo);
+             // Account for non-symmetry with transmission to different medium
+             if (mode == TransportMode::Radiance)
+                 ft /= Sqr(etap);
+@@ -208,7 +208,7 @@ PBRT_CPU_GPU SampledSpectrum DielectricBxDF::f(Vector3f wo, Vector3f wi, Transpo
+         if (mode == TransportMode::Radiance)
+             ft /= Sqr(etap);
+ 
+-        return tint * ft;
++        return tint * (ft * TopThroughput(wo));
+     }
+ }
+ 
+@@ -261,6 +261,14 @@ PBRT_CPU_GPU Float DielectricBxDF::PDF(Vector3f wo, Vector3f wi, TransportMode m
+     return pdf;
+ }
+ 
++PBRT_CPU_GPU Float DielectricBxDF::TopThroughput(Vector3f wo) const {
++    if (topWeight <= 0)
++        return 1;
++    return Clamp(1 - topWeight * HdPbrtDielectricAlbedo(AbsCosTheta(wo),
++                                                        mfDistrib.MeanAlpha(), eta),
++                 0, 1);
++}
++
+ std::string DielectricBxDF::ToString() const {
+     return StringPrintf("[ DielectricBxDF eta: %f mfDistrib: %s ]", eta,
+                         mfDistrib.ToString());
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index eecebc6..d277afe 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -170,8 +170,8 @@ class DielectricBxDF {
+     DielectricBxDF() = default;
+     PBRT_CPU_GPU
+     DielectricBxDF(Float eta, TrowbridgeReitzDistribution mfDistrib,
+-                   SampledSpectrum tint = SampledSpectrum(1.f))
+-        : eta(eta), mfDistrib(mfDistrib), tint(tint) {}
++                   SampledSpectrum tint = SampledSpectrum(1.f), Float topWeight = 0)
++        : eta(eta), mfDistrib(mfDistrib), tint(tint), topWeight(topWeight) {}
+ 
+     PBRT_CPU_GPU
+     BxDFFlags Flags() const {
+@@ -206,6 +206,10 @@ class DielectricBxDF {
+     TrowbridgeReitzDistribution mfDistrib;
+     // hdPbrt: multiplies every transmission event (MaterialX dielectric tint).
+     SampledSpectrum tint;
++    // hdPbrt: MaterialX layer(dielectric R over dielectric T): the reflection
++    // layer on top also scales transmission by 1 - w E_R(|cos theta_o|).
++    Float topWeight = 0;
++    PBRT_CPU_GPU Float TopThroughput(Vector3f wo) const;
+ };
+ 
+ // ThinDielectricBxDF Definition
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index dee7e38..0b2d719 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -71,8 +71,11 @@ DielectricMaterial *DielectricMaterial::Create(
+ 
+     SpectrumTexture tint =
+         parameters.GetSpectrumTextureOrNull("transmissiontint", SpectrumType::Albedo, alloc);
++    Float topWeight = Clamp(parameters.GetOneFloat("hdpbrttopweight", 0.f), 0, 1);
++    if (topWeight > 0)
++        HdPbrtInitDielectricAlbedo();
+     return alloc.new_object<DielectricMaterial>(uRoughness, vRoughness, eta, displacement,
+-                                                normalMap, remapRoughness, tint);
++                                                normalMap, remapRoughness, tint, topWeight);
+ }
+ 
+ // ThinDielectricMaterial Method Definitions
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index cf4bd70..611c3a2 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -147,8 +147,9 @@ class DielectricMaterial {
+     // DielectricMaterial Public Methods
+     DielectricMaterial(FloatTexture uRoughness, FloatTexture vRoughness, Spectrum eta,
+                        FloatTexture displacement, Image *normalMap, bool remapRoughness,
+-                       SpectrumTexture tint = nullptr)
++                       SpectrumTexture tint = nullptr, Float topWeight = 0)
+         : tint(tint),
++          topWeight(topWeight),
+           normalMap(normalMap),
+           displacement(displacement),
+           uRoughness(uRoughness),
+@@ -204,12 +205,13 @@ class DielectricMaterial {
+         SampledSpectrum t(1.f);
+         if (tint)
+             t = Clamp(texEval(tint, ctx, lambda), 0, 1);
+-        return DielectricBxDF(sampledEta, distrib, t);
++        return DielectricBxDF(sampledEta, distrib, t, topWeight);
+     }
+ 
+   private:
+     // DielectricMaterial Private Members
+     SpectrumTexture tint;  // hdPbrt: "transmissiontint"
++    Float topWeight;       // hdPbrt: "hdpbrttopweight"
+     Image *normalMap;
+     FloatTexture displacement;
+     FloatTexture uRoughness, vRoughness;
+-- 
+2.43.0
+

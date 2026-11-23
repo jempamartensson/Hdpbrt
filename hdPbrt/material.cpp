@@ -379,9 +379,17 @@ struct _MtlxMapper {
                     Layered(*top, base, d);
                 } else if (IsDielectric(base, &br, &bt) && bt) {
                     // Reflection on top of transmission: one glass interface.
+                    // MaterialX layering also scales the transmission by the
+                    // top's 1 - w E_R(wo), on top of the T lobe's own
+                    // Fresnel (as Typhoon does): pbrt patch 17.
                     d.type = "dielectric";
                     Rough(os, *top);
-                    os << " \"float eta\" " << _Float(*top, "ior", 1.5f);
+                    os << " \"float eta\" " << _Float(*top, "ior", 1.5f) << " \"float hdpbrttopweight\" "
+                       << std::min(std::max(_Float(*top, "weight", 1), 0.f), 1.f);
+                    const GfVec3f tint =
+                        _Clamp01(_Color(*base, "tint", GfVec3f(1)) * _Float(*base, "weight", 1));
+                    if (tint != GfVec3f(1))
+                        os << " \"rgb transmissiontint\" " << HdPbrt_Rgb(tint);
                     d.otherParams = os.str();
                 } else if (_Is(base, "ND_conductor_bsdf")) {
                     d.type = "coatedconductor";

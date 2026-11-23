@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (16 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (17 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -95,6 +95,11 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 16. `hdpbrtlayered` coat: `coatweight`, `coatroughness` (alpha unless remapped), `coateta`,
    `coattint` (multiplies every layer under the coat). Above the specular, under
    `sheenontop` sheen. `HdPbrtDielectricLobe` is shared by coat and specular.
+17. `DielectricMaterial` `"float hdpbrttopweight"`: transmission also scaled by
+   1 - w E_R(|cos theta_o|) (albedo table). For pbrlib layer(dielectric R over dielectric T):
+   MaterialX/Typhoon apply the top's layer throughput on top of the T lobe's own (1 - F), so
+   transmission pays Fresnel twice per crossing. Real single-interface glass (OpenPBR,
+   standard_surface) doesn't use it.
 
 ## Done in the 2026-11-22 session
 
@@ -309,6 +314,8 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   the same); coattint = darkening * lerp(1, coat_color, w). standard_surface: coat_color,
   coat_affect_color (base^(1 + w a)), coat_affect_roughness. feature_coat 1.14 -> 1.02
   (match). Not done: coat over metal (conductor path), textured base color in darkening.
+  Absorption fixtures (patch 17): dielectric_layer_absorption/_anisotropic back to match
+  (1.08 -> 1.04), dielectric_layer 1.15 -> 1.07. 32 match / 10 close / 0 differ.
   Open:
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
