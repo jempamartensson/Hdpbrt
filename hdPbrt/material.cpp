@@ -603,6 +603,9 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             // Rough glass with microfacet multiple-scattering compensation
             // (patch 21): OpenPBR, as Typhoon (not standard_surface).
             bool glassMultiScatter = false;
+            // Thin film on the specular layer (patch 22; hdpbrtlayered only):
+            // weight, thickness in nm, film IOR.
+            float filmW = 0, filmNm = 0, filmIor = 1.4f;
             // No specular lobe at all (specular weight or color 0, or ior 1,
             // i.e. no Fresnel reflection): a plain Lambertian "diffuse".
             bool noSpecular = false;
@@ -659,6 +662,9 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 sheenRough = _Float(*surf, "sheen_roughness", 0.3f);
                 thinWalled = _Float(*surf, "thin_walled", 0) > 0.5f;
                 diffRough = _Float(*surf, "diffuse_roughness", 0);
+                filmNm = std::max(_Float(*surf, "thin_film_thickness", 0), 0.f);
+                filmW = filmNm > 0 ? 1.f : 0.f;
+                filmIor = std::max(_Float(*surf, "thin_film_IOR", 1.5f), 1.f);
                 layeredMetal = true;
                 metalBase = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base", 1);
                 metalEdge = _Color(*surf, "specular_color", GfVec3f(1)) * _Float(*surf, "specular", 1);
@@ -713,6 +719,9 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 thinWalled = _Float(*surf, "geometry_thin_walled", 0) > 0.5f;
                 diffRough = _Float(*surf, "base_diffuse_roughness", 0);
                 glassMultiScatter = true;
+                filmW = std::min(std::max(_Float(*surf, "thin_film_weight", 0), 0.f), 1.f);
+                filmNm = std::max(_Float(*surf, "thin_film_thickness", 0.5f), 0.f) * 1000;
+                filmIor = std::max(_Float(*surf, "thin_film_ior", 1.4f), 1.f);
                 layeredMetal = metalF82 = true;
                 metalBase = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base_weight", 1);
                 // MaterialX: the metal BSDF is weighted by specular_weight and
@@ -903,6 +912,9 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 other << " \"float roughness\" " << diffRough;
             else if (diffRough > 0 && d.type == "hdpbrtlayered")
                 other << " \"float diffuseroughness\" " << diffRough;
+            if (filmW > 0 && filmNm > 0 && d.type == "hdpbrtlayered")
+                other << " \"float filmweight\" " << filmW << " \"float filmthickness\" " << filmNm
+                      << " \"float filmeta\" " << filmIor;
             d.otherParams = other.str();
             result = d;
             }  // !mtlxGraph

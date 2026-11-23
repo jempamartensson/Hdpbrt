@@ -4,7 +4,7 @@ them and point SUITE at a directory whose `materials/` holds both:
 
     mkdir -p $X/materials && ln -s $SUITE/materials/_assets $X/materials/_assets
     ln -s $PWD/tests/typhoon/materials_extra/* $X/materials/
-    SUITE=$X OUT=... tests/typhoon/run_materials.sh open_pbr_metal diffuse_rough rough_glass furnace
+    SUITE=$X OUT=... tests/typhoon/run_materials.sh open_pbr_metal diffuse_rough rough_glass furnace thin_film
 
 - `open_pbr_metal`: OpenPBR metal with specular_weight 0.5 / tinted specular_color /
   half metalness (pbrt patch 19). All match Typhoon (2026-11-23).
@@ -24,3 +24,5 @@ them and point SUITE at a directory whose `materials/` holds both:
   f_op_r03 / f_op_r05: OpenPBR glass (transmission_weight 1) at specular_roughness 0.3 / 0.5,
   with pbrt patch 21's multiple-scattering compensation: hdPbrt 0.951 -> 0.976 and 0.808 -> 0.996
   (Typhoon 1.001 / 0.998).
+- `thin_film`: standard_surface thin_film_thickness 400 nm / IOR 1.33 and OpenPBR
+  thin_film_weight 0.5 / 0.3 um (pbrt patch 22). RMSE 0.061 -> 0.039 and 0.042 -> 0.036.

@@ -342,7 +342,16 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   next to patch 12's, outside and inside incl. TIR), like Typhoon's coupled interface. Only
   for OpenPBR transmission, as Typhoon (not standard_surface, not pbrlib). Furnace OpenPBR
   glass r0.5 0.808 -> 0.996 (Typhoon 0.998); feature_transmission RMSE 0.082 -> 0.048.
-  Open: thin-film;
+  Thin film (patch 22): hdpbrtlayered "filmweight"/"filmthickness" (nm)/"filmeta" on the
+  specular layer: exact spectral Airy reflectance (s/p averaged, film over the specular eta),
+  lerped with Fresnel by weight; the layers below get 1 - w R_film(wo) (smooth value for rough
+  lobes too). The specular layer reflects at eta 1 when filmed (soap bubble). From OpenPBR
+  thin_film_* (um) and standard_surface thin_film_thickness (nm)/thin_film_IOR. Not yet on
+  metal or on transmissive (dielectric) glass. feature_thin_film RMSE 0.048 -> 0.041.
+  soapbubble stays close (0.891, RMSE 0.212): the film matches (bubble centre 0.784 vs
+  0.779), but what's seen through it is darker (0.55 vs 0.70): pbrt shadow rays stop at
+  thin-walled straight transmission; Typhoon's pass. Same suspect for input_thin_walled.
+  Open: thin-walled straight transmission in shadow rays;
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens

@@ -1,0 +1,288 @@
+From fe3d84fa25626b321bdaf3d40878ed3b65b879e7 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Mon, 23 Nov 2026 19:00:14 +0100
+Subject: [PATCH] hdpbrtlayered: thin film on the specular layer (exact
+ spectral Airy reflectance) (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/bxdfs.h       | 103 ++++++++++++++++++++++++++++++++++++-----
+ src/pbrt/materials.cpp |   6 ++-
+ src/pbrt/materials.h   |  22 +++++++--
+ 3 files changed, 116 insertions(+), 15 deletions(-)
+
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index 86bc58c..1728cf7 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -1210,6 +1210,35 @@ PBRT_CPU_GPU inline Float HdPbrtAshikhminV(Float cosO, Float cosI) {
+ 
+ // HdPbrtDielectricLobe: a weighted GGX dielectric reflection lobe (a coat or
+ // a specular layer), used by HdPbrtLayeredBxDF.
++// Thin-film interference (for hdPbrt): reflectance of a film of index nFilm
++// and thickness dNm (nanometres) between air and a dielectric substrate of
++// index nSub, at wavelength lambdaNm, for incidence cosine cosTheta. Exact
++// Airy summation of the amplitude coefficients, s and p averaged (OpenPBR's
++// thin film; MaterialX/Typhoon use Belcour and Barla's RGB approximation).
++PBRT_CPU_GPU inline Float HdPbrtThinFilmR(Float cosTheta, Float lambdaNm, Float dNm,
++                                          Float nFilm, Float nSub) {
++    const Float c1 = Clamp(cosTheta, 0, 1), s1Sq = 1 - c1 * c1;
++    nFilm = std::max<Float>(nFilm, 1e-3f);
++    nSub = std::max<Float>(nSub, 1);
++    const Float s2Sq = s1Sq / Sqr(nFilm);
++    if (s2Sq >= 1)
++        return 1;  // total internal reflection at the film (film index < 1)
++    const Float c2 = SafeSqrt(1 - s2Sq), c3 = SafeSqrt(1 - s1Sq / Sqr(nSub));
++    const Float n1 = 1, n2 = nFilm, n3 = nSub;
++    const Float delta = 4 * Pi * n2 * dNm * c2 / lambdaNm;
++    const Float cosD = std::cos(delta);
++    auto airy = [&](Float r12, Float r23) {
++        Float num = r12 * r12 + r23 * r23 + 2 * r12 * r23 * cosD;
++        Float den = 1 + r12 * r12 * r23 * r23 + 2 * r12 * r23 * cosD;
++        return Clamp(num / std::max<Float>(den, 1e-8f), 0, 1);
++    };
++    const Float rs12 = (n1 * c1 - n2 * c2) / (n1 * c1 + n2 * c2);
++    const Float rs23 = (n2 * c2 - n3 * c3) / (n2 * c2 + n3 * c3);
++    const Float rp12 = (n2 * c1 - n1 * c2) / (n2 * c1 + n1 * c2);
++    const Float rp23 = (n3 * c2 - n2 * c3) / (n3 * c2 + n2 * c3);
++    return (airy(rs12, rs23) + airy(rp12, rp23)) / 2;
++}
++
+ struct HdPbrtDielectricLobe {
+     Float weight = 0, eta = 1;
+     TrowbridgeReitzDistribution distrib;
+@@ -1237,6 +1266,13 @@ struct HdPbrtDielectricLobe {
+     PBRT_CPU_GPU Float PDF(Vector3f wo, Vector3f wm) const {
+         return distrib.PDF(wo, wm) / (4 * AbsDot(wo, wm));
+     }
++    // Weighted microfacet term without Fresnel (rough lobes; any eta).
++    PBRT_CPU_GPU Float DG(Vector3f wo, Vector3f wi, Vector3f wm) const {
++        if (weight <= 0 || Smooth())
++            return 0;
++        return weight * distrib.D(wm) * distrib.G(wo, wi) /
++               (4 * AbsCosTheta(wi) * AbsCosTheta(wo));
++    }
+ };
+ 
+ // HdPbrtLayeredBxDF Definition
+@@ -1268,11 +1304,21 @@ class HdPbrtLayeredBxDF {
+           metalScale(metalScale), diffuseRoughness(diffuseRoughness), metalMode(metalMode),
+           sheenOnTop(sheenOnTop) {}
+ 
++    // Thin film on the specular layer: weight, thickness (nm), film index and
++    // the sampled wavelengths (nm).
++    PBRT_CPU_GPU
++    void SetFilm(Float weight, Float thicknessNm, Float eta, const SampledSpectrum &lambdaNm) {
++        filmWeight = Clamp(weight, 0, 1);
++        filmThickness = std::max<Float>(thicknessNm, 0);
++        filmEta = eta;
++        filmLambda = lambdaNm;
++    }
++
+     PBRT_CPU_GPU
+     BxDFFlags Flags() const {
+         BxDFFlags flags = (R || HasSheen()) ? BxDFFlags::DiffuseReflection : BxDFFlags::Unset;
+         for (const HdPbrtDielectricLobe *l : {&spec, &coat})
+-            if (l->Active())
++            if (l->Active() || (l == &spec && SpecOn()))
+                 flags = flags | (l->Smooth() ? BxDFFlags::SpecularReflection
+                                              : BxDFFlags::GlossyReflection);
+         if (T)
+@@ -1341,8 +1387,9 @@ class HdPbrtLayeredBxDF {
+         if (lobe) {
+             if (lobe->Smooth()) {
+                 Vector3f wi(-wo.x, -wo.y, wo.z);
+-                SampledSpectrum f =
+-                    lobeScale * (lobe->weight * FrDielectric(wo.z, lobe->eta) / AbsCosTheta(wi));
++                SampledSpectrum F = lobe == &spec ? SpecFresnel(wo.z)
++                                                  : SampledSpectrum(FrDielectric(wo.z, lobe->eta));
++                SampledSpectrum f = lobeScale * F * (lobe->weight / AbsCosTheta(wi));
+                 bs = BSDFSample(f, wi, pLobe, BxDFFlags::SpecularReflection);
+             } else {
+                 Vector3f wm = lobe->distrib.Sample_wm(wo, u);
+@@ -1361,7 +1408,7 @@ class HdPbrtLayeredBxDF {
+         } else {
+             // Straight transmission (thin wall, eta 1): a delta lobe.
+             Vector3f wi = -wo;
+-            bs = BSDFSample(T * k.under * (k.base / AbsCosTheta(wi)), wi, p.trans,
++            bs = BSDFSample(T * k.under * k.film * (k.base / AbsCosTheta(wi)), wi, p.trans,
+                             BxDFFlags::SpecularTransmission);
+         }
+         if (flip)
+@@ -1403,6 +1450,9 @@ class HdPbrtLayeredBxDF {
+         Float sheen = 0, coat = 0, spec = 0, base = 0, metal = 0;
+         bool sheenUnderCoat = false;
+         SampledSpectrum under;
++        // Thin film: 1 - w R_film(wo) for everything under the specular
++        // layer (the scalar weights then leave the specular throughput out).
++        SampledSpectrum film = SampledSpectrum(1.f);
+     };
+     // Lobe selection probabilities.
+     struct Probs {
+@@ -1410,7 +1460,25 @@ class HdPbrtLayeredBxDF {
+     };
+ 
+     PBRT_CPU_GPU
+-    bool HasSpec() const { return spec.Active() && bool(specTint); }
++    bool HasSpec() const { return SpecOn() && bool(specTint); }
++    PBRT_CPU_GPU
++    bool HasFilm() const { return filmWeight > 0 && filmThickness > 0; }
++    // The specular layer reflects: Fresnel (eta != 1) or a thin film on it.
++    PBRT_CPU_GPU
++    bool SpecOn() const { return spec.weight > 0 && (spec.eta != 1 || HasFilm()); }
++    // Specular Fresnel, with the thin film mixed in by its weight.
++    PBRT_CPU_GPU
++    SampledSpectrum SpecFresnel(Float cosTheta) const {
++        Float F = FrDielectric(cosTheta, spec.eta);
++        if (!HasFilm())
++            return SampledSpectrum(F);
++        SampledSpectrum r;
++        for (int i = 0; i < NSpectrumSamples; ++i)
++            r[i] = Lerp(filmWeight, F,
++                        HdPbrtThinFilmR(cosTheta, filmLambda[i], filmThickness, filmEta,
++                                        spec.eta));
++        return r;
++    }
+     PBRT_CPU_GPU
+     bool HasSheen() const { return sheenWeight > 0 && bool(sheenColor); }
+ 
+@@ -1422,6 +1490,12 @@ class HdPbrtLayeredBxDF {
+                            : Float(1);
+         Weights k;
+         k.under = coat.Active() ? coatTint : SampledSpectrum(1.f);
++        if (HasSpec() && HasFilm()) {
++            // Spectral: the film's reflectance at wo (its smooth value, for
++            // rough lobes too) leaves the layers below.
++            k.film = ClampZero(SampledSpectrum(1.f) - spec.weight * SpecFresnel(wo.z));
++            tSpec = 1;
++        }
+         // The metal mix splits the level below the coat (and top sheen):
+         // metal gets m, the dielectric stack (specular, sheen, base) 1 - m.
+         const Float m = Clamp(metalWeight, 0, 1);
+@@ -1451,18 +1525,21 @@ class HdPbrtLayeredBxDF {
+                 p.coat = std::max<Float>(k.coat * coat.weight * coat.Albedo(wo), 1e-3f);
+             if (HasSpec() && k.spec > 0)
+                 p.spec = std::max<Float>(
+-                    k.spec * under * spec.weight * spec.Albedo(wo) * specTint.Average(), 1e-3f);
++                    k.spec * under * spec.weight *
++                        (HasFilm() ? SpecFresnel(wo.z).Average() : spec.Albedo(wo)) *
++                        specTint.Average(),
++                    1e-3f);
+             if (HasMetal())
+                 p.metal = std::max<Float>(k.metal * under * MetalFresnel(wo.z).Average(), 1e-3f);
+             if (HasSheen())
+                 p.cos += k.sheen * (k.sheenUnderCoat ? under : Float(1)) *
+                          HdPbrtSheenAlbedo(wo.z, sheenAlpha) * sheenColor.Average();
+-            p.cos += k.base * under * R.Average();
++            p.cos += k.base * under * k.film.Average() * R.Average();
+             if (R || HasSheen())
+                 p.cos = std::max<Float>(p.cos, 1e-3f);
+         }
+         if ((flags & BxDFReflTransFlags::Transmission) && T)
+-            p.trans = std::max<Float>(k.base * under * T.Average(), 1e-3f);
++            p.trans = std::max<Float>(k.base * under * k.film.Average() * T.Average(), 1e-3f);
+         p.sum = p.coat + p.spec + p.metal + p.cos + p.trans;
+         if (p.sum > 0) {
+             p.coat /= p.sum;
+@@ -1478,14 +1555,16 @@ class HdPbrtLayeredBxDF {
+     SampledSpectrum FUpper(Vector3f wo, Vector3f wi, const Weights &k) const {
+         SampledSpectrum result =
+             HdPbrtEON(R, diffuseRoughness, AbsCosTheta(wi), AbsCosTheta(wo), Dot(wo, wi)) *
+-            k.under * k.base;
++            k.under * k.film * k.base;
+         if (AbsCosTheta(wo) == 0 || AbsCosTheta(wi) == 0)
+             return result;
+         Vector3f wm = wi + wo;
+         if (LengthSquared(wm) == 0)
+             return result;
+         wm = Normalize(wm);
+-        if (HasSpec())
++        if (HasSpec() && HasFilm())
++            result += specTint * k.under * SpecFresnel(AbsDot(wo, wm)) * (k.spec * spec.DG(wo, wi, wm));
++        else if (HasSpec())
+             result += specTint * k.under * (k.spec * spec.F(wo, wi, wm));
+         result += SampledSpectrum(k.coat * coat.F(wo, wi, wm));
+         if (HasMetal() && !spec.Smooth())
+@@ -1495,7 +1574,7 @@ class HdPbrtLayeredBxDF {
+         if (HasSheen()) {
+             SampledSpectrum s = sheenColor * (k.sheen * HdPbrtCharlieD(sheenAlpha, wm.z) *
+                                               HdPbrtAshikhminV(AbsCosTheta(wo), AbsCosTheta(wi)));
+-            result += k.sheenUnderCoat ? s * k.under : s;
++            result += k.sheenUnderCoat ? s * k.under * k.film : s;
+         }
+         return result;
+     }
+@@ -1538,6 +1617,8 @@ class HdPbrtLayeredBxDF {
+     SampledSpectrum R, T, specTint, sheenColor, coatTint, metalA, metalB;
+     HdPbrtDielectricLobe spec, coat;
+     Float sheenWeight, sheenAlpha, metalWeight, metalScale, diffuseRoughness;
++    Float filmWeight = 0, filmThickness = 0, filmEta = 1.4f;
++    SampledSpectrum filmLambda;
+     int metalMode;
+     bool sheenOnTop;
+ };
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index ba8a6f8..97d9438 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -724,12 +724,16 @@ HdPbrtLayeredMaterial *HdPbrtLayeredMaterial::Create(
+         eta = 1;
+     FloatTexture displacement = parameters.GetFloatTextureOrNull("displacement", alloc);
+     bool remapRoughness = parameters.GetOneBool("remaproughness", true);
+-    return alloc.new_object<HdPbrtLayeredMaterial>(
++    HdPbrtLayeredMaterial *m = alloc.new_object<HdPbrtLayeredMaterial>(
+         reflectance, transmittance, specTint, specWeight, uRoughness, vRoughness, eta,
+         sheenColor, sheenWeight, sheenRoughness, sheenOnTop, coatWeight, coatRoughness,
+         coatEta, coatTint, metalWeight, metalMode, metalA, metalB, metalScale,
+         parameters.GetFloatTexture("diffuseroughness", 0.f, alloc), displacement, normalMap,
+         remapRoughness);
++    m->SetFilm(Clamp(parameters.GetOneFloat("filmweight", 0.f), 0, 1),
++               parameters.GetOneFloat("filmthickness", 0.f),
++               parameters.GetOneFloat("filmeta", 1.4f));
++    return m;
+ }
+ 
+ STAT_COUNTER("Scene/Materials", nMaterialsCreated);
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index 849853b..ec4e270 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -717,9 +717,24 @@ class HdPbrtLayeredMaterial {
+                 mb = Clamp(mb, 0, 1);
+             }
+         }
+-        return HdPbrtLayeredBxDF(r, t, tint, spec, sc, sw, sa, sheenOnTop, coat, ct, mw,
+-                                 metalMode, ma, mb, metalScale,
+-                                 Clamp(texEval(diffuseRoughness, ctx), 0, 1));
++        HdPbrtLayeredBxDF bxdf(r, t, tint, spec, sc, sw, sa, sheenOnTop, coat, ct, mw,
++                               metalMode, ma, mb, metalScale,
++                               Clamp(texEval(diffuseRoughness, ctx), 0, 1));
++        if (filmWeight > 0 && filmThickness > 0) {
++            SampledSpectrum lambdaNm;
++            for (int i = 0; i < NSpectrumSamples; ++i)
++                lambdaNm[i] = lambda[i];
++            bxdf.SetFilm(filmWeight, filmThickness, filmEta, lambdaNm);
++        }
++        return bxdf;
++    }
++
++    // Thin film on the specular layer ("filmweight", "filmthickness" in nm,
++    // "filmeta"); for hdPbrt.
++    void SetFilm(Float weight, Float thicknessNm, Float eta) {
++        filmWeight = weight;
++        filmThickness = thicknessNm;
++        filmEta = eta;
+     }
+ 
+     PBRT_CPU_GPU
+@@ -749,6 +764,7 @@ class HdPbrtLayeredMaterial {
+     SpectrumTexture metalA, metalB;
+     FloatTexture metalWeight, diffuseRoughness;
+     Float eta, coatEta, metalScale;
++    Float filmWeight = 0, filmThickness = 0, filmEta = 1.4f;
+     int metalMode;
+     bool sheenOnTop;
+     bool remapRoughness;
+-- 
+2.43.0
+
