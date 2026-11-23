@@ -337,7 +337,12 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   coupled R-over-T layer agrees with ours within ~2% (0.903 vs 0.885), yet on the shaderball
   we're ~6% brighter: cause not found inside Typhoon's coupled rough path (its transparent-shadow
   shortcut is off with caustics on). At 0.2 Typhoon compensates multiple scattering (0.864 vs 0.788).
-  Open: rough-dielectric multiple-scattering compensation; thin-film;
+  Rough-glass multiple scattering (patch 21, pbrt dielectric "hdpbrtmultiscatter"): R and T
+  scale by 1/E(wo), E the single-scattering R+T albedo for wo's side (VNDF-integrated table
+  next to patch 12's, outside and inside incl. TIR), like Typhoon's coupled interface. Only
+  for OpenPBR transmission, as Typhoon (not standard_surface, not pbrlib). Furnace OpenPBR
+  glass r0.5 0.808 -> 0.996 (Typhoon 0.998); feature_transmission RMSE 0.082 -> 0.048.
+  Open: thin-film;
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens

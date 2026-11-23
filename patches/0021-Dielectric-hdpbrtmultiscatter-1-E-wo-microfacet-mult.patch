@@ -1,0 +1,240 @@
+From 5fc4126098eb0758ea9bb199b6672906c30e6935 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Mon, 23 Nov 2026 18:50:27 +0100
+Subject: [PATCH] Dielectric "hdpbrtmultiscatter": 1/E(wo) microfacet
+ multiple-scattering compensation (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/bxdfs.cpp     | 60 +++++++++++++++++++++++++++++++++++++++---
+ src/pbrt/bxdfs.h       | 18 +++++++++++--
+ src/pbrt/materials.cpp |  7 +++--
+ src/pbrt/materials.h   |  7 +++--
+ 4 files changed, 82 insertions(+), 10 deletions(-)
+
+diff --git a/src/pbrt/bxdfs.cpp b/src/pbrt/bxdfs.cpp
+index 55b2a9e..9829d30 100644
+--- a/src/pbrt/bxdfs.cpp
++++ b/src/pbrt/bxdfs.cpp
+@@ -142,7 +142,7 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
+ 
+             DCHECK(!IsNaN(pdf));
+             SampledSpectrum f(mfDistrib.D(wm) * mfDistrib.G(wo, wi) * R /
+-                              (4 * CosTheta(wi) * CosTheta(wo)));
++                              (4 * CosTheta(wi) * CosTheta(wo)) * MultiScatterScale(wo));
+             return BSDFSample(f, wi, pdf, BxDFFlags::GlossyReflection);
+ 
+         } else {
+@@ -163,7 +163,7 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
+             SampledSpectrum ft(T * mfDistrib.D(wm) * mfDistrib.G(wo, wi) *
+                                std::abs(Dot(wi, wm) * Dot(wo, wm) /
+                                         (CosTheta(wi) * CosTheta(wo) * denom)));
+-            ft *= tint * TopThroughput(wo);
++            ft *= tint * (TopThroughput(wo) * MultiScatterScale(wo));
+             // Account for non-symmetry with transmission to different medium
+             if (mode == TransportMode::Radiance)
+                 ft /= Sqr(etap);
+@@ -197,7 +197,7 @@ PBRT_CPU_GPU SampledSpectrum DielectricBxDF::f(Vector3f wo, Vector3f wi, Transpo
+     if (reflect) {
+         // Compute reflection at rough dielectric interface
+         return SampledSpectrum(mfDistrib.D(wm) * mfDistrib.G(wo, wi) * F /
+-                               std::abs(4 * cosTheta_i * cosTheta_o));
++                               std::abs(4 * cosTheta_i * cosTheta_o) * MultiScatterScale(wo));
+ 
+     } else {
+         // Compute transmission at rough dielectric interface
+@@ -208,7 +208,7 @@ PBRT_CPU_GPU SampledSpectrum DielectricBxDF::f(Vector3f wo, Vector3f wi, Transpo
+         if (mode == TransportMode::Radiance)
+             ft /= Sqr(etap);
+ 
+-        return tint * (ft * TopThroughput(wo));
++        return tint * (ft * TopThroughput(wo) * MultiScatterScale(wo));
+     }
+ }
+ 
+@@ -269,6 +269,14 @@ PBRT_CPU_GPU Float DielectricBxDF::TopThroughput(Vector3f wo) const {
+                  0, 1);
+ }
+ 
++PBRT_CPU_GPU Float DielectricBxDF::MultiScatterScale(Vector3f wo) const {
++    if (!multiScatter)
++        return 1;
++    Float etaRel = CosTheta(wo) > 0 ? eta : 1 / eta;
++    Float E = HdPbrtDielectricRTAlbedo(AbsCosTheta(wo), mfDistrib.MeanAlpha(), etaRel);
++    return 1 / std::max<Float>(E, 0.1f);
++}
++
+ std::string DielectricBxDF::ToString() const {
+     return StringPrintf("[ DielectricBxDF eta: %f mfDistrib: %s ]", eta,
+                         mfDistrib.ToString());
+@@ -1183,6 +1191,8 @@ namespace {
+ constexpr int kAlbedoCos = 33, kAlbedoRough = 33, kAlbedoEta = 25;
+ constexpr Float kAlbedoEtaMax = 4;
+ float hdpbrtAlbedo[kAlbedoEta][kAlbedoRough][kAlbedoCos];
++// [0]: etaRel >= 1 (outside), [1]: etaRel = 1 / eta (inside), same eta axis.
++float hdpbrtRTAlbedo[2][kAlbedoEta][kAlbedoRough][kAlbedoCos];
+ constexpr int kSheenCos = 33, kSheenAlpha = 33;
+ float hdpbrtSheenAlbedo[kSheenAlpha][kSheenCos];
+ std::once_flag hdpbrtAlbedoOnce;
+@@ -1205,6 +1215,8 @@ void HdPbrtInitDielectricAlbedo() {
+                 TrowbridgeReitzDistribution distrib(alpha, alpha);
+                 for (int ic = 0; ic < kAlbedoCos; ++ic) {
+                     Float c = std::max<Float>(Float(ic) / (kAlbedoCos - 1), 1e-3f);
++                    // eta 1 and smooth interfaces lose nothing.
++                    hdpbrtRTAlbedo[0][ie][ir][ic] = hdpbrtRTAlbedo[1][ie][ir][ic] = 1;
+                     if (eta == 1) {
+                         hdpbrtAlbedo[ie][ir][ic] = 0;
+                         continue;
+@@ -1227,6 +1239,28 @@ void HdPbrtInitDielectricAlbedo() {
+                                    distrib.G(wo, wi) / distrib.G1(wo);
+                         }
+                     hdpbrtAlbedo[ie][ir][ic] = float(sum / (n * n));
++                    // R + T from both sides, VNDF sampled: per microfacet
++                    // normal, F G2 / G1 for reflection, (1 - F) G2 / G1 for
++                    // transmission (energy, no 1/eta^2).
++                    for (int side = 0; side < 2; ++side) {
++                        Float etaRel = side == 0 ? eta : 1 / eta;
++                        double e = 0;
++                        for (int a = 0; a < n; ++a)
++                            for (int b = 0; b < n; ++b) {
++                                Point2f u((a + 0.5f) / n, (b + 0.5f) / n);
++                                Vector3f wm = distrib.Sample_wm(wo, u);
++                                Float F = FrDielectric(Dot(wo, wm), etaRel);
++                                Vector3f wr = Reflect(wo, wm);
++                                if (wr.z > 0)
++                                    e += F * distrib.G(wo, wr) / distrib.G1(wo);
++                                Vector3f wt;
++                                Float etap;
++                                if (F < 1 && Refract(wo, (Normal3f)wm, etaRel, &etap, &wt) &&
++                                    wt.z < 0)
++                                    e += (1 - F) * distrib.G(wo, wt) / distrib.G1(wo);
++                            }
++                        hdpbrtRTAlbedo[side][ie][ir][ic] = float(std::min(e / (n * n), 1.0));
++                    }
+                 }
+             }
+         });
+@@ -1271,6 +1305,24 @@ PBRT_CPU_GPU Float HdPbrtDielectricAlbedo(Float cosTheta, Float alpha, Float eta
+                 Lerp(tr, at(e0 + 1, r0), at(e0 + 1, r0 + 1)));
+ }
+ 
++PBRT_CPU_GPU Float HdPbrtDielectricRTAlbedo(Float cosTheta, Float alpha, Float etaRel) {
++    int side = etaRel < 1 ? 1 : 0;
++    Float eta = side ? 1 / etaRel : etaRel;
++    eta = Clamp(eta, 1, kAlbedoEtaMax);
++    Float fe = std::sqrt((eta - 1) / (kAlbedoEtaMax - 1)) * (kAlbedoEta - 1);
++    Float fr = Clamp(std::sqrt(std::max<Float>(alpha, 0)), 0, 1) * (kAlbedoRough - 1);
++    Float fc = Clamp(cosTheta, 0, 1) * (kAlbedoCos - 1);
++    int e0 = std::min(int(fe), kAlbedoEta - 2), r0 = std::min(int(fr), kAlbedoRough - 2),
++        c0 = std::min(int(fc), kAlbedoCos - 2);
++    Float te = fe - e0, tr = fr - r0, tc = fc - c0;
++    auto at = [&](int e, int r) {
++        return Lerp(tc, Float(hdpbrtRTAlbedo[side][e][r][c0]),
++                    Float(hdpbrtRTAlbedo[side][e][r][c0 + 1]));
++    };
++    return Lerp(te, Lerp(tr, at(e0, r0), at(e0, r0 + 1)),
++                Lerp(tr, at(e0 + 1, r0), at(e0 + 1, r0 + 1)));
++}
++
+ PBRT_CPU_GPU Float HdPbrtSheenAlbedo(Float cosTheta, Float alpha) {
+     Float fa = Clamp(alpha, 0, 1) * (kSheenAlpha - 1);
+     Float fc = Clamp(cosTheta, 0, 1) * (kSheenCos - 1);
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index 7f5a17a..86bc58c 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -208,8 +208,13 @@ class DielectricBxDF {
+     DielectricBxDF() = default;
+     PBRT_CPU_GPU
+     DielectricBxDF(Float eta, TrowbridgeReitzDistribution mfDistrib,
+-                   SampledSpectrum tint = SampledSpectrum(1.f), Float topWeight = 0)
+-        : eta(eta), mfDistrib(mfDistrib), tint(tint), topWeight(topWeight) {}
++                   SampledSpectrum tint = SampledSpectrum(1.f), Float topWeight = 0,
++                   bool multiScatter = false)
++        : eta(eta),
++          mfDistrib(mfDistrib),
++          tint(tint),
++          topWeight(topWeight),
++          multiScatter(multiScatter) {}
+ 
+     PBRT_CPU_GPU
+     BxDFFlags Flags() const {
+@@ -248,6 +253,11 @@ class DielectricBxDF {
+     // layer on top also scales transmission by 1 - w E_R(|cos theta_o|).
+     Float topWeight = 0;
+     PBRT_CPU_GPU Float TopThroughput(Vector3f wo) const;
++    // hdPbrt: energy compensation for microfacet multiple scattering. Both
++    // lobes scale by 1 / E(wo), E the single-scattering albedo for wo's side
++    // (as Typhoon's coupled dielectric interface does).
++    bool multiScatter = false;
++    PBRT_CPU_GPU Float MultiScatterScale(Vector3f wo) const;
+ };
+ 
+ // ThinDielectricBxDF Definition
+@@ -1182,6 +1192,10 @@ class NormalizedFresnelBxDF {
+ // HdPbrtInitDielectricAlbedo() must run (on the CPU) before lookups.
+ void HdPbrtInitDielectricAlbedo();
+ PBRT_CPU_GPU Float HdPbrtDielectricAlbedo(Float cosTheta, Float alpha, Float eta);
++// Single-scattering albedo (reflection + transmission, energy, i.e. without the
++// 1/eta^2 radiance scale) of the rough DielectricBxDF for relative IOR etaRel
++// on wo's side (< 1 from inside, total internal reflection included).
++PBRT_CPU_GPU Float HdPbrtDielectricRTAlbedo(Float cosTheta, Float alpha, Float etaRel);
+ PBRT_CPU_GPU Float HdPbrtSheenAlbedo(Float cosTheta, Float alpha);
+ 
+ // Charlie sheen distribution (Conty & Kulla 2017) and Ashikhmin's visibility.
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index b272985..ba8a6f8 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -72,10 +72,13 @@ DielectricMaterial *DielectricMaterial::Create(
+     SpectrumTexture tint =
+         parameters.GetSpectrumTextureOrNull("transmissiontint", SpectrumType::Albedo, alloc);
+     Float topWeight = Clamp(parameters.GetOneFloat("hdpbrttopweight", 0.f), 0, 1);
+-    if (topWeight > 0)
++    // "hdpbrtmultiscatter": microfacet multiple-scattering energy compensation.
++    bool multiScatter = parameters.GetOneBool("hdpbrtmultiscatter", false);
++    if (topWeight > 0 || multiScatter)
+         HdPbrtInitDielectricAlbedo();
+     return alloc.new_object<DielectricMaterial>(uRoughness, vRoughness, eta, displacement,
+-                                                normalMap, remapRoughness, tint, topWeight);
++                                                normalMap, remapRoughness, tint, topWeight,
++                                                multiScatter);
+ }
+ 
+ // ThinDielectricMaterial Method Definitions
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index e198eef..849853b 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -147,9 +147,11 @@ class DielectricMaterial {
+     // DielectricMaterial Public Methods
+     DielectricMaterial(FloatTexture uRoughness, FloatTexture vRoughness, Spectrum eta,
+                        FloatTexture displacement, Image *normalMap, bool remapRoughness,
+-                       SpectrumTexture tint = nullptr, Float topWeight = 0)
++                       SpectrumTexture tint = nullptr, Float topWeight = 0,
++                       bool multiScatter = false)
+         : tint(tint),
+           topWeight(topWeight),
++          multiScatter(multiScatter),
+           normalMap(normalMap),
+           displacement(displacement),
+           uRoughness(uRoughness),
+@@ -205,13 +207,14 @@ class DielectricMaterial {
+         SampledSpectrum t(1.f);
+         if (tint)
+             t = Clamp(texEval(tint, ctx, lambda), 0, 1);
+-        return DielectricBxDF(sampledEta, distrib, t, topWeight);
++        return DielectricBxDF(sampledEta, distrib, t, topWeight, multiScatter);
+     }
+ 
+   private:
+     // DielectricMaterial Private Members
+     SpectrumTexture tint;  // hdPbrt: "transmissiontint"
+     Float topWeight;       // hdPbrt: "hdpbrttopweight"
++    bool multiScatter;     // hdPbrt: "hdpbrtmultiscatter"
+     Image *normalMap;
+     FloatTexture displacement;
+     FloatTexture uRoughness, vRoughness;
+-- 
+2.43.0
+

@@ -21,3 +21,6 @@ them and point SUITE at a directory whose `materials/` holds both:
   rough dielectric loses ~15% even at normal incidence at alpha 0.05 (a Typhoon bug); the R-over-T
   layer loses energy in both by MaterialX's definition (T keeps its own 1 - F and also pays the top's
   1 - E_R). At 0.2 Typhoon compensates microfacet multiple scattering and pbrt doesn't.
+  f_op_r03 / f_op_r05: OpenPBR glass (transmission_weight 1) at specular_roughness 0.3 / 0.5,
+  with pbrt patch 21's multiple-scattering compensation: hdPbrt 0.951 -> 0.976 and 0.808 -> 0.996
+  (Typhoon 1.001 / 0.998).

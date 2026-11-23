@@ -600,6 +600,9 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             // Diffuse roughness: energy-preserving Oren-Nayar (patch 20).
             float diffRough = 0;
             float metalScale = 1;
+            // Rough glass with microfacet multiple-scattering compensation
+            // (patch 21): OpenPBR, as Typhoon (not standard_surface).
+            bool glassMultiScatter = false;
             // No specular lobe at all (specular weight or color 0, or ior 1,
             // i.e. no Fresnel reflection): a plain Lambertian "diffuse".
             bool noSpecular = false;
@@ -709,6 +712,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 sheenOnTop = true;
                 thinWalled = _Float(*surf, "geometry_thin_walled", 0) > 0.5f;
                 diffRough = _Float(*surf, "base_diffuse_roughness", 0);
+                glassMultiScatter = true;
                 layeredMetal = metalF82 = true;
                 metalBase = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base_weight", 1);
                 // MaterialX: the metal BSDF is weighted by specular_weight and
@@ -831,6 +835,8 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 other << " \"float eta\" " << ior;
                 rough = std::min(std::max(rough + transExtraRough, 0.f), 1.f);
                 roughParam("roughness");
+                if (glassMultiScatter && rough > 0)
+                    other << " \"bool hdpbrtmultiscatter\" true";
                 // Interior medium, MaterialX's conversion: extinction
                 // -ln(color) / depth, scattering scatter / depth, absorption
                 // the difference shifted so that no channel is negative.
