@@ -680,6 +680,8 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             // Rough glass with microfacet multiple-scattering compensation
             // (patch 21): OpenPBR, as Typhoon (not standard_surface).
             bool glassMultiScatter = false;
+            // Dispersion (OpenPBR): Abbe number of the glass, 0 for none.
+            float dispAbbe = 0;
             // Thin film on the specular layer (patch 22; hdpbrtlayered only):
             // weight, thickness in nm, film IOR.
             float filmW = 0, filmNm = 0, filmIor = 1.4f;
@@ -795,6 +797,13 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 thinWalled = _Float(*surf, "geometry_thin_walled", 0) > 0.5f;
                 diffRough = _Float(*surf, "base_diffuse_roughness", 0);
                 glassMultiScatter = true;
+                {
+                    const float scale = std::min(
+                        std::max(_Float(*surf, "transmission_dispersion_scale", 0), 0.f), 1.f);
+                    const float abbe =
+                        std::max(_Float(*surf, "transmission_dispersion_abbe_number", 20), 0.f);
+                    dispAbbe = scale > 0 ? abbe / scale : 0;
+                }
                 filmW = std::min(std::max(_Float(*surf, "thin_film_weight", 0), 0.f), 1.f);
                 filmNm = std::max(_Float(*surf, "thin_film_thickness", 0.5f), 0.f) * 1000;
                 filmIor = std::max(_Float(*surf, "thin_film_ior", 1.4f), 1.f);
@@ -931,7 +940,22 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 roughParam("roughness");
             } else if (transmission >= 0.5f && !thinWalled) {
                 d.type = "dielectric";
-                other << " \"float eta\" " << ior;
+                if (dispAbbe > 0) {
+                    // Dispersion: two-term Cauchy n(l) = B + C / l^2 through
+                    // n_d (589.3 nm) with V = (n_d - 1) / (n_F - n_C), as
+                    // Typhoon. pbrt traces a non-constant eta at the hero
+                    // wavelength only.
+                    const double lD = 0.5893, lF = 0.4861, lC = 0.6563;  // um
+                    const double C = (ior - 1.0) * (lC * lC * lF * lF / (lC * lC - lF * lF)) / dispAbbe;
+                    const double B = ior - C / (lD * lD);
+                    other << " \"spectrum eta\" [";
+                    for (int nm = 360; nm <= 830; nm += 10) {
+                        const double l = nm * 1e-3;
+                        other << " " << nm << " " << std::max(B + C / (l * l), 1.0);
+                    }
+                    other << " ]";
+                } else
+                    other << " \"float eta\" " << ior;
                 rough = std::min(std::max(rough + transExtraRough, 0.f), 1.f);
                 roughParam("roughness");
                 if (glassMultiScatter && rough > 0)

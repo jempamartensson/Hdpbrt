@@ -362,6 +362,13 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   base texture stays unscaled unless w ~ 1. Other objects inside the mesh aren't handled
   (Typhoon walks only against the owner mesh). long_radius_anisotropic close -> match
   (0.159 -> 0.082); 33 match / 9 close. White furnace walk: 1.000.
+  Dispersion (patch 24): OpenPBR transmission_dispersion_scale/abbe_number -> "spectrum eta"
+  (360-830 nm every 10) from a two-term Cauchy fit through n_d (589.3) with V = (n_d - 1) /
+  (n_F - n_C), Abbe / scale, as Typhoon; pbrt traces it at the hero wavelength. pbrt fix in
+  the same patch: volpath's spectral MIS averaged r_u/r_l over all four wavelengths even after
+  the secondaries were terminated, biasing chromatic media (dispersion sweep went 2.4x blue,
+  "differs"); now hero-only when terminated. Sweep 0.159 -> 0.153; dispersive glasses keep
+  their means but get single-wavelength color noise (open_pbr--glass RMSE 0.069 -> 0.084).
   Open: thin-walled straight transmission in shadow rays;
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.

@@ -1,0 +1,110 @@
+From 4111b8d95af1cdd84abad41ae54baeff5ca8ccc8 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Mon, 23 Nov 2026 19:18:08 +0100
+Subject: [PATCH] VolPath: spectral MIS over the hero wavelength only once
+ secondaries are terminated (for hdPbrt)
+
+A dispersive eta terminates the secondary wavelengths; averaging all four
+rescaled path probabilities then biased paths through chromatic media toward
+the least-absorbed wavelengths (a dispersive glass with absorption came out
+2.4x too blue).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/cpu/integrators.cpp | 26 +++++++++++++++++---------
+ 1 file changed, 17 insertions(+), 9 deletions(-)
+
+diff --git a/src/pbrt/cpu/integrators.cpp b/src/pbrt/cpu/integrators.cpp
+index 422e926..428addd 100644
+--- a/src/pbrt/cpu/integrators.cpp
++++ b/src/pbrt/cpu/integrators.cpp
+@@ -1004,6 +1004,14 @@ static bool HdPbrtBlocks(const Light &light, uint64_t mask) {
+     return link < 0 || ((mask >> link) & 1);
+ }
+ 
++// hdPbrt: the average of the rescaled path probabilities over the wavelengths
++// that still carry the path. Once secondary wavelengths are terminated (a
++// dispersive eta), only the hero's counts; averaging all four biased paths
++// through chromatic media toward the least-absorbed wavelengths.
++static inline Float HdPbrtMisAverage(const SampledSpectrum &r, const SampledWavelengths &lambda) {
++    return lambda.SecondaryTerminated() ? r[0] : r.Average();
++}
++
+ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &lambda,
+                                       Sampler sampler, ScratchBuffer &scratchBuffer,
+                                       VisibleSurface *visibleSurf) const {
+@@ -1054,7 +1062,7 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+ 
+                         // Update _L_ for medium emission
+                         if (r_e)
+-                            L += betap * mp.sigma_a * mp.Le / r_e.Average();
++                            L += betap * mp.sigma_a * mp.Le / HdPbrtMisAverage(r_e, lambda);
+                     }
+ 
+                     // Compute medium event probabilities for interaction
+@@ -1151,13 +1159,13 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+                     continue;
+                 if (SampledSpectrum Le = light.Le(ray, lambda); Le) {
+                     if (depth == 0 || specularBounce)
+-                        L += beta * Le / r_u.Average();
++                        L += beta * Le / HdPbrtMisAverage(r_u, lambda);
+                     else {
+                         // Add infinite light contribution using both PDFs with MIS
+                         Float p_l = lightSampler.PMF(prevIntrContext, light) *
+                                     light.PDF_Li(prevIntrContext, ray.d, true);
+                         r_l *= p_l;
+-                        L += beta * Le / (r_u + r_l).Average();
++                        L += beta * Le / HdPbrtMisAverage((r_u + r_l), lambda);
+                     }
+                 }
+             }
+@@ -1179,14 +1187,14 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+         if (Le) {
+             // Add contribution of emission from intersected surface
+             if (depth == 0 || specularBounce)
+-                L += beta * Le / r_u.Average();
++                L += beta * Le / HdPbrtMisAverage(r_u, lambda);
+             else {
+                 // Add surface light contribution using both PDFs with MIS
+                 Light areaLight(isect.areaLight);
+                 Float p_l = lightSampler.PMF(prevIntrContext, areaLight) *
+                             areaLight.PDF_Li(prevIntrContext, ray.d, true);
+                 r_l *= p_l;
+-                L += beta * Le / (r_u + r_l).Average();
++                L += beta * Le / HdPbrtMisAverage((r_u + r_l), lambda);
+             }
+         }
+ 
+@@ -1348,7 +1356,7 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+         // Possibly terminate volumetric path with Russian roulette
+         if (!beta)
+             break;
+-        SampledSpectrum rrBeta = beta * etaScale / r_u.Average();
++        SampledSpectrum rrBeta = beta * etaScale / HdPbrtMisAverage(r_u, lambda);
+         Float uRR = sampler.Get1D();
+         PBRT_DBG("%s\n",
+                  StringPrintf("etaScale %f -> rrBeta %s", etaScale, rrBeta).c_str());
+@@ -1451,7 +1459,7 @@ SampledSpectrum VolPathIntegrator::SampleLd(const Interaction &intr, const BSDF
+ 
+                                 // Possibly terminate transmittance computation using
+                                 // Russian roulette
+-                                SampledSpectrum Tr = T_ray / (r_l + r_u).Average();
++                                SampledSpectrum Tr = T_ray / HdPbrtMisAverage((r_l + r_u), lambda);
+                                 if (Tr.MaxComponentValue() < 0.05f) {
+                                     Float q = 0.75f;
+                                     if (rng.Uniform<Float>() < q)
+@@ -1481,9 +1489,9 @@ SampledSpectrum VolPathIntegrator::SampleLd(const Interaction &intr, const BSDF
+     r_l *= r_p * p_l;
+     r_u *= r_p * scatterPDF;
+     if (IsDeltaLight(light.Type()))
+-        return beta * f_hat * T_ray * ls->L / r_l.Average();
++        return beta * f_hat * T_ray * ls->L / HdPbrtMisAverage(r_l, lambda);
+     else
+-        return beta * f_hat * T_ray * ls->L / (r_l + r_u).Average();
++        return beta * f_hat * T_ray * ls->L / HdPbrtMisAverage((r_l + r_u), lambda);
+ }
+ 
+ std::string VolPathIntegrator::ToString() const {
+-- 
+2.43.0
+
