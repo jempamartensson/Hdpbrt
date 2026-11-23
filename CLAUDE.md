@@ -295,7 +295,12 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   ior 1 transmission), base takes 1 - transmission; standard_surface `thin_walled`, OpenPBR
   `geometry_thin_walled`. pbrt shadow rays still stop at thin walls (Typhoon lets them
   through), so light behind a thin shell arrives only by path continuation.
-  Open: honey; coat;
+  Media as band spectra (2026-11-23, not pushed: 2 fixtures match -> close): pbrt's RGB
+  upsampling leaks absorption into zero channels (honey red 0.75x); `_MediumSpectrum` writes
+  sigma_a/sigma_s as 3-band steps (490/590 nm, fitted to RGB-exact transmittance). honey
+  differ -> close (0.86 -> 0.90), scatter_anisotropy close -> match, dielectric_layer_absorption
+  and _anisotropic match -> close (RMSE 0.09 -> 0.105, 1.07 -> 1.08 bright).
+  Open: coat;
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens
