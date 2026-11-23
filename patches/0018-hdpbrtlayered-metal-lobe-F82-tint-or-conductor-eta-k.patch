@@ -1,0 +1,320 @@
+From 7da480bb5ead8dab736d6fba589db612fceedf70 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Mon, 23 Nov 2026 18:21:26 +0100
+Subject: [PATCH] hdpbrtlayered: metal lobe (F82-tint or conductor eta/k, mixed
+ by metalweight, under coat/sheen) (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/bxdfs.h       | 90 ++++++++++++++++++++++++++++++++++--------
+ src/pbrt/materials.cpp | 28 ++++++++++++-
+ src/pbrt/materials.h   | 27 +++++++++++--
+ 3 files changed, 124 insertions(+), 21 deletions(-)
+
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index d277afe..154b808 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -1205,10 +1205,14 @@ class HdPbrtLayeredBxDF {
+     HdPbrtLayeredBxDF(SampledSpectrum R, SampledSpectrum T, SampledSpectrum specTint,
+                       HdPbrtDielectricLobe spec, SampledSpectrum sheenColor,
+                       Float sheenWeight, Float sheenAlpha, bool sheenOnTop,
+-                      HdPbrtDielectricLobe coat, SampledSpectrum coatTint)
++                      HdPbrtDielectricLobe coat, SampledSpectrum coatTint,
++                      Float metalWeight = 0, int metalMode = 0,
++                      SampledSpectrum metalA = SampledSpectrum(0.f),
++                      SampledSpectrum metalB = SampledSpectrum(0.f))
+         : R(R), T(T), specTint(specTint), sheenColor(sheenColor), coatTint(coatTint),
+-          spec(spec), coat(coat), sheenWeight(sheenWeight), sheenAlpha(sheenAlpha),
+-          sheenOnTop(sheenOnTop) {}
++          metalA(metalA), metalB(metalB), spec(spec), coat(coat),
++          sheenWeight(sheenWeight), sheenAlpha(sheenAlpha), metalWeight(metalWeight),
++          metalMode(metalMode), sheenOnTop(sheenOnTop) {}
+ 
+     PBRT_CPU_GPU
+     BxDFFlags Flags() const {
+@@ -1219,6 +1223,9 @@ class HdPbrtLayeredBxDF {
+                                              : BxDFFlags::GlossyReflection);
+         if (T)
+             flags = flags | BxDFFlags::SpecularTransmission;
++        if (HasMetal())
++            flags = flags | (spec.Smooth() ? BxDFFlags::SpecularReflection
++                                           : BxDFFlags::GlossyReflection);
+         return flags;
+     }
+ 
+@@ -1259,6 +1266,23 @@ class HdPbrtLayeredBxDF {
+             lobe = &spec;
+             pLobe = p.spec;
+             lobeScale = specTint * k.under * k.spec;
++        } else if (uc < p.coat + p.spec + p.metal) {
++            if (spec.Smooth()) {
++                Vector3f wi(-wo.x, -wo.y, wo.z);
++                SampledSpectrum f =
++                    MetalFresnel(wo.z) * k.under * (k.metal / AbsCosTheta(wi));
++                bs = BSDFSample(f, wi, p.metal, BxDFFlags::SpecularReflection);
++            } else {
++                Vector3f wm = spec.distrib.Sample_wm(wo, u);
++                Vector3f wi = Reflect(wo, wm);
++                if (wi.z <= 0)
++                    return {};
++                bs = BSDFSample(FUpper(wo, wi, k), wi, PDFUpper(wo, wi, p),
++                                BxDFFlags::GlossyReflection);
++            }
++            if (flip)
++                bs->wi = -bs->wi;
++            return bs;
+         }
+         if (lobe) {
+             if (lobe->Smooth()) {
+@@ -1274,7 +1298,7 @@ class HdPbrtLayeredBxDF {
+                 bs = BSDFSample(FUpper(wo, wi, k), wi, PDFUpper(wo, wi, p),
+                                 BxDFFlags::GlossyReflection);
+             }
+-        } else if (uc < p.coat + p.spec + p.cos) {
++        } else if (uc < p.coat + p.spec + p.metal + p.cos) {
+             Vector3f wi = SampleCosineHemisphere(u);
+             if (wi.z <= 0)
+                 return {};
+@@ -1322,13 +1346,13 @@ class HdPbrtLayeredBxDF {
+     // Scale of each layer's lobe for outgoing direction wo; `under` (the coat
+     // tint) also multiplies every layer below the coat.
+     struct Weights {
+-        Float sheen = 0, coat = 0, spec = 0, base = 0;
++        Float sheen = 0, coat = 0, spec = 0, base = 0, metal = 0;
+         bool sheenUnderCoat = false;
+         SampledSpectrum under;
+     };
+     // Lobe selection probabilities.
+     struct Probs {
+-        Float coat = 0, spec = 0, cos = 0, trans = 0, sum = 0;
++        Float coat = 0, spec = 0, metal = 0, cos = 0, trans = 0, sum = 0;
+     };
+ 
+     PBRT_CPU_GPU
+@@ -1344,17 +1368,23 @@ class HdPbrtLayeredBxDF {
+                            : Float(1);
+         Weights k;
+         k.under = coat.Active() ? coatTint : SampledSpectrum(1.f);
++        // The metal mix splits the level below the coat (and top sheen):
++        // metal gets m, the dielectric stack (specular, sheen, base) 1 - m.
++        const Float m = Clamp(metalWeight, 0, 1);
++        Float above;
+         if (sheenOnTop) {
+             k.sheen = 1;
+             k.coat = tSheen;
+-            k.spec = tSheen * tCoat;
++            above = tSheen * tCoat;
+         } else {
+             k.coat = 1;
+-            k.spec = tCoat;
+-            k.sheen = tCoat * tSpec;
++            above = tCoat;
++            k.sheen = above * (1 - m) * tSpec;
+             k.sheenUnderCoat = true;
+         }
+-        k.base = tCoat * tSpec * tSheen;
++        k.spec = above * (1 - m);
++        k.metal = above * m;
++        k.base = above * (1 - m) * tSpec * (sheenOnTop ? Float(1) : tSheen);
+         return k;
+     }
+ 
+@@ -1365,9 +1395,11 @@ class HdPbrtLayeredBxDF {
+         if (flags & BxDFReflTransFlags::Reflection) {
+             if (coat.Active())
+                 p.coat = std::max<Float>(k.coat * coat.weight * coat.Albedo(wo), 1e-3f);
+-            if (HasSpec())
++            if (HasSpec() && k.spec > 0)
+                 p.spec = std::max<Float>(
+                     k.spec * under * spec.weight * spec.Albedo(wo) * specTint.Average(), 1e-3f);
++            if (HasMetal())
++                p.metal = std::max<Float>(k.metal * under * MetalFresnel(wo.z).Average(), 1e-3f);
+             if (HasSheen())
+                 p.cos += k.sheen * (k.sheenUnderCoat ? under : Float(1)) *
+                          HdPbrtSheenAlbedo(wo.z, sheenAlpha) * sheenColor.Average();
+@@ -1377,10 +1409,11 @@ class HdPbrtLayeredBxDF {
+         }
+         if ((flags & BxDFReflTransFlags::Transmission) && T)
+             p.trans = std::max<Float>(k.base * under * T.Average(), 1e-3f);
+-        p.sum = p.coat + p.spec + p.cos + p.trans;
++        p.sum = p.coat + p.spec + p.metal + p.cos + p.trans;
+         if (p.sum > 0) {
+             p.coat /= p.sum;
+             p.spec /= p.sum;
++            p.metal /= p.sum;
+             p.cos /= p.sum;
+             p.trans /= p.sum;
+         }
+@@ -1399,6 +1432,10 @@ class HdPbrtLayeredBxDF {
+         if (HasSpec())
+             result += specTint * k.under * (k.spec * spec.F(wo, wi, wm));
+         result += SampledSpectrum(k.coat * coat.F(wo, wi, wm));
++        if (HasMetal() && !spec.Smooth())
++            result += MetalFresnel(AbsDot(wo, wm)) * k.under *
++                      (k.metal * spec.distrib.D(wm) * spec.distrib.G(wo, wi) /
++                       (4 * AbsCosTheta(wi) * AbsCosTheta(wo)));
+         if (HasSheen()) {
+             SampledSpectrum s = sheenColor * (k.sheen * HdPbrtCharlieD(sheenAlpha, wm.z) *
+                                               HdPbrtAshikhminV(AbsCosTheta(wo), AbsCosTheta(wi)));
+@@ -1414,16 +1451,37 @@ class HdPbrtLayeredBxDF {
+             return 0;
+         Float pdf = p.cos * CosineHemispherePDF(wi.z);
+         Vector3f wm = Normalize(wo + wi);
+-        if (p.spec > 0 && HasSpec() && !spec.Smooth())
+-            pdf += p.spec * spec.PDF(wo, wm);
++        if ((p.spec > 0 || p.metal > 0) && !spec.Smooth())
++            pdf += (p.spec + p.metal) * spec.PDF(wo, wm);
+         if (p.coat > 0 && coat.Active() && !coat.Smooth())
+             pdf += p.coat * coat.PDF(wo, wm);
+         return pdf;
+     }
+ 
+-    SampledSpectrum R, T, specTint, sheenColor, coatTint;
++    // Metal lobe at the specular's level (same microfacet distribution),
++    // mixed with the dielectric part by metalWeight. metalMode 0: F82-tint
++    // Schlick (OpenPBR), metalA = F0, metalB = F82 tint; 1: conductor
++    // Fresnel, metalA = eta, metalB = k.
++    PBRT_CPU_GPU
++    bool HasMetal() const { return metalWeight > 0; }
++    PBRT_CPU_GPU
++    SampledSpectrum MetalFresnel(Float mu) const {
++        mu = Clamp(mu, 0, 1);
++        if (metalMode == 1)
++            return FrComplex(mu, metalA, metalB);
++        const Float muBar = 1.f / 7.f;
++        const Float denom = muBar * Pow<6>(1 - muBar);
++        SampledSpectrum F0 = metalA, one(1.f);
++        SampledSpectrum fBar = F0 + (one - F0) * Pow<5>(1 - muBar);
++        SampledSpectrum a = fBar * (one - metalB) / denom;
++        SampledSpectrum F = F0 + (one - F0) * Pow<5>(1 - mu) - a * (mu * Pow<6>(1 - mu));
++        return ClampZero(F);
++    }
++
++    SampledSpectrum R, T, specTint, sheenColor, coatTint, metalA, metalB;
+     HdPbrtDielectricLobe spec, coat;
+-    Float sheenWeight, sheenAlpha;
++    Float sheenWeight, sheenAlpha, metalWeight;
++    int metalMode;
+     bool sheenOnTop;
+ };
+ 
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index 0b2d719..78190f5 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -680,6 +680,31 @@ HdPbrtLayeredMaterial *HdPbrtLayeredMaterial::Create(
+     if (!coatTint)
+         coatTint = alloc.new_object<SpectrumConstantTexture>(
+             alloc.new_object<ConstantSpectrum>(1.f));
++    // Metal: "metalweight" mixes in a metal lobe; F82-tint Schlick from
++    // "metalf0"/"metalf82" (OpenPBR), or conductor Fresnel from
++    // "metaleta"/"metalk" (standard_surface's artistic IOR).
++    FloatTexture metalWeight = parameters.GetFloatTexture("metalweight", 0.f, alloc);
++    int metalMode = 0;
++    SpectrumTexture metalA, metalB;
++    auto constant = [&](Float v) -> SpectrumTexture {
++        return alloc.new_object<SpectrumConstantTexture>(alloc.new_object<ConstantSpectrum>(v));
++    };
++    if (parameters.GetSpectrumTextureOrNull("metaleta", SpectrumType::Unbounded, alloc)) {
++        metalMode = 1;
++        metalA = parameters.GetSpectrumTexture("metaleta", nullptr, SpectrumType::Unbounded,
++                                               alloc);
++        metalB = parameters.GetSpectrumTexture("metalk", nullptr, SpectrumType::Unbounded,
++                                               alloc);
++        if (!metalB)
++            metalB = constant(0.f);
++    } else {
++        metalA = parameters.GetSpectrumTexture("metalf0", nullptr, SpectrumType::Albedo, alloc);
++        metalB = parameters.GetSpectrumTexture("metalf82", nullptr, SpectrumType::Albedo, alloc);
++        if (!metalA)
++            metalA = constant(1.f);
++        if (!metalB)
++            metalB = constant(1.f);
++    }
+     FloatTexture uRoughness = parameters.GetFloatTextureOrNull("uroughness", alloc);
+     FloatTexture vRoughness = parameters.GetFloatTextureOrNull("vroughness", alloc);
+     if (!uRoughness)
+@@ -694,7 +719,8 @@ HdPbrtLayeredMaterial *HdPbrtLayeredMaterial::Create(
+     return alloc.new_object<HdPbrtLayeredMaterial>(
+         reflectance, transmittance, specTint, specWeight, uRoughness, vRoughness, eta,
+         sheenColor, sheenWeight, sheenRoughness, sheenOnTop, coatWeight, coatRoughness,
+-        coatEta, coatTint, displacement, normalMap, remapRoughness);
++        coatEta, coatTint, metalWeight, metalMode, metalA, metalB, displacement, normalMap,
++        remapRoughness);
+ }
+ 
+ STAT_COUNTER("Scene/Materials", nMaterialsCreated);
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index 611c3a2..5207ebe 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -637,7 +637,8 @@ class HdPbrtLayeredMaterial {
+                           SpectrumTexture sheenColor, FloatTexture sheenWeight,
+                           FloatTexture sheenRoughness, bool sheenOnTop,
+                           FloatTexture coatWeight, FloatTexture coatRoughness, Float coatEta,
+-                          SpectrumTexture coatTint,
++                          SpectrumTexture coatTint, FloatTexture metalWeight, int metalMode,
++                          SpectrumTexture metalA, SpectrumTexture metalB,
+                           FloatTexture displacement, Image *normalMap, bool remapRoughness)
+         : displacement(displacement),
+           normalMap(normalMap),
+@@ -653,8 +654,12 @@ class HdPbrtLayeredMaterial {
+           coatTint(coatTint),
+           coatWeight(coatWeight),
+           coatRoughness(coatRoughness),
++          metalA(metalA),
++          metalB(metalB),
++          metalWeight(metalWeight),
+           eta(eta),
+           coatEta(coatEta),
++          metalMode(metalMode),
+           sheenOnTop(sheenOnTop),
+           remapRoughness(remapRoughness) {}
+ 
+@@ -663,9 +668,9 @@ class HdPbrtLayeredMaterial {
+     template <typename TextureEvaluator>
+     PBRT_CPU_GPU bool CanEvaluateTextures(TextureEvaluator texEval) const {
+         return texEval.CanEvaluate({uRoughness, vRoughness, specWeight, sheenWeight,
+-                                    sheenRoughness, coatWeight, coatRoughness},
++                                    sheenRoughness, coatWeight, coatRoughness, metalWeight},
+                                    {reflectance, transmittance, specTint, sheenColor,
+-                                    coatTint});
++                                    coatTint, metalA, metalB});
+     }
+ 
+     template <typename TextureEvaluator>
+@@ -691,7 +696,18 @@ class HdPbrtLayeredMaterial {
+         HdPbrtDielectricLobe coat{Clamp(texEval(coatWeight, ctx), 0, 1), coatEta,
+                                   TrowbridgeReitzDistribution(cr, cr)};
+         SampledSpectrum ct = Clamp(texEval(coatTint, ctx, lambda), 0, 1);
+-        return HdPbrtLayeredBxDF(r, t, tint, spec, sc, sw, sa, sheenOnTop, coat, ct);
++        Float mw = Clamp(texEval(metalWeight, ctx), 0, 1);
++        SampledSpectrum ma(0.f), mb(0.f);
++        if (mw > 0) {
++            ma = texEval(metalA, ctx, lambda);
++            mb = texEval(metalB, ctx, lambda);
++            if (metalMode == 0) {
++                ma = Clamp(ma, 0, 1);
++                mb = Clamp(mb, 0, 1);
++            }
++        }
++        return HdPbrtLayeredBxDF(r, t, tint, spec, sc, sw, sa, sheenOnTop, coat, ct, mw,
++                                 metalMode, ma, mb);
+     }
+ 
+     PBRT_CPU_GPU
+@@ -718,7 +734,10 @@ class HdPbrtLayeredMaterial {
+     FloatTexture specWeight, uRoughness, vRoughness, sheenWeight, sheenRoughness;
+     SpectrumTexture coatTint;
+     FloatTexture coatWeight, coatRoughness;
++    SpectrumTexture metalA, metalB;
++    FloatTexture metalWeight;
+     Float eta, coatEta;
++    int metalMode;
+     bool sheenOnTop;
+     bool remapRoughness;
+ };
+-- 
+2.43.0
+

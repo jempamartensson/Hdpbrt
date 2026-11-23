@@ -316,7 +316,12 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   (match). Not done: coat over metal (conductor path), textured base color in darkening.
   Absorption fixtures (patch 17): dielectric_layer_absorption/_anisotropic back to match
   (1.08 -> 1.04), dielectric_layer 1.15 -> 1.07. 32 match / 10 close / 0 differ.
-  Open:
+  Metal (patch 18): standard_surface/OpenPBR metal is a lobe inside hdpbrtlayered, mixed
+  by metalness under coat and sheen/fuzz (so coat over metal works now). OpenPBR: F82-tint
+  (F0 = base_color, F82 = specular_color); standard_surface: artistic IOR (Gulbrandsen
+  2014) to eta/k, or F82-tint when base_color is textured. Other shaders keep pbrt's
+  conductor. standard_surface feature_metalness RMSE 0.065 -> 0.044; still 32/10/0.
+  Open: OpenPBR specular_weight on the metal lobe; thin-film;
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens

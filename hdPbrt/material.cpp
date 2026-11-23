@@ -575,6 +575,11 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             // OpenPBR darkening) multiplies everything below it.
             float coatW = 0, coatRough = 0, coatIor = 1.5f;
             GfVec3f coatTint(1.f);
+            // Metal inside hdpbrtlayered (patch 18), mixed by metalness:
+            // OpenPBR F82-tint, standard_surface artistic IOR. Other shaders
+            // keep pbrt's conductor.
+            bool layeredMetal = false, metalF82 = false;
+            GfVec3f metalBase(0.8f), metalEdge(1.f);
             // No specular lobe at all (specular weight or color 0, or ior 1,
             // i.e. no Fresnel reflection): a plain Lambertian "diffuse".
             bool noSpecular = false;
@@ -630,6 +635,9 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 sheenColor = _Color(*surf, "sheen_color", GfVec3f(1));
                 sheenRough = _Float(*surf, "sheen_roughness", 0.3f);
                 thinWalled = _Float(*surf, "thin_walled", 0) > 0.5f;
+                layeredMetal = true;
+                metalBase = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base", 1);
+                metalEdge = _Color(*surf, "specular_color", GfVec3f(1)) * _Float(*surf, "specular", 1);
                 coatW = std::min(std::max(_Float(*surf, "coat", 0), 0.f), 1.f);
                 if (coatW > 0) {
                     coatRough = _Float(*surf, "coat_roughness", 0.1f);
@@ -679,6 +687,9 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 sheenRough = _Float(*surf, "fuzz_roughness", 0.5f);
                 sheenOnTop = true;
                 thinWalled = _Float(*surf, "geometry_thin_walled", 0) > 0.5f;
+                layeredMetal = metalF82 = true;
+                metalBase = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base_weight", 1);
+                metalEdge = _Color(*surf, "specular_color", GfVec3f(1));
                 coatW = std::min(std::max(_Float(*surf, "coat_weight", 0), 0.f), 1.f);
                 if (coatW > 0) {
                     // OpenPBR spec: the coat roughens the specular below,
@@ -738,7 +749,54 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                           << " \"bool remaproughness\" false";
                 }
             };
-            if (metallic >= 0.5f) {
+            if (layeredMetal && metallic > 0 && (metallic >= 0.5f || transmission < 0.5f)) {
+                d.type = "hdpbrtlayered";
+                roughParam("roughness");
+                other << " \"float eta\" " << ior;
+                if (noSpecular || metallic >= 1.f)
+                    specWeight = 0;
+                if (std::fabs(specWeight - 1.f) > 1e-6f)
+                    other << " \"float specularweight\" " << std::min(std::max(specWeight, 0.f), 1.f);
+                if (specTint != GfVec3f(1.f))
+                    other << " \"rgb speculartint\" " << HdPbrt_Rgb(_Clamp01(specTint));
+                other << " \"float metalweight\" " << std::min(metallic, 1.f);
+                if (metalF82 || !baseTex.empty()) {
+                    // F0 = base color (its texture if any), F82 tint = edge.
+                    if (!baseTex.empty())
+                        other << " \"texture metalf0\" " << HdPbrt_Quote(baseTex);
+                    else
+                        other << " \"rgb metalf0\" " << HdPbrt_Rgb(_Clamp01(metalBase));
+                    other << " \"rgb metalf82\" " << HdPbrt_Rgb(_Clamp01(metalEdge));
+                } else {
+                    // Artistic IOR (Gulbrandsen 2014): n between
+                    // (1+sqrt r)/(1-sqrt r) and (1-r)/(1+r) by edge tint g,
+                    // k from r and n.
+                    GfVec3f n, k;
+                    for (int i = 0; i < 3; ++i) {
+                        const float r = std::min(std::max(metalBase[i], 0.f), 0.99f);
+                        const float g = std::min(std::max(metalEdge[i], 0.f), 1.f);
+                        const float sr = std::sqrt(r);
+                        const float nMin = (1 - r) / (1 + r), nMax = (1 + sr) / (1 - sr);
+                        n[i] = nMax * (1 - g) + nMin * g;
+                        const float k2 = ((n[i] + 1) * (n[i] + 1) * r - (n[i] - 1) * (n[i] - 1)) /
+                                         std::max(1 - r, 1e-6f);
+                        k[i] = std::sqrt(std::max(k2, 0.f));
+                    }
+                    other << " \"rgb metaleta\" " << HdPbrt_Rgb(n) << " \"rgb metalk\" " << HdPbrt_Rgb(k);
+                }
+                if (sheenW > 0) {
+                    other << " \"float sheenweight\" " << std::min(sheenW, 1.f)
+                          << " \"rgb sheencolor\" " << HdPbrt_Rgb(_Clamp01(sheenColor))
+                          << " \"float sheenroughness\" " << std::min(std::max(sheenRough, 0.f), 1.f);
+                    if (sheenOnTop)
+                        other << " \"bool sheenontop\" true";
+                }
+                if (coatW > 0)
+                    other << " \"float coatweight\" " << coatW << " \"float coatroughness\" "
+                          << std::pow(std::min(std::max(coatRough, 0.f), 1.f), 2.f)
+                          << " \"float coateta\" " << coatIor
+                          << " \"rgb coattint\" " << HdPbrt_Rgb(_Clamp01(coatTint));
+            } else if (metallic >= 0.5f) {
                 d.type = "conductor";
                 roughParam("roughness");
             } else if (transmission >= 0.5f && !thinWalled) {
