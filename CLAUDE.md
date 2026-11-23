@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (12 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (13 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -79,6 +79,8 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    reciprocal (view-direction throughput, like MaterialX). Params: `reflectance`, `roughness`
    (`remaproughness`), `float eta`, `specularweight`, `speculartint`. Two-sided. White furnace:
    exactly 1 at every roughness (pbrt's coateddiffuse: 0.44-0.87, why it looked dark).
+13. `DielectricMaterial` `"spectrum transmissiontint"` (texture ok): multiplies every
+   transmission event (in and out), like MaterialX's dielectric tint.
 
 ## Done in the 2026-11-22 session
 
@@ -247,17 +249,33 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   Typhoon to 4 decimals. render_hdpbrt.py reuses the previous image when a frame changes
   nothing (hdPbrt doesn't re-render then).
 - Materials vs Typhoon (2026-11-22): `tests/typhoon/run_materials.sh` renders clean Typhoon
-  references (clamps off, caustics on) and compares; `MATERIALS_RESULTS.txt` 12 match /
-  9 close / 21 differ (was 4 / 15 / 23 before patch 12). Fixed so far: subsurface weight blends
+  references (clamps off, caustics on) and compares; `MATERIALS_RESULTS.txt` 18 match /
+  20 close / 4 differ (4 / 15 / 23 before patch 12; 12 / 9 / 21 after it). Still differ:
+  open_pbr honey, pbr sheen_bsdf(_zeltner), standard_surface input_thin_walled. Fixed so far: subsurface weight blends
   toward subsurface_color, MaterialX tiledimage uvtiling (pbrt uscale/vscale), MaterialX images
   default to linear (only an authored sRGB colorspace decodes), (1) the layered BSDF
   (`hdpbrtlayered`, patch 12; 2026-11-23). Layered fixtures now read ~1.08x Typhoon (were
   ~0.91x): Typhoon's default throughput is BSDL's ReflFront LUT, maybe including multiple
   scattering, and its diffuse may differ. open_pbr feature_coat dropped to close (coat isn't
   translated; coateddiffuse's darkness had hidden that). Typhoon refs and renders are kept in
-  `~/dev/pbrt_hydra/typhoon/materials_work` (cached; delete `ref/` to re-render). Open:
-  (2) mapping MaterialX BSDF-node graphs (pbr/ fixtures); (3) transmission depth/color as an
-  interior medium; (4) fuzz/sheen, thin-walled, dispersion.
+  `~/dev/pbrt_hydra/typhoon/materials_work` (cached; delete `ref/` to re-render).
+  (2) BSDF-node graphs (done 2026-11-23, `_MtlxMapper` in material.cpp): ND_surface /
+  ND_surface_unlit reduced to one pbrt material. layer(dielectric R over diffuse) ->
+  hdpbrtlayered, over dielectric T -> dielectric, over conductor -> coatedconductor;
+  mix -> the heavier side, add -> in1; Oren-Nayar/Burley/subsurface/sheen -> diffuse
+  (no roughness, SSS or sheen yet); translucent -> diffusetransmission; conductor -> eta/k;
+  generalized_schlick -> conductor with reflectance color0; EDFs -> emission
+  (generalized_schlick_edf by its hemispherical average). Unauthored inputs use pbrlib
+  nodedef defaults (Hydra passes only authored values); BSDF-node roughness is GGX alpha.
+  (3) Transmission media (done 2026-11-23): standard_surface/OpenPBR transmission_depth > 0
+  -> homogeneous interior medium (sigma_t = -ln(color)/depth, sigma_s = scatter/depth,
+  sigma_a = difference shifted to >= 0, g = scatter_anisotropy), and layer_vdf volumes
+  (absorption_vdf / anisotropic_vdf) in BSDF graphs. The material emits `MakeNamedMedium`
+  with its textures; shapes get `MediumInterface "<mat>_interior" ""` (only right when the
+  camera is outside). Tint (patch 13): standard_surface always, OpenPBR only without a
+  medium (Typhoon's rules); transmission_extra_roughness adds to the roughness.
+  Open: layered fixtures read ~1.08x Typhoon; sheen; thin-walled; honey; coat;
+  dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens
   wants it after everything else).
