@@ -1,0 +1,155 @@
+From 93a1c2e0a469852af09b6a4501842a27286fa8d2 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Mon, 23 Nov 2026 20:56:24 +0100
+Subject: [PATCH] Shadow/reflection terminator: lift ray origins onto the
+ smooth surface on coarse meshes (for hdPbrt)
+
+Triangle hits store Hanika 2021's lift (the hit point projected onto the
+vertex normals' tangent planes, barycentric mean). Volpath starts light
+sample shadow rays and BSDF-sampled reflection rays from the lifted point,
+blended in as the direction nears the facet's horizon (Typhoon's weight).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/cpu/integrators.cpp | 46 ++++++++++++++++++++++++++++++++++++
+ src/pbrt/interaction.h       |  3 +++
+ src/pbrt/shapes.h            | 17 +++++++++++++
+ src/pbrt/util/transform.cpp  |  2 ++
+ 4 files changed, 68 insertions(+)
+
+diff --git a/src/pbrt/cpu/integrators.cpp b/src/pbrt/cpu/integrators.cpp
+index 428addd..b44d40a 100644
+--- a/src/pbrt/cpu/integrators.cpp
++++ b/src/pbrt/cpu/integrators.cpp
+@@ -1004,6 +1004,32 @@ static bool HdPbrtBlocks(const Light &light, uint64_t mask) {
+     return link < 0 || ((mask >> link) & 1);
+ }
+ 
++// hdPbrt: shadow/reflection terminator on coarse smooth-shaded meshes. A ray
++// leaving near the facet's horizon in a direction the smooth normal allows is
++// blocked by neighboring facets (dark triangles at the terminator, blocky
++// patches in mirror reflections near silhouettes). Such rays start from the
++// smooth surface the vertex normals describe (Hanika 2021's lift), blended in
++// as the direction nears the facet's horizon, as Typhoon. Weight 0..1.
++static Float HdPbrtTerminatorWeight(const SurfaceInteraction &si, Vector3f wo, Vector3f wi) {
++    if (LengthSquared(si.hdpbrtShadowLift) == 0)
++        return 0;
++    const Vector3f ns(si.shading.n), ng(si.n);
++    if (Dot(wo, ns) <= 0 || Dot(wi, ns) <= 0)
++        return 0;
++    const Float cutoff = 0.1f;
++    const Float normalDot = Dot(ns, wi);
++    const Float facetDot = Dot(ng, wo) > 0 ? Dot(ng, wi) : -Dot(ng, wi);
++    return Clamp(normalDot < cutoff ? 2 - (facetDot + normalDot) / cutoff
++                                    : 1 - facetDot / cutoff,
++                 0, 1);
++}
++
++static Interaction HdPbrtLifted(const SurfaceInteraction &si, Float w) {
++    Interaction lifted = si;
++    lifted.pi = Point3fi(Point3f(si.p()) + w * si.hdpbrtShadowLift, si.pi.Error());
++    return lifted;
++}
++
+ // hdPbrt: the average of the rescaled path probabilities over the wavelengths
+ // that still carry the path. Once secondary wavelengths are terminated (a
+ // dispersive eta), only the hero's counts; averaging all four biased paths
+@@ -1283,6 +1309,18 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+         if (bs->IsTransmission())
+             etaScale *= Sqr(bs->eta);
+         ray = isect.SpawnRay(ray, bsdf, bs->wi, bs->flags, bs->eta);
++        // hdPbrt: reflection terminator (see HdPbrtTerminatorWeight).
++        if (bs->IsReflection()) {
++            const Float w = HdPbrtTerminatorWeight(isect, isect.wo, bs->wi);
++            if (w > 0) {
++                const Vector3f d = HdPbrtLifted(isect, w).SpawnRay(bs->wi).o - ray.o;
++                ray.o += d;
++                if (ray.hasDifferentials) {
++                    ray.rxOrigin += d;
++                    ray.ryOrigin += d;
++                }
++            }
++        }
+ 
+         // Account for attenuated subsurface scattering, if applicable
+         BSSRDF bssrdf = isect.GetBSSRDF(ray, lambda, camera, scratchBuffer);
+@@ -1428,6 +1466,14 @@ SampledSpectrum VolPathIntegrator::SampleLd(const Interaction &intr, const BSDF
+ 
+     // Declare path state variables for ray to light source
+     Ray lightRay = intr.SpawnRayTo(ls->pLight);
++    // hdPbrt: shadow terminator: start from the smooth surface (see
++    // HdPbrtTerminatorWeight).
++    if (bsdf) {
++        const SurfaceInteraction &si = intr.AsSurface();
++        const Float w = HdPbrtTerminatorWeight(si, wo, wi);
++        if (w > 0)
++            lightRay = HdPbrtLifted(si, w).SpawnRayTo(ls->pLight);
++    }
+     SampledSpectrum T_ray(1.f), r_l(1.f), r_u(1.f);
+     RNG rng(Hash(lightRay.o), Hash(lightRay.d));
+ 
+diff --git a/src/pbrt/interaction.h b/src/pbrt/interaction.h
+index 3cc82c3..93a2744 100644
+--- a/src/pbrt/interaction.h
++++ b/src/pbrt/interaction.h
+@@ -257,6 +257,9 @@ class SurfaceInteraction : public Interaction {
+         Normal3f dndu, dndv;
+     } shading;
+     int faceIndex = 0;
++    // hdPbrt: shadow-terminator lift (Hanika 2021) for smooth-shaded triangles:
++    // from the hit point to the smooth surface the vertex normals describe.
++    Vector3f hdpbrtShadowLift = Vector3f(0, 0, 0);
+     // hdPbrt: ids of the primitive (shape) and object instance that were hit.
+     int hdpbrtPrimId = -1, hdpbrtInstanceId = -1;
+     // hdPbrt: light-linking collections this surface belongs to (bit i =
+diff --git a/src/pbrt/shapes.h b/src/pbrt/shapes.h
+index 1b32b0e..8983e54 100644
+--- a/src/pbrt/shapes.h
++++ b/src/pbrt/shapes.h
+@@ -1012,6 +1012,23 @@ class Triangle {
+             isect.SetShadingGeometry(ns, ss, ts, dndu, dndv, true);
+         }
+ 
++        // hdPbrt: shadow-terminator lift. Project the hit point onto the tangent
++        // planes of the vertex normals (only where it lies below them) and take
++        // the barycentric mean (Hanika, "Hacking the shadow terminator", 2021).
++        if (mesh->n) {
++            const Point3f pv[3] = {p0, p1, p2};
++            const Float b[3] = {ti.b0, ti.b1, ti.b2};
++            Vector3f lift(0, 0, 0);
++            for (int i = 0; i < 3; ++i) {
++                if (LengthSquared(nv[i]) == 0)
++                    continue;
++                const Vector3f n = Normalize(Vector3f(nv[i]));
++                const Float d = Dot(pHit - pv[i], n);
++                if (d < 0)
++                    lift -= b[i] * d * n;
++            }
++            isect.hdpbrtShadowLift = lift;
++        }
+         return isect;
+     }
+ 
+diff --git a/src/pbrt/util/transform.cpp b/src/pbrt/util/transform.cpp
+index f2c8a9c..d1a4570 100644
+--- a/src/pbrt/util/transform.cpp
++++ b/src/pbrt/util/transform.cpp
+@@ -270,6 +270,7 @@ PBRT_CPU_GPU SurfaceInteraction Transform::operator()(const SurfaceInteraction &
+     ret.hdpbrtPrimId = si.hdpbrtPrimId;
+     ret.hdpbrtInstanceId = si.hdpbrtInstanceId;
+     ret.hdpbrtLinkMask = si.hdpbrtLinkMask;
++    ret.hdpbrtShadowLift = t(si.hdpbrtShadowLift);
+ 
+     return ret;
+ }
+@@ -381,6 +382,7 @@ PBRT_CPU_GPU SurfaceInteraction Transform::ApplyInverse(const SurfaceInteraction
+     ret.hdpbrtPrimId = si.hdpbrtPrimId;
+     ret.hdpbrtInstanceId = si.hdpbrtInstanceId;
+     ret.hdpbrtLinkMask = si.hdpbrtLinkMask;
++    ret.hdpbrtShadowLift = t(si.hdpbrtShadowLift);
+     return ret;
+ }
+ 
+-- 
+2.43.0
+

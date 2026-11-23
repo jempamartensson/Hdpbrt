@@ -374,6 +374,17 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   Open: thin-walled straight transmission in shadow rays;
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
+- Shadow/reflection terminator (done 2026-11-23, pbrt patch 26): on coarse smooth-shaded
+  meshes, rays leaving near a facet's horizon were blocked by neighboring facets (whole dark
+  polygons along the terminator; dark slivers in mirror reflections at silhouettes). Triangle
+  hits with vertex normals store Hanika 2021's lift (hit point projected onto the vertex
+  normals' tangent planes, barycentric mean; carried through instance transforms); volpath
+  starts shadow rays and BSDF-sampled reflection rays from p + w * lift, w = Typhoon's
+  facet-horizon weight (cutoff 0.1). Test: `tests/terminator_scene.usda` (12x6 sphere);
+  `docs/images/terminator.png` rows off / on / always-on. Materials unchanged (33/9/0).
+  Note: a DistantLight's unauthored angle is 0.53 deg and, without normalize, intensity is
+  the radiance in that disk (UsdLux default intensity 50000; Typhoon the same): an intensity
+  of a few is near black. Use normalize for sun-like values.
 - Velocity motion blur (done 2026-11-23): `sceneIndexPlugin.cpp` registers USD's
   `HdsiVelocityMotionResolvingSceneIndex` (phase 2, as hdPrman; plugInfo entry), which turns
   `velocities`/`accelerations` (and point-instancer velocities) into point samples using the
