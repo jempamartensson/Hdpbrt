@@ -321,7 +321,10 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   (F0 = base_color, F82 = specular_color); standard_surface: artistic IOR (Gulbrandsen
   2014) to eta/k, or F82-tint when base_color is textured. Other shaders keep pbrt's
   conductor. standard_surface feature_metalness RMSE 0.065 -> 0.044; still 32/10/0.
-  Open: OpenPBR specular_weight on the metal lobe; thin-film;
+  OpenPBR specular_weight on the metal lobe (patch 19, pbrt `metalscale`): weights the metal
+  BSDF and its edge color (specular_color * specular_weight), as MaterialX. No suite fixture
+  covers it: `tests/typhoon/materials_extra/open_pbr_metal` (4 fixtures, all match).
+  Open: thin-film;
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens

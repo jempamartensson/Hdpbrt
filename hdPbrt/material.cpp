@@ -580,6 +580,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             // keep pbrt's conductor.
             bool layeredMetal = false, metalF82 = false;
             GfVec3f metalBase(0.8f), metalEdge(1.f);
+            float metalScale = 1;
             // No specular lobe at all (specular weight or color 0, or ior 1,
             // i.e. no Fresnel reflection): a plain Lambertian "diffuse".
             bool noSpecular = false;
@@ -689,7 +690,10 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 thinWalled = _Float(*surf, "geometry_thin_walled", 0) > 0.5f;
                 layeredMetal = metalF82 = true;
                 metalBase = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base_weight", 1);
-                metalEdge = _Color(*surf, "specular_color", GfVec3f(1));
+                // MaterialX: the metal BSDF is weighted by specular_weight and
+                // its edge color is specular_color * specular_weight.
+                metalScale = std::max(specWeight, 0.f);
+                metalEdge = _Color(*surf, "specular_color", GfVec3f(1)) * std::min(metalScale, 1.f);
                 coatW = std::min(std::max(_Float(*surf, "coat_weight", 0), 0.f), 1.f);
                 if (coatW > 0) {
                     // OpenPBR spec: the coat roughens the specular below,
@@ -760,6 +764,8 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 if (specTint != GfVec3f(1.f))
                     other << " \"rgb speculartint\" " << HdPbrt_Rgb(_Clamp01(specTint));
                 other << " \"float metalweight\" " << std::min(metallic, 1.f);
+                if (std::fabs(metalScale - 1.f) > 1e-6f)
+                    other << " \"float metalscale\" " << metalScale;
                 if (metalF82 || !baseTex.empty()) {
                     // F0 = base color (its texture if any), F82 tint = edge.
                     if (!baseTex.empty())
