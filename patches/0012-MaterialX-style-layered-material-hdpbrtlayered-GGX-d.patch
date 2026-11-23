@@ -1,0 +1,501 @@
+From 120039420fa811bc9483e593f8c72c6db3908fd2 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Mon, 23 Nov 2026 06:48:51 +0100
+Subject: [PATCH 12/12] MaterialX-style layered material "hdpbrtlayered": GGX
+ dielectric specular over diffuse scaled by 1 - E_spec(wo) (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/base/bxdf.h       |   4 +-
+ src/pbrt/base/material.h   |   4 +-
+ src/pbrt/bxdfs.cpp         |  78 +++++++++++++++++
+ src/pbrt/bxdfs.h           | 170 +++++++++++++++++++++++++++++++++++++
+ src/pbrt/materials.cpp     |  42 +++++++++
+ src/pbrt/materials.h       |  72 ++++++++++++++++
+ src/pbrt/util/scattering.h |   4 +
+ 7 files changed, 372 insertions(+), 2 deletions(-)
+
+diff --git a/src/pbrt/base/bxdf.h b/src/pbrt/base/bxdf.h
+index e94b135..2a99ff3 100644
+--- a/src/pbrt/base/bxdf.h
++++ b/src/pbrt/base/bxdf.h
+@@ -161,12 +161,14 @@ class ConductorBxDF;
+ class NormalizedFresnelBxDF;
+ class CoatedDiffuseBxDF;
+ class CoatedConductorBxDF;
++class HdPbrtLayeredBxDF;
+ 
+ // BxDF Definition
+ class BxDF
+     : public TaggedPointer<DiffuseTransmissionBxDF, DiffuseBxDF, CoatedDiffuseBxDF,
+                            CoatedConductorBxDF, DielectricBxDF, ThinDielectricBxDF,
+-                           HairBxDF, MeasuredBxDF, ConductorBxDF, NormalizedFresnelBxDF> {
++                           HairBxDF, MeasuredBxDF, ConductorBxDF, NormalizedFresnelBxDF,
++                           HdPbrtLayeredBxDF> {
+   public:
+     // BxDF Interface
+     PBRT_CPU_GPU inline BxDFFlags Flags() const;
+diff --git a/src/pbrt/base/material.h b/src/pbrt/base/material.h
+index e78435a..baf0bf6 100644
+--- a/src/pbrt/base/material.h
++++ b/src/pbrt/base/material.h
+@@ -30,13 +30,15 @@ class MeasuredMaterial;
+ class SubsurfaceMaterial;
+ class ThinDielectricMaterial;
+ class MixMaterial;
++class HdPbrtLayeredMaterial;
+ 
+ // Material Definition
+ class Material
+     : public TaggedPointer<  // Material Types
+           CoatedDiffuseMaterial, CoatedConductorMaterial, ConductorMaterial,
+           DielectricMaterial, DiffuseMaterial, DiffuseTransmissionMaterial, HairMaterial,
+-          MeasuredMaterial, SubsurfaceMaterial, ThinDielectricMaterial, MixMaterial
++          MeasuredMaterial, SubsurfaceMaterial, ThinDielectricMaterial, MixMaterial,
++          HdPbrtLayeredMaterial
+ 
+           > {
+   public:
+diff --git a/src/pbrt/bxdfs.cpp b/src/pbrt/bxdfs.cpp
+index ce74b51..8a629ad 100644
+--- a/src/pbrt/bxdfs.cpp
++++ b/src/pbrt/bxdfs.cpp
+@@ -17,11 +17,13 @@
+ #include <pbrt/util/hash.h>
+ #include <pbrt/util/log.h>
+ #include <pbrt/util/math.h>
++#include <pbrt/util/parallel.h>
+ #include <pbrt/util/memory.h>
+ #include <pbrt/util/print.h>
+ #include <pbrt/util/sampling.h>
+ #include <pbrt/util/stats.h>
+ 
++#include <mutex>
+ #include <unordered_map>
+ 
+ namespace pbrt {
+@@ -1166,6 +1168,82 @@ std::string BxDF::ToString() const {
+     return DispatchCPU(toStr);
+ }
+ 
++// hdPbrt: GGX dielectric reflection albedo table and HdPbrtLayeredBxDF.
++namespace {
++constexpr int kAlbedoCos = 33, kAlbedoRough = 33, kAlbedoEta = 25;
++constexpr Float kAlbedoEtaMax = 4;
++float hdpbrtAlbedo[kAlbedoEta][kAlbedoRough][kAlbedoCos];
++std::once_flag hdpbrtAlbedoOnce;
++
++Float AlbedoEtaAt(int i) {
++    // Denser near eta 1, where the albedo changes fastest.
++    Float t = Float(i) / (kAlbedoEta - 1);
++    return 1 + (kAlbedoEtaMax - 1) * t * t;
++}
++}  // namespace
++
++void HdPbrtInitDielectricAlbedo() {
++    std::call_once(hdpbrtAlbedoOnce, [] {
++        constexpr int n = 48;  // n x n stratified VNDF samples per entry
++        ParallelFor(0, kAlbedoEta, [&](int64_t ie) {
++            Float eta = AlbedoEtaAt(ie);
++            for (int ir = 0; ir < kAlbedoRough; ++ir) {
++                Float r = Float(ir) / (kAlbedoRough - 1);
++                Float alpha = std::max<Float>(r * r, 1e-4f);
++                TrowbridgeReitzDistribution distrib(alpha, alpha);
++                for (int ic = 0; ic < kAlbedoCos; ++ic) {
++                    Float c = std::max<Float>(Float(ic) / (kAlbedoCos - 1), 1e-3f);
++                    if (eta == 1) {
++                        hdpbrtAlbedo[ie][ir][ic] = 0;
++                        continue;
++                    }
++                    if (distrib.EffectivelySmooth()) {
++                        hdpbrtAlbedo[ie][ir][ic] = FrDielectric(c, eta);
++                        continue;
++                    }
++                    Vector3f wo(SafeSqrt(1 - c * c), 0, c);
++                    double sum = 0;
++                    for (int a = 0; a < n; ++a)
++                        for (int b = 0; b < n; ++b) {
++                            Point2f u((a + 0.5f) / n, (b + 0.5f) / n);
++                            Vector3f wm = distrib.Sample_wm(wo, u);
++                            Vector3f wi = Reflect(wo, wm);
++                            if (wi.z <= 0)
++                                continue;
++                            // f cos / pdf for VNDF sampling = F G2 / G1(wo)
++                            sum += FrDielectric(AbsDot(wo, wm), eta) *
++                                   distrib.G(wo, wi) / distrib.G1(wo);
++                        }
++                    hdpbrtAlbedo[ie][ir][ic] = float(sum / (n * n));
++                }
++            }
++        });
++    });
++}
++
++PBRT_CPU_GPU Float HdPbrtDielectricAlbedo(Float cosTheta, Float alpha, Float eta) {
++    if (eta < 1)
++        eta = 1 / eta;
++    eta = Clamp(eta, 1, kAlbedoEtaMax);
++    Float fe = std::sqrt((eta - 1) / (kAlbedoEtaMax - 1)) * (kAlbedoEta - 1);
++    Float fr = Clamp(std::sqrt(std::max<Float>(alpha, 0)), 0, 1) * (kAlbedoRough - 1);
++    Float fc = Clamp(cosTheta, 0, 1) * (kAlbedoCos - 1);
++    int e0 = std::min(int(fe), kAlbedoEta - 2), r0 = std::min(int(fr), kAlbedoRough - 2),
++        c0 = std::min(int(fc), kAlbedoCos - 2);
++    Float te = fe - e0, tr = fr - r0, tc = fc - c0;
++    auto at = [&](int e, int r) {
++        return Lerp(tc, Float(hdpbrtAlbedo[e][r][c0]), Float(hdpbrtAlbedo[e][r][c0 + 1]));
++    };
++    return Lerp(te, Lerp(tr, at(e0, r0), at(e0, r0 + 1)),
++                Lerp(tr, at(e0 + 1, r0), at(e0 + 1, r0 + 1)));
++}
++
++std::string HdPbrtLayeredBxDF::ToString() const {
++    return StringPrintf("[ HdPbrtLayeredBxDF R: %s specTint: %s specWeight: %f eta: %f "
++                        "mfDistrib: %s ]",
++                        R, specTint, specWeight, eta, mfDistrib);
++}
++
+ template class LayeredBxDF<DielectricBxDF, DiffuseBxDF, true>;
+ template class LayeredBxDF<DielectricBxDF, ConductorBxDF, true>;
+ 
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index 1871f17..181c738 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -1131,6 +1131,176 @@ class NormalizedFresnelBxDF {
+     Float eta;
+ };
+ 
++// hdPbrt: directional albedo of a GGX dielectric reflection lobe (single
++// scattering, unit weight), tabulated over cos(theta_o), sqrt(alpha) and eta.
++// HdPbrtInitDielectricAlbedo() must run (on the CPU) before lookups.
++void HdPbrtInitDielectricAlbedo();
++PBRT_CPU_GPU Float HdPbrtDielectricAlbedo(Float cosTheta, Float alpha, Float eta);
++
++// HdPbrtLayeredBxDF Definition
++// MaterialX/OpenPBR-style layering of a dielectric specular lobe over a
++// diffuse base, as USD's reference renderer and MaterialX's shaders do it:
++//   f = w * tint * f_ggx(F_dielectric) + (1 - w * E_spec(cos theta_o)) * R / pi
++// E_spec is the albedo of the untinted specular lobe for the outgoing
++// direction, so energy that the coat reflects is taken from the base (not
++// reciprocal, as in MaterialX). Two-sided.
++class HdPbrtLayeredBxDF {
++  public:
++    HdPbrtLayeredBxDF() = default;
++    PBRT_CPU_GPU
++    HdPbrtLayeredBxDF(SampledSpectrum R, SampledSpectrum specTint, Float specWeight,
++                      Float eta, TrowbridgeReitzDistribution mfDistrib)
++        : R(R), specTint(specTint), specWeight(specWeight), eta(eta),
++          mfDistrib(mfDistrib) {}
++
++    PBRT_CPU_GPU
++    BxDFFlags Flags() const {
++        BxDFFlags flags = R ? BxDFFlags::DiffuseReflection : BxDFFlags::Unset;
++        if (HasSpec())
++            flags = flags | (mfDistrib.EffectivelySmooth() ? BxDFFlags::SpecularReflection
++                                                           : BxDFFlags::GlossyReflection);
++        return flags;
++    }
++
++    PBRT_CPU_GPU
++    SampledSpectrum f(Vector3f wo, Vector3f wi, TransportMode mode) const {
++        if (!SameHemisphere(wo, wi) || wo.z == 0)
++            return SampledSpectrum(0.f);
++        if (wo.z < 0) {
++            wo = -wo;
++            wi = -wi;
++        }
++        SampledSpectrum result = R * (Throughput(wo) * InvPi);
++        if (HasSpec() && !mfDistrib.EffectivelySmooth())
++            result += SpecF(wo, wi);
++        return result;
++    }
++
++    PBRT_CPU_GPU
++    pstd::optional<BSDFSample> Sample_f(
++        Vector3f wo, Float uc, Point2f u, TransportMode mode,
++        BxDFReflTransFlags sampleFlags = BxDFReflTransFlags::All) const {
++        if (!(sampleFlags & BxDFReflTransFlags::Reflection) || wo.z == 0)
++            return {};
++        bool flip = wo.z < 0;
++        if (flip)
++            wo = -wo;
++        Float pSpec = SpecProb(wo);
++        if (pSpec == 0 && !R)
++            return {};
++        pstd::optional<BSDFSample> bs;
++        if (uc < pSpec) {
++            if (mfDistrib.EffectivelySmooth()) {
++                Vector3f wi(-wo.x, -wo.y, wo.z);
++                SampledSpectrum f =
++                    specTint * (specWeight * FrDielectric(wo.z, eta) / AbsCosTheta(wi));
++                bs = BSDFSample(f, wi, pSpec, BxDFFlags::SpecularReflection);
++            } else {
++                Vector3f wm = mfDistrib.Sample_wm(wo, u);
++                Vector3f wi = Reflect(wo, wm);
++                if (wi.z <= 0)
++                    return {};
++                bs = BSDFSample(f(wo, wi, mode), wi, PDFUpper(wo, wi, pSpec),
++                                BxDFFlags::GlossyReflection);
++            }
++        } else {
++            Vector3f wi = SampleCosineHemisphere(u);
++            if (wi.z <= 0)
++                return {};
++            bs = BSDFSample(f(wo, wi, mode), wi, PDFUpper(wo, wi, pSpec),
++                            BxDFFlags::DiffuseReflection);
++        }
++        if (flip)
++            bs->wi = -bs->wi;
++        return bs;
++    }
++
++    PBRT_CPU_GPU
++    Float PDF(Vector3f wo, Vector3f wi, TransportMode mode,
++              BxDFReflTransFlags sampleFlags = BxDFReflTransFlags::All) const {
++        if (!(sampleFlags & BxDFReflTransFlags::Reflection) || !SameHemisphere(wo, wi) ||
++            wo.z == 0)
++            return 0;
++        if (wo.z < 0) {
++            wo = -wo;
++            wi = -wi;
++        }
++        return PDFUpper(wo, wi, SpecProb(wo));
++    }
++
++    PBRT_CPU_GPU
++    static constexpr const char *Name() { return "HdPbrtLayeredBxDF"; }
++
++    std::string ToString() const;
++
++    PBRT_CPU_GPU
++    void Regularize() { mfDistrib.Regularize(); }
++
++  private:
++    PBRT_CPU_GPU
++    bool HasSpec() const { return specWeight > 0 && eta != 1 && bool(specTint); }
++
++    // Specular albedo for wo (upper hemisphere), untinted, unweighted.
++    PBRT_CPU_GPU
++    Float SpecAlbedo(Vector3f wo) const {
++        if (mfDistrib.EffectivelySmooth())
++            return FrDielectric(wo.z, eta);
++        return HdPbrtDielectricAlbedo(wo.z, mfDistrib.MeanAlpha(), eta);
++    }
++
++    PBRT_CPU_GPU
++    Float Throughput(Vector3f wo) const {
++        if (specWeight <= 0 || eta == 1)
++            return 1;
++        return Clamp(1 - specWeight * SpecAlbedo(wo), 0, 1);
++    }
++
++    // Probability of sampling the specular lobe.
++    PBRT_CPU_GPU
++    Float SpecProb(Vector3f wo) const {
++        if (!HasSpec())
++            return 0;
++        Float es = specWeight * SpecAlbedo(wo) * specTint.Average();
++        Float ed = Throughput(wo) * R.Average();
++        if (es + ed <= 0)
++            return 0;
++        // Keep both lobes sampled now and then.
++        return Clamp(es / (es + ed), 0.05f, ed > 0 ? 0.95f : 1.f);
++    }
++
++    PBRT_CPU_GPU
++    SampledSpectrum SpecF(Vector3f wo, Vector3f wi) const {
++        Float cosTheta_o = AbsCosTheta(wo), cosTheta_i = AbsCosTheta(wi);
++        if (cosTheta_i == 0 || cosTheta_o == 0)
++            return SampledSpectrum(0.f);
++        Vector3f wm = wi + wo;
++        if (LengthSquared(wm) == 0)
++            return SampledSpectrum(0.f);
++        wm = Normalize(wm);
++        Float F = FrDielectric(AbsDot(wo, wm), eta);
++        return specTint * (specWeight * mfDistrib.D(wm) * mfDistrib.G(wo, wi) * F /
++                           (4 * cosTheta_i * cosTheta_o));
++    }
++
++    // PDF for wo, wi in the upper hemisphere (non-delta lobes only).
++    PBRT_CPU_GPU
++    Float PDFUpper(Vector3f wo, Vector3f wi, Float pSpec) const {
++        if (wi.z <= 0)
++            return 0;
++        Float pdf = (1 - pSpec) * CosineHemispherePDF(wi.z);
++        if (pSpec > 0 && !mfDistrib.EffectivelySmooth()) {
++            Vector3f wm = Normalize(wo + wi);
++            pdf += pSpec * mfDistrib.PDF(wo, wm) / (4 * AbsDot(wo, wm));
++        }
++        return pdf;
++    }
++
++    SampledSpectrum R, specTint;
++    Float specWeight;
++    Float eta;
++    TrowbridgeReitzDistribution mfDistrib;
++};
++
+ PBRT_CPU_GPU inline SampledSpectrum BxDF::f(Vector3f wo, Vector3f wi, TransportMode mode) const {
+     auto f = [&](auto ptr) -> SampledSpectrum { return ptr->f(wo, wi, mode); };
+     return Dispatch(f);
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index 450b982..095bb83 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -628,6 +628,46 @@ std::string Material::ToString() const {
+     return DispatchCPU(toStr);
+ }
+ 
++// HdPbrtLayeredMaterial Method Definitions
++std::string HdPbrtLayeredMaterial::ToString() const {
++    return StringPrintf("[ HdPbrtLayeredMaterial reflectance: %s specTint: %s "
++                        "specWeight: %s uRoughness: %s vRoughness: %s eta: %f "
++                        "remapRoughness: %s ]",
++                        reflectance, specTint, specWeight, uRoughness, vRoughness, eta,
++                        remapRoughness);
++}
++
++HdPbrtLayeredMaterial *HdPbrtLayeredMaterial::Create(
++    const TextureParameterDictionary &parameters, Image *normalMap, const FileLoc *loc,
++    Allocator alloc) {
++    HdPbrtInitDielectricAlbedo();
++    SpectrumTexture reflectance = parameters.GetSpectrumTexture(
++        "reflectance", nullptr, SpectrumType::Albedo, alloc);
++    if (!reflectance)
++        reflectance = alloc.new_object<SpectrumConstantTexture>(
++            alloc.new_object<ConstantSpectrum>(0.5f));
++    SpectrumTexture specTint = parameters.GetSpectrumTexture(
++        "speculartint", nullptr, SpectrumType::Albedo, alloc);
++    if (!specTint)
++        specTint = alloc.new_object<SpectrumConstantTexture>(
++            alloc.new_object<ConstantSpectrum>(1.f));
++    FloatTexture specWeight = parameters.GetFloatTexture("specularweight", 1.f, alloc);
++    FloatTexture uRoughness = parameters.GetFloatTextureOrNull("uroughness", alloc);
++    FloatTexture vRoughness = parameters.GetFloatTextureOrNull("vroughness", alloc);
++    if (!uRoughness)
++        uRoughness = parameters.GetFloatTexture("roughness", 0.f, alloc);
++    if (!vRoughness)
++        vRoughness = parameters.GetFloatTexture("roughness", 0.f, alloc);
++    Float eta = parameters.GetOneFloat("eta", 1.5f);
++    if (eta <= 0)
++        eta = 1;
++    FloatTexture displacement = parameters.GetFloatTextureOrNull("displacement", alloc);
++    bool remapRoughness = parameters.GetOneBool("remaproughness", true);
++    return alloc.new_object<HdPbrtLayeredMaterial>(reflectance, specTint, specWeight,
++                                                   uRoughness, vRoughness, eta,
++                                                   displacement, normalMap, remapRoughness);
++}
++
+ STAT_COUNTER("Scene/Materials", nMaterialsCreated);
+ 
+ Material Material::Create(const std::string &name,
+@@ -645,6 +685,8 @@ Material Material::Create(const std::string &name,
+         material = DiffuseMaterial::Create(parameters, normalMap, loc, alloc);
+     else if (name == "coateddiffuse")
+         material = CoatedDiffuseMaterial::Create(parameters, normalMap, loc, alloc);
++    else if (name == "hdpbrtlayered")
++        material = HdPbrtLayeredMaterial::Create(parameters, normalMap, loc, alloc);
+     else if (name == "coatedconductor")
+         material = CoatedConductorMaterial::Create(parameters, normalMap, loc, alloc);
+     else if (name == "diffusetransmission")
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index 5a86cf1..300291b 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -615,6 +615,78 @@ class CoatedDiffuseMaterial {
+     int maxDepth, nSamples;
+ };
+ 
++// HdPbrtLayeredMaterial Definition
++// hdPbrt: a dielectric specular layer over a diffuse base, MaterialX style
++// (see HdPbrtLayeredBxDF).
++class HdPbrtLayeredMaterial {
++  public:
++    using BxDF = HdPbrtLayeredBxDF;
++    using BSSRDF = void;
++
++    HdPbrtLayeredMaterial(SpectrumTexture reflectance, SpectrumTexture specTint,
++                          FloatTexture specWeight, FloatTexture uRoughness,
++                          FloatTexture vRoughness, Float eta, FloatTexture displacement,
++                          Image *normalMap, bool remapRoughness)
++        : displacement(displacement),
++          normalMap(normalMap),
++          reflectance(reflectance),
++          specTint(specTint),
++          specWeight(specWeight),
++          uRoughness(uRoughness),
++          vRoughness(vRoughness),
++          eta(eta),
++          remapRoughness(remapRoughness) {}
++
++    static const char *Name() { return "HdPbrtLayeredMaterial"; }
++
++    template <typename TextureEvaluator>
++    PBRT_CPU_GPU bool CanEvaluateTextures(TextureEvaluator texEval) const {
++        return texEval.CanEvaluate({uRoughness, vRoughness, specWeight},
++                                   {reflectance, specTint});
++    }
++
++    template <typename TextureEvaluator>
++    PBRT_CPU_GPU HdPbrtLayeredBxDF GetBxDF(TextureEvaluator texEval,
++                                           const MaterialEvalContext &ctx,
++                                           SampledWavelengths &lambda) const {
++        SampledSpectrum r = Clamp(texEval(reflectance, ctx, lambda), 0, 1);
++        SampledSpectrum tint = Clamp(texEval(specTint, ctx, lambda), 0, 1);
++        Float w = Clamp(texEval(specWeight, ctx), 0, 1);
++        Float urough = texEval(uRoughness, ctx), vrough = texEval(vRoughness, ctx);
++        if (remapRoughness) {
++            urough = TrowbridgeReitzDistribution::RoughnessToAlpha(urough);
++            vrough = TrowbridgeReitzDistribution::RoughnessToAlpha(vrough);
++        }
++        return HdPbrtLayeredBxDF(r, tint, w, eta,
++                                 TrowbridgeReitzDistribution(urough, vrough));
++    }
++
++    PBRT_CPU_GPU
++    FloatTexture GetDisplacement() const { return displacement; }
++    PBRT_CPU_GPU
++    const Image *GetNormalMap() const { return normalMap; }
++
++    static HdPbrtLayeredMaterial *Create(const TextureParameterDictionary &parameters,
++                                         Image *normalMap, const FileLoc *loc,
++                                         Allocator alloc);
++
++    template <typename TextureEvaluator>
++    PBRT_CPU_GPU void GetBSSRDF(TextureEvaluator texEval, const MaterialEvalContext &ctx,
++                                SampledWavelengths &lambda) const {}
++
++    PBRT_CPU_GPU static constexpr bool HasSubsurfaceScattering() { return false; }
++
++    std::string ToString() const;
++
++  private:
++    FloatTexture displacement;
++    Image *normalMap;
++    SpectrumTexture reflectance, specTint;
++    FloatTexture specWeight, uRoughness, vRoughness;
++    Float eta;
++    bool remapRoughness;
++};
++
+ // CoatedConductorMaterial Definition
+ class CoatedConductorMaterial {
+   public:
+diff --git a/src/pbrt/util/scattering.h b/src/pbrt/util/scattering.h
+index d5d6c63..2ac93f6 100644
+--- a/src/pbrt/util/scattering.h
++++ b/src/pbrt/util/scattering.h
+@@ -136,6 +136,10 @@ class TrowbridgeReitzDistribution {
+     PBRT_CPU_GPU
+     bool EffectivelySmooth() const { return std::max(alpha_x, alpha_y) < 1e-3f; }
+ 
++    // hdPbrt: the mean alpha (for albedo tables).
++    PBRT_CPU_GPU
++    Float MeanAlpha() const { return 0.5f * (alpha_x + alpha_y); }
++
+     PBRT_CPU_GPU
+     Float G1(Vector3f w) const { return 1 / (1 + Lambda(w)); }
+ 
+-- 
+2.43.0
+

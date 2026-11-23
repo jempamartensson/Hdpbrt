@@ -5,7 +5,8 @@
 //   metallic >= 0.5          -> conductor (reflectance = base color)
 //   transmission >= 0.5      -> dielectric (eta = ior)
 //   no specular lobe         -> diffuse (specular weight/color 0, or ior 1)
-//   otherwise                -> coateddiffuse (reflectance = base color)
+//   otherwise                -> hdpbrtlayered (pbrt patch 12: GGX dielectric
+//                               specular over diffuse, MaterialX-style layering)
 // Base color and roughness can come from image textures (UsdUVTexture,
 // MaterialX image/tiledimage). Opacity becomes the shape's alpha (cut-out).
 #include "hdPbrt.h"
@@ -264,6 +265,8 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             // Gather the generic inputs for the supported surface types.
             GfVec3f base(0.18f), emission(0.f);
             float metallic = 0, rough = 0.5f, transmission = 0, ior = 1.5f, opacity = 1;
+            float specWeight = 1;
+            GfVec3f specTint(1.f);
             // No specular lobe at all (specular weight or color 0, or ior 1,
             // i.e. no Fresnel reflection): a plain Lambertian "diffuse".
             bool noSpecular = false;
@@ -280,6 +283,15 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 noSpecular = (specWorkflow &&
                               _Color(*surf, "specularColor", GfVec3f(0)) == GfVec3f(0)) ||
                              (!specWorkflow && std::fabs(ior - 1.f) < 1e-4f);
+                if (specWorkflow && !noSpecular) {
+                    // Specular workflow: specularColor is F0. Use the eta with
+                    // that mean F0 and keep the hue as a tint.
+                    GfVec3f f0 = _Color(*surf, "specularColor", GfVec3f(0));
+                    float m = std::min(std::max((f0[0] + f0[1] + f0[2]) / 3.f, 1e-4f), 0.99f);
+                    float s = std::sqrt(m);
+                    ior = (1 + s) / (1 - s);
+                    specTint = f0 / m;
+                }
             } else if (TfStringStartsWith(type, "ND_standard_surface")) {
                 base = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base", 1);
                 metallic = _Float(*surf, "metalness", 0);
@@ -299,7 +311,9 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                             baseIn = "subsurface_color";
                     }
                 }
-                noSpecular = _Float(*surf, "specular", 1) <= 0.f && _Float(*surf, "coat", 0) <= 0.f;
+                specWeight = _Float(*surf, "specular", 1);
+                specTint = _Color(*surf, "specular_color", GfVec3f(1));
+                noSpecular = specWeight <= 0.f && _Float(*surf, "coat", 0) <= 0.f;
             } else if (TfStringStartsWith(type, "ND_open_pbr_surface")) {
                 base = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base_weight", 1);
                 metallic = _Float(*surf, "base_metalness", 0);
@@ -320,8 +334,9 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                             baseIn = "subsurface_color";
                     }
                 }
-                noSpecular = _Float(*surf, "specular_weight", 1) <= 0.f &&
-                             _Float(*surf, "coat_weight", 0) <= 0.f;
+                specWeight = _Float(*surf, "specular_weight", 1);
+                specTint = _Color(*surf, "specular_color", GfVec3f(1));
+                noSpecular = specWeight <= 0.f && _Float(*surf, "coat_weight", 0) <= 0.f;
             } else {
                 // Unknown shader: look for common names, else grey diffuse.
                 base = _Color(*surf, "base_color", _Color(*surf, "diffuseColor", GfVec3f(0.5f)));
@@ -365,8 +380,17 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             } else if (noSpecular) {
                 d.type = "diffuse";
             } else {
-                d.type = "coateddiffuse";
+                d.type = "hdpbrtlayered";
                 roughParam("roughness");
+                other << " \"float eta\" " << ior;
+                if (std::fabs(specWeight - 1.f) > 1e-6f)
+                    other << " \"float specularweight\" " << std::min(std::max(specWeight, 0.f), 1.f);
+                if (specTint != GfVec3f(1.f)) {
+                    GfVec3f t = specTint;
+                    for (int i = 0; i < 3; ++i)
+                        t[i] = std::min(std::max(t[i], 0.f), 1.f);
+                    other << " \"rgb speculartint\" " << HdPbrt_Rgb(t);
+                }
             }
             d.otherParams = other.str();
             result = d;

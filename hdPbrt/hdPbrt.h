@@ -158,7 +158,7 @@ public:
 
 // ---------------------------------------------------------------------------
 // Material: UsdPreviewSurface / MaterialX standard_surface / OpenPBR mapped
-// to pbrt's diffuse, coateddiffuse, conductor and dielectric materials.
+// to pbrt's diffuse, hdpbrtlayered, conductor and dielectric materials.
 struct HdPbrtMaterialDesc {
     std::string type = "coateddiffuse";
     GfVec3f baseColor{0.18f, 0.18f, 0.18f};

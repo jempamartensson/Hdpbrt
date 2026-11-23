@@ -11,8 +11,9 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (11 commits, the same as `patches/`;
-    regenerate with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o patches`).
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (12 commits, the same as `patches/`;
+    regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
+    a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
     the Blender flavor.
   - `build/pbrt`, `build/hdpbrt-houdini`, `build/hdpbrt-blender`: build dirs.
@@ -70,6 +71,14 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 11. Display channel buffers include the channel name in their size. Patch 3's "instanceId"
    (10 characters) overflowed pbrt's `title.size() + 32` by 2 bytes: random malloc aborts
    (status 134) depending on the temp path length. Fixed 2026-11-22.
+12. Material `"hdpbrtlayered"` (`HdPbrtLayeredMaterial` / `HdPbrtLayeredBxDF`): MaterialX-style
+   layering of a GGX dielectric specular lobe over Lambert, as Typhoon and MaterialX do it:
+   f = w * tint * f_ggx(FrDielectric) + (1 - w * E_spec(cos theta_o)) * R / pi. E_spec is the
+   untinted single-scatter albedo, tabulated at material creation (`HdPbrtInitDielectricAlbedo`,
+   33 cos x 33 sqrt(alpha) x 25 eta, numerically integrated: no Typhoon/USD LUTs). Not
+   reciprocal (view-direction throughput, like MaterialX). Params: `reflectance`, `roughness`
+   (`remaproughness`), `float eta`, `specularweight`, `speculartint`. Two-sided. White furnace:
+   exactly 1 at every roughness (pbrt's coateddiffuse: 0.44-0.87, why it looked dark).
 
 ## Done in the 2026-11-22 session
 
@@ -238,12 +247,15 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   Typhoon to 4 decimals. render_hdpbrt.py reuses the previous image when a frame changes
   nothing (hdPbrt doesn't re-render then).
 - Materials vs Typhoon (2026-11-22): `tests/typhoon/run_materials.sh` renders clean Typhoon
-  references (clamps off, caustics on) and compares; `MATERIALS_RESULTS.txt` 4 match /
-  15 close / 23 differ. Fixed so far: subsurface weight blends toward subsurface_color,
-  MaterialX tiledimage uvtiling (pbrt uscale/vscale), MaterialX images default to linear
-  (only an authored sRGB colorspace decodes). Open, in order of payoff: (1) a MaterialX-style
-  layered BSDF (dielectric spec + diffuse scaled by 1 - E_spec, MaterialX's analytic GGX
-  albedo fit; Typhoon: energyCompensation.cpp) instead of coateddiffuse, fixes ~12 fixtures;
+  references (clamps off, caustics on) and compares; `MATERIALS_RESULTS.txt` 12 match /
+  9 close / 21 differ (was 4 / 15 / 23 before patch 12). Fixed so far: subsurface weight blends
+  toward subsurface_color, MaterialX tiledimage uvtiling (pbrt uscale/vscale), MaterialX images
+  default to linear (only an authored sRGB colorspace decodes), (1) the layered BSDF
+  (`hdpbrtlayered`, patch 12; 2026-11-23). Layered fixtures now read ~1.08x Typhoon (were
+  ~0.91x): Typhoon's default throughput is BSDL's ReflFront LUT, maybe including multiple
+  scattering, and its diffuse may differ. open_pbr feature_coat dropped to close (coat isn't
+  translated; coateddiffuse's darkness had hidden that). Typhoon refs and renders are kept in
+  `~/dev/pbrt_hydra/typhoon/materials_work` (cached; delete `ref/` to re-render). Open:
   (2) mapping MaterialX BSDF-node graphs (pbr/ fixtures); (3) transmission depth/color as an
   interior medium; (4) fuzz/sheen, thin-walled, dispersion.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
