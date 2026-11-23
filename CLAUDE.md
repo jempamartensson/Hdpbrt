@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (14 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (15 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -87,6 +87,11 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    light: in the shader-ball box they reached the grey backplanes behind the rect lights,
    +15-19% light per bounce from bounce 2 on, ~1.07x overall. Shadow rays still pass, and
    camera rays still pass camera-hidden lights.
+15. `hdpbrtlayered` layers: `sheenweight`/`sheencolor`/`sheenroughness` (Charlie D x Ashikhmin
+   V, alpha = roughness, as Typhoon for both pbrlib sheen modes; albedo tabulated like
+   E_spec) under the specular (standard_surface sheen) or on top (`bool sheenontop`: OpenPBR
+   fuzz, pbrlib sheen_bsdf); `transmittance`: straight eta-1 transmission base (thin walls).
+   Each layer scales those below by 1 - w * E(wo). Furnace: 1.000 for all combinations.
 
 ## Done in the 2026-11-22 session
 
@@ -255,8 +260,9 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   Typhoon to 4 decimals. render_hdpbrt.py reuses the previous image when a frame changes
   nothing (hdPbrt doesn't re-render then).
 - Materials vs Typhoon (2026-11-22): `tests/typhoon/run_materials.sh` renders clean Typhoon
-  references (clamps off, caustics on) and compares; `MATERIALS_RESULTS.txt` 27 match /
-  11 close / 4 differ, median ratio 1.03 (4 / 15 / 23 before patch 12; 12 / 9 / 21 after it;
+  references (clamps off, caustics on) and compares; `MATERIALS_RESULTS.txt` 30 match /
+  11 close / 1 differ (honey), median ratio 1.03; sheen/thin walls (patch 15) took it from
+  27 / 11 / 4 (4 / 15 / 23 before patch 12; 12 / 9 / 21 after it;
   18 / 20 / 4 after the BSDF graphs and media; patch 14 took the median from 1.08). Still differ:
   open_pbr honey, pbr sheen_bsdf(_zeltner), standard_surface input_thin_walled. Fixed so far: subsurface weight blends
   toward subsurface_color, MaterialX tiledimage uvtiling (pbrt uscale/vscale), MaterialX images
@@ -285,7 +291,11 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   Typhoon quirk: it ends paths at geometry with no material bound (the backplanes), where
   we use displayColor diffuse; not copied. Bisect such gaps per bounce
   (`ty:maxBounces` b vs `pbrt:maxDepth` b+1).
-  Open: sheen; thin-walled; honey; coat;
+  Thin walls: transmission passes straight through under the specular layer (Typhoon:
+  ior 1 transmission), base takes 1 - transmission; standard_surface `thin_walled`, OpenPBR
+  `geometry_thin_walled`. pbrt shadow rays still stop at thin walls (Typhoon lets them
+  through), so light behind a thin shell arrives only by path continuation.
+  Open: honey; coat;
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens

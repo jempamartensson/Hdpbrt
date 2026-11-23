@@ -83,6 +83,7 @@ float _Float(const HdMaterialNode2 &n, const char *name, float def)
     if (v.IsHolding<float>()) return v.UncheckedGet<float>();
     if (v.IsHolding<double>()) return (float)v.UncheckedGet<double>();
     if (v.IsHolding<int>()) return (float)v.UncheckedGet<int>();
+    if (v.IsHolding<bool>()) return v.UncheckedGet<bool>() ? 1.f : 0.f;
     if (v.IsHolding<GfVec3f>()) {
         GfVec3f c = v.UncheckedGet<GfVec3f>();
         return (c[0] + c[1] + c[2]) / 3.f;
@@ -283,7 +284,7 @@ struct _MtlxMapper {
 
     static bool IsDiffuse(const HdMaterialNode2 *n) {
         return _Is(n, "ND_oren_nayar_diffuse_bsdf") || _Is(n, "ND_burley_diffuse_bsdf") ||
-               _Is(n, "ND_subsurface_bsdf") || _Is(n, "ND_sheen_bsdf");
+               _Is(n, "ND_subsurface_bsdf");
     }
 
     static bool IsDielectric(const HdMaterialNode2 *n, bool *reflects, bool *transmits) {
@@ -303,8 +304,7 @@ struct _MtlxMapper {
 
     // Diffuse-like base color (color * weight); a texture on "color" wins.
     void DiffuseBase(const HdMaterialNode2 &n, HdPbrtMaterialDesc &d) {
-        const GfVec3f def = _Is(&n, "ND_sheen_bsdf") ? GfVec3f(1.f) : GfVec3f(0.18f);
-        d.baseColor = _Color(n, "color", def) * _Float(n, "weight", 1);
+        d.baseColor = _Color(n, "color", GfVec3f(0.18f)) * _Float(n, "weight", 1);
         bool fromPrimvar = false;
         d.baseColorTexture = b.Texture(n, "color", true, &fromPrimvar);
         d.baseColorFromPrimvar = fromPrimvar;
@@ -327,6 +327,25 @@ struct _MtlxMapper {
         GfVec3f tint = _Clamp01(_Color(spec, "tint", GfVec3f(1)));
         if (tint != GfVec3f(1))
             os << " \"rgb speculartint\" " << HdPbrt_Rgb(tint);
+        d.otherParams = os.str();
+    }
+
+    // Sheen over a diffuse base (or over nothing): hdpbrtlayered without
+    // specular. pbrlib's sheen roughness is the Charlie alpha.
+    void Sheen(const HdMaterialNode2 &sheen, const HdMaterialNode2 *base,
+               HdPbrtMaterialDesc &d) {
+        std::ostringstream os;
+        d.type = "hdpbrtlayered";
+        if (base)
+            DiffuseBase(*base, d);
+        else
+            d.baseColor = GfVec3f(0);
+        os << " \"float specularweight\" 0 \"float sheenweight\" "
+           << std::min(std::max(_Float(sheen, "weight", 1), 0.f), 1.f)
+           << " \"rgb sheencolor\" " << HdPbrt_Rgb(_Clamp01(_Color(sheen, "color", GfVec3f(1))))
+           << " \"float sheenroughness\" "
+           << std::min(std::max(_Float(sheen, "roughness", 0.3f), 0.f), 1.f)
+           << " \"bool sheenontop\" true";
         d.otherParams = os.str();
     }
 
@@ -369,8 +388,10 @@ struct _MtlxMapper {
                 } else {
                     Map(base, d);
                 }
-            } else if (_Is(top, "ND_sheen_bsdf") && base) {
-                Map(base, d);  // sheen not translated yet
+            } else if (_Is(top, "ND_sheen_bsdf") && (!base || IsDiffuse(base))) {
+                Sheen(*top, base, d);
+            } else if (_Is(top, "ND_sheen_bsdf")) {
+                Map(base, d);  // sheen over anything else: not translated
             } else {
                 Map(top ? top : base, d);
             }
@@ -382,6 +403,8 @@ struct _MtlxMapper {
         } else if (_Is(n, "ND_add_bsdf")) {
             const HdMaterialNode2 *a = b.net.Upstream(*n, TfToken("in1"));
             Map(a ? a : b.net.Upstream(*n, TfToken("in2")), d);
+        } else if (_Is(n, "ND_sheen_bsdf")) {
+            Sheen(*n, nullptr, d);
         } else if (IsDiffuse(n)) {
             d.type = "diffuse";
             DiffuseBase(*n, d);
@@ -521,6 +544,11 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             GfVec3f transColor(1.f), transScatter(0.f);
             float transDepth = 0, transAniso = 0, transExtraRough = 0;
             bool tintWithMedium = true;  // standard_surface tints the BTDF too
+            // Sheen (standard_surface sheen: under the specular layer; OpenPBR
+            // fuzz: on top) and thin walls (straight transmission).
+            float sheenW = 0, sheenRough = 0.3f;
+            GfVec3f sheenColor(1.f);
+            bool sheenOnTop = false, thinWalled = false;
             // No specular lobe at all (specular weight or color 0, or ior 1,
             // i.e. no Fresnel reflection): a plain Lambertian "diffuse".
             bool noSpecular = false;
@@ -572,6 +600,10 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 transScatter = _Color(*surf, "transmission_scatter", GfVec3f(0));
                 transAniso = _Float(*surf, "transmission_scatter_anisotropy", 0);
                 transExtraRough = _Float(*surf, "transmission_extra_roughness", 0);
+                sheenW = _Float(*surf, "sheen", 0);
+                sheenColor = _Color(*surf, "sheen_color", GfVec3f(1));
+                sheenRough = _Float(*surf, "sheen_roughness", 0.3f);
+                thinWalled = _Float(*surf, "thin_walled", 0) > 0.5f;
                 noSpecular = specWeight <= 0.f && _Float(*surf, "coat", 0) <= 0.f;
             } else if (TfStringStartsWith(type, "ND_open_pbr_surface")) {
                 base = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base_weight", 1);
@@ -600,6 +632,11 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 transScatter = _Color(*surf, "transmission_scatter", GfVec3f(0));
                 transAniso = _Float(*surf, "transmission_scatter_anisotropy", 0);
                 tintWithMedium = false;  // OpenPBR: the medium carries the color
+                sheenW = _Float(*surf, "fuzz_weight", 0);
+                sheenColor = _Color(*surf, "fuzz_color", GfVec3f(1));
+                sheenRough = _Float(*surf, "fuzz_roughness", 0.5f);
+                sheenOnTop = true;
+                thinWalled = _Float(*surf, "geometry_thin_walled", 0) > 0.5f;
                 noSpecular = specWeight <= 0.f && _Float(*surf, "coat_weight", 0) <= 0.f;
             } else {
                 // Unknown shader: look for common names, else grey diffuse.
@@ -637,7 +674,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             if (metallic >= 0.5f) {
                 d.type = "conductor";
                 roughParam("roughness");
-            } else if (transmission >= 0.5f) {
+            } else if (transmission >= 0.5f && !thinWalled) {
                 d.type = "dielectric";
                 other << " \"float eta\" " << ior;
                 rough = std::min(std::max(rough + transExtraRough, 0.f), 1.f);
@@ -667,12 +704,28 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 }
                 if ((!medium || tintWithMedium) && transColor != GfVec3f(1.f))
                     other << " \"rgb transmissiontint\" " << HdPbrt_Rgb(_Clamp01(transColor));
-            } else if (noSpecular) {
+            } else if (noSpecular && sheenW <= 0 && !(thinWalled && transmission > 0)) {
                 d.type = "diffuse";
             } else {
                 d.type = "hdpbrtlayered";
                 roughParam("roughness");
                 other << " \"float eta\" " << ior;
+                if (noSpecular)
+                    specWeight = 0;
+                if (sheenW > 0) {
+                    other << " \"float sheenweight\" " << std::min(sheenW, 1.f)
+                          << " \"rgb sheencolor\" " << HdPbrt_Rgb(_Clamp01(sheenColor))
+                          << " \"float sheenroughness\" " << std::min(std::max(sheenRough, 0.f), 1.f);
+                    if (sheenOnTop)
+                        other << " \"bool sheenontop\" true";
+                }
+                // Thin wall: transmission passes straight through (eta 1),
+                // under the specular layer; the diffuse base takes the rest.
+                if (thinWalled && transmission > 0) {
+                    const float t = std::min(transmission, 1.f);
+                    d.baseColor *= 1 - t;
+                    other << " \"rgb transmittance\" " << HdPbrt_Rgb(_Clamp01(transColor * t));
+                }
                 if (std::fabs(specWeight - 1.f) > 1e-6f)
                     other << " \"float specularweight\" " << std::min(std::max(specWeight, 0.f), 1.f);
                 if (specTint != GfVec3f(1.f)) {
