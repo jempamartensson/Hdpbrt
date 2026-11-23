@@ -1,0 +1,101 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    metersPerUnit = 1
+    renderSettingsPrimPath = "/Render/RenderSettings"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "camera"
+    {
+        float focalLength = 50
+        float horizontalAperture = 24
+        float verticalAperture = 24
+        double3 xformOp:translate = (0, 0, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "dome"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1
+    }
+
+    def Sphere "ball" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 1
+        rel material:binding = </World/Looks/f_layer_r02>
+    }
+
+    def Scope "Looks"
+    {
+        def Material "f_layer_r02"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/f_layer_r02/surface.outputs:out>
+            token outputs:surface.connect = </World/Looks/f_layer_r02/surface.outputs:out>
+
+            def Shader "spec"
+            {
+                uniform token info:id = "ND_dielectric_bsdf"
+                string inputs:scatter_mode = "R"
+                float2 inputs:roughness = (0.2, 0.2)
+                token outputs:out
+            }
+
+            def Shader "trans"
+            {
+                uniform token info:id = "ND_dielectric_bsdf"
+                string inputs:scatter_mode = "T"
+                float2 inputs:roughness = (0.2, 0.2)
+                token outputs:out
+            }
+
+            def Shader "node_under_test"
+            {
+                uniform token info:id = "ND_layer_bsdf"
+                token inputs:top.connect = </World/Looks/f_layer_r02/spec.outputs:out>
+                token inputs:base.connect = </World/Looks/f_layer_r02/trans.outputs:out>
+                token outputs:out
+            }
+
+            def Shader "surface"
+            {
+                uniform token info:id = "ND_surface"
+                token inputs:bsdf.connect = </World/Looks/f_layer_r02/node_under_test.outputs:out>
+                token outputs:out
+            }
+        }
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "RenderSettings" (
+        prepend apiSchemas = ["TyphoonRenderSettingsAPI"]
+    )
+    {
+        rel camera = </World/camera>
+        rel products = [</Render/Product>]
+        uniform int2 resolution = (64, 64)
+        uniform int ty:convergedSamplesPerPixel = 16
+    }
+
+    def RenderProduct "Product"
+    {
+        rel camera = </World/camera>
+        rel orderedVars = [</Render/Product/Var>]
+        token productType = "raster"
+        token productName = "furnace/f_layer_r02.exr"
+
+        def RenderVar "Var"
+        {
+            token dataType = "color4f"
+            string sourceName = "color"
+            token sourceType = "raw"
+        }
+    }
+}

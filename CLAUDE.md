@@ -330,7 +330,14 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   base_diffuse_roughness, pbrlib oren_nayar_diffuse_bsdf roughness (EON even when
   energy_compensation is false; Typhoon uses the classic qualitative ON there). Rough-1 fixtures
   RMSE 0.059 -> 0.031; pbr oren_nayar 0.046 -> 0.033. Burley diffuse stays Lambert.
-  Open: thin-film;
+  dielectric_layer (1.07, RMSE 0.101, close) left as a Typhoon-side difference (2026-11-23):
+  it's the default roughness 0.05 (the absorption variants set 0 and match). White furnace
+  (`tests/typhoon/materials_extra/furnace`, `furnace_stats.py`): Typhoon's plain rough
+  dielectric loses ~15% at alpha 0.05 even at normal incidence (0.832 vs hdPbrt 0.975), its
+  coupled R-over-T layer agrees with ours within ~2% (0.903 vs 0.885), yet on the shaderball
+  we're ~6% brighter: cause not found inside Typhoon's coupled rough path (its transparent-shadow
+  shortcut is off with caustics on). At 0.2 Typhoon compensates multiple scattering (0.864 vs 0.788).
+  Open: rough-dielectric multiple-scattering compensation; thin-film;
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens
