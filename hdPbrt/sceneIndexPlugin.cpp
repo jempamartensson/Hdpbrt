@@ -8,6 +8,7 @@
 #include "pxr/imaging/hd/tokens.h"
 #include "pxr/imaging/hdsi/implicitSurfaceSceneIndex.h"
 #include "pxr/imaging/hdsi/lightLinkingSceneIndex.h"
+#include "pxr/imaging/hdsi/velocityMotionResolvingSceneIndex.h"
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -44,8 +45,25 @@ protected:
     }
 };
 
+// Velocity motion blur: resolves points velocities/accelerations (and point
+// instancer velocities) into time samples, using the stage's
+// timeCodesPerSecond, so the usual deformation and instance blur applies to
+// meshes whose point count changes every frame (simulations). As hdPrman.
+class HdPbrt_VelocityMotionSceneIndexPlugin : public HdSceneIndexPlugin {
+public:
+    HdPbrt_VelocityMotionSceneIndexPlugin() = default;
+
+protected:
+    HdSceneIndexBaseRefPtr _AppendSceneIndex(const HdSceneIndexBaseRefPtr &inputScene,
+                                             const HdContainerDataSourceHandle &) override
+    {
+        return HdsiVelocityMotionResolvingSceneIndex::New(inputScene, nullptr);
+    }
+};
+
 TF_REGISTRY_FUNCTION(TfType)
 {
+    HdSceneIndexPluginRegistry::Define<HdPbrt_VelocityMotionSceneIndexPlugin>();
     HdSceneIndexPluginRegistry::Define<HdPbrt_ImplicitSurfaceSceneIndexPlugin>();
     HdSceneIndexPluginRegistry::Define<HdPbrt_LightLinkingSceneIndexPlugin>();
 }
@@ -54,6 +72,9 @@ TF_REGISTRY_FUNCTION(HdSceneIndexPlugin)
 {
     HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
         "pbrt", TfToken("HdPbrt_ImplicitSurfaceSceneIndexPlugin"), nullptr, 0,
+        HdSceneIndexPluginRegistry::InsertionOrderAtStart);
+    HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+        "pbrt", TfToken("HdPbrt_VelocityMotionSceneIndexPlugin"), nullptr, 2,
         HdSceneIndexPluginRegistry::InsertionOrderAtStart);
     // After procedurals that might create lights (hdPrman uses phase 4 too).
     HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(

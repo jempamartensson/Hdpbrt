@@ -239,8 +239,7 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   sync; only when they move (same count) it keeps `_Motion` (samples, PLY vertex -> point
   map, indices, uvs, authored normals or a topology copy for smooth normals). `Write()`
   writes the shutter-open and -close PLYs (`_UpdateMotionPlys`, cached per shutter) as
-  `filename` + `motionfilename`. Authored normals are treated as static. Changing point
-  counts (no motion). Verified with `tests/motion_scene.usda` (green "flag") and in the live
+  `filename` + `motionfilename`. Authored normals are treated as static. Changing point counts: no motion, unless velocities (below). Verified with `tests/motion_scene.usda` (green "flag") and in the live
   viewport.
 - Motion blur (done 2026-11-22): transform blur over the camera shutter. Prims keep time
   samples over +-1 frame (`HdPbrt_SampleWindow`) and the scene writer resamples at shutter
@@ -372,5 +371,10 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   Open: thin-walled straight transmission in shadow rays;
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
-- Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens
-  wants it after everything else).
+- Velocity motion blur (done 2026-11-23): `sceneIndexPlugin.cpp` registers USD's
+  `HdsiVelocityMotionResolvingSceneIndex` (phase 2, as hdPrman; plugInfo entry), which turns
+  `velocities`/`accelerations` (and point-instancer velocities) into point samples using the
+  stage's timeCodesPerSecond. The deformation blur above then blurs meshes whose point count
+  changes every frame (simulations). Test: `tests/velocity_scene.usda` at frame 1 (red "sim"
+  changes count and has velocities: blurred 1 unit/frame; blue "still" without velocities:
+  sharp); `docs/images/velocity_blur.png`.

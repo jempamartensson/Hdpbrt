@@ -19,6 +19,12 @@
                         "loadWithRenderer": "pbrt",
                         "priority": 0,
                         "displayName": "Light linking for hdPbrt"
+                    },
+                    "HdPbrt_VelocityMotionSceneIndexPlugin": {
+                        "bases": ["HdSceneIndexPlugin"],
+                        "loadWithRenderer": "pbrt",
+                        "priority": 0,
+                        "displayName": "Velocity motion blur for hdPbrt"
                     }
                 }
             },
