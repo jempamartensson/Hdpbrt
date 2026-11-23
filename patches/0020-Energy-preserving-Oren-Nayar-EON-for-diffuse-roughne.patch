@@ -1,0 +1,243 @@
+From c64ce93f576d797808fcbf23babf85f6e5b51034 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Mon, 23 Nov 2026 18:40:21 +0100
+Subject: [PATCH] Energy-preserving Oren-Nayar (EON) for diffuse "roughness"
+ and hdpbrtlayered "diffuseroughness" (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/bxdfs.h       | 54 +++++++++++++++++++++++++++++++++++++-----
+ src/pbrt/materials.cpp |  8 +++++--
+ src/pbrt/materials.h   | 24 ++++++++++++-------
+ 3 files changed, 70 insertions(+), 16 deletions(-)
+
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index 3038065..7f5a17a 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -26,18 +26,55 @@
+ 
+ namespace pbrt {
+ 
++// Energy-preserving Oren-Nayar (EON; Portsmouth, Kutz, Hill 2024), as
++// MaterialX's oren_nayar_diffuse_bsdf with energy_compensation and Typhoon:
++// a FON single-scatter term plus a multiple-scatter term that restores the
++// energy lost to roughness. Returns f (already over pi); r = 0 is Lambert.
++// (for hdPbrt)
++PBRT_CPU_GPU inline Float HdPbrtFONAlbedo(Float mu, Float r) {
++    const Float A = 0.5f - 2 / (3 * Pi);
++    const Float m = 1 - Clamp(mu, 0, 1);
++    const Float g = m * (0.0571085289f + m * (0.491881867f + m * (-0.332181442f +
++                                                                  m * 0.0714429953f)));
++    return (1 + r * g) / (1 + A * r);
++}
++
++PBRT_CPU_GPU inline SampledSpectrum HdPbrtEON(const SampledSpectrum &rho, Float r,
++                                              Float muI, Float muO, Float dotIO) {
++    r = Clamp(r, 0, 1);
++    if (r <= 0)
++        return rho * InvPi;
++    const Float A = 0.5f - 2 / (3 * Pi), B = 2.f / 3.f - 28 / (15 * Pi);
++    const Float eps = 1e-6f;
++    muI = std::max(muI, eps);
++    muO = std::max(muO, eps);
++    const Float s = dotIO - muI * muO;
++    const Float sOverF = s > 0 ? s / std::max(muI, muO) : s;
++    const Float aF = 1 / (1 + A * r);
++    SampledSpectrum fSS = rho * (InvPi * aF * (1 + r * sOverF));
++    const Float avgEF = aF * (1 + B * r);
++    SampledSpectrum one(1.f);
++    SampledSpectrum rhoMS = rho * rho * avgEF / (one - rho * (1 - avgEF));
++    const Float fMS = InvPi * std::max(eps, 1 - HdPbrtFONAlbedo(muI, r)) *
++                      std::max(eps, 1 - HdPbrtFONAlbedo(muO, r)) /
++                      std::max(eps, 1 - avgEF);
++    return fSS + rhoMS * fMS;
++}
++
+ // DiffuseBxDF Definition
+ class DiffuseBxDF {
+   public:
+     // DiffuseBxDF Public Methods
+     DiffuseBxDF() = default;
+     PBRT_CPU_GPU
+-    DiffuseBxDF(SampledSpectrum R) : R(R) {}
++    DiffuseBxDF(SampledSpectrum R, Float roughness = 0) : R(R), roughness(roughness) {}
+ 
+     PBRT_CPU_GPU
+     SampledSpectrum f(Vector3f wo, Vector3f wi, TransportMode mode) const {
+         if (!SameHemisphere(wo, wi))
+             return SampledSpectrum(0.f);
++        if (roughness > 0)
++            return HdPbrtEON(R, roughness, AbsCosTheta(wi), AbsCosTheta(wo), Dot(wo, wi));
+         return R * InvPi;
+     }
+ 
+@@ -53,7 +90,7 @@ class DiffuseBxDF {
+             wi.z *= -1;
+         Float pdf = CosineHemispherePDF(AbsCosTheta(wi));
+ 
+-        return BSDFSample(R * InvPi, wi, pdf, BxDFFlags::DiffuseReflection);
++        return BSDFSample(f(wo, wi, mode), wi, pdf, BxDFFlags::DiffuseReflection);
+     }
+ 
+     PBRT_CPU_GPU
+@@ -79,6 +116,7 @@ class DiffuseBxDF {
+ 
+   private:
+     SampledSpectrum R;
++    Float roughness = 0;
+ };
+ 
+ // DiffuseTransmissionBxDF Definition
+@@ -1208,11 +1246,13 @@ class HdPbrtLayeredBxDF {
+                       HdPbrtDielectricLobe coat, SampledSpectrum coatTint,
+                       Float metalWeight = 0, int metalMode = 0,
+                       SampledSpectrum metalA = SampledSpectrum(0.f),
+-                      SampledSpectrum metalB = SampledSpectrum(0.f), Float metalScale = 1)
++                      SampledSpectrum metalB = SampledSpectrum(0.f), Float metalScale = 1,
++                      Float diffuseRoughness = 0)
+         : R(R), T(T), specTint(specTint), sheenColor(sheenColor), coatTint(coatTint),
+           metalA(metalA), metalB(metalB), spec(spec), coat(coat),
+           sheenWeight(sheenWeight), sheenAlpha(sheenAlpha), metalWeight(metalWeight),
+-          metalScale(metalScale), metalMode(metalMode), sheenOnTop(sheenOnTop) {}
++          metalScale(metalScale), diffuseRoughness(diffuseRoughness), metalMode(metalMode),
++          sheenOnTop(sheenOnTop) {}
+ 
+     PBRT_CPU_GPU
+     BxDFFlags Flags() const {
+@@ -1422,7 +1462,9 @@ class HdPbrtLayeredBxDF {
+ 
+     PBRT_CPU_GPU
+     SampledSpectrum FUpper(Vector3f wo, Vector3f wi, const Weights &k) const {
+-        SampledSpectrum result = R * k.under * (k.base * InvPi);
++        SampledSpectrum result =
++            HdPbrtEON(R, diffuseRoughness, AbsCosTheta(wi), AbsCosTheta(wo), Dot(wo, wi)) *
++            k.under * k.base;
+         if (AbsCosTheta(wo) == 0 || AbsCosTheta(wi) == 0)
+             return result;
+         Vector3f wm = wi + wo;
+@@ -1481,7 +1523,7 @@ class HdPbrtLayeredBxDF {
+ 
+     SampledSpectrum R, T, specTint, sheenColor, coatTint, metalA, metalB;
+     HdPbrtDielectricLobe spec, coat;
+-    Float sheenWeight, sheenAlpha, metalWeight, metalScale;
++    Float sheenWeight, sheenAlpha, metalWeight, metalScale, diffuseRoughness;
+     int metalMode;
+     bool sheenOnTop;
+ };
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index 91d2ac6..b272985 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -205,8 +205,11 @@ DiffuseMaterial *DiffuseMaterial::Create(const TextureParameterDictionary &param
+         reflectance = alloc.new_object<SpectrumConstantTexture>(
+             alloc.new_object<ConstantSpectrum>(0.5f));
+     FloatTexture displacement = parameters.GetFloatTextureOrNull("displacement", alloc);
++    // "roughness" (for hdPbrt): energy-preserving Oren-Nayar; 0 is Lambert.
++    FloatTexture roughness = parameters.GetFloatTextureOrNull("roughness", alloc);
+ 
+-    return alloc.new_object<DiffuseMaterial>(reflectance, displacement, normalMap);
++    return alloc.new_object<DiffuseMaterial>(reflectance, displacement, normalMap,
++                                             roughness);
+ }
+ 
+ // ConductorMaterial Method Definitions
+@@ -721,7 +724,8 @@ HdPbrtLayeredMaterial *HdPbrtLayeredMaterial::Create(
+     return alloc.new_object<HdPbrtLayeredMaterial>(
+         reflectance, transmittance, specTint, specWeight, uRoughness, vRoughness, eta,
+         sheenColor, sheenWeight, sheenRoughness, sheenOnTop, coatWeight, coatRoughness,
+-        coatEta, coatTint, metalWeight, metalMode, metalA, metalB, metalScale, displacement, normalMap,
++        coatEta, coatTint, metalWeight, metalMode, metalA, metalB, metalScale,
++        parameters.GetFloatTexture("diffuseroughness", 0.f, alloc), displacement, normalMap,
+         remapRoughness);
+ }
+ 
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index 2ece75e..e198eef 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -461,19 +461,23 @@ class DiffuseMaterial {
+     std::string ToString() const;
+ 
+     DiffuseMaterial(SpectrumTexture reflectance, FloatTexture displacement,
+-                    Image *normalMap)
+-        : normalMap(normalMap), displacement(displacement), reflectance(reflectance) {}
++                    Image *normalMap, FloatTexture roughness = nullptr)
++        : normalMap(normalMap),
++          displacement(displacement),
++          reflectance(reflectance),
++          roughness(roughness) {}
+ 
+     template <typename TextureEvaluator>
+     PBRT_CPU_GPU bool CanEvaluateTextures(TextureEvaluator texEval) const {
+-        return texEval.CanEvaluate({}, {reflectance});
++        return texEval.CanEvaluate({roughness}, {reflectance});
+     }
+ 
+     template <typename TextureEvaluator>
+     PBRT_CPU_GPU DiffuseBxDF GetBxDF(TextureEvaluator texEval, MaterialEvalContext ctx,
+                                      SampledWavelengths &lambda) const {
+         SampledSpectrum r = Clamp(texEval(reflectance, ctx, lambda), 0, 1);
+-        return DiffuseBxDF(r);
++        // "roughness": energy-preserving Oren-Nayar (for hdPbrt).
++        return DiffuseBxDF(r, roughness ? Clamp(texEval(roughness, ctx), 0, 1) : Float(0));
+     }
+ 
+   private:
+@@ -481,6 +485,7 @@ class DiffuseMaterial {
+     Image *normalMap;
+     FloatTexture displacement;
+     SpectrumTexture reflectance;
++    FloatTexture roughness;
+ };
+ 
+ // ConductorMaterial Definition
+@@ -639,7 +644,7 @@ class HdPbrtLayeredMaterial {
+                           FloatTexture coatWeight, FloatTexture coatRoughness, Float coatEta,
+                           SpectrumTexture coatTint, FloatTexture metalWeight, int metalMode,
+                           SpectrumTexture metalA, SpectrumTexture metalB, Float metalScale,
+-                          FloatTexture displacement, Image *normalMap, bool remapRoughness)
++                          FloatTexture diffuseRoughness, FloatTexture displacement, Image *normalMap, bool remapRoughness)
+         : displacement(displacement),
+           normalMap(normalMap),
+           reflectance(reflectance),
+@@ -657,6 +662,7 @@ class HdPbrtLayeredMaterial {
+           metalA(metalA),
+           metalB(metalB),
+           metalWeight(metalWeight),
++          diffuseRoughness(diffuseRoughness),
+           eta(eta),
+           coatEta(coatEta),
+           metalScale(metalScale),
+@@ -669,7 +675,8 @@ class HdPbrtLayeredMaterial {
+     template <typename TextureEvaluator>
+     PBRT_CPU_GPU bool CanEvaluateTextures(TextureEvaluator texEval) const {
+         return texEval.CanEvaluate({uRoughness, vRoughness, specWeight, sheenWeight,
+-                                    sheenRoughness, coatWeight, coatRoughness, metalWeight},
++                                    sheenRoughness, coatWeight, coatRoughness, metalWeight,
++                                    diffuseRoughness},
+                                    {reflectance, transmittance, specTint, sheenColor,
+                                     coatTint, metalA, metalB});
+     }
+@@ -708,7 +715,8 @@ class HdPbrtLayeredMaterial {
+             }
+         }
+         return HdPbrtLayeredBxDF(r, t, tint, spec, sc, sw, sa, sheenOnTop, coat, ct, mw,
+-                                 metalMode, ma, mb, metalScale);
++                                 metalMode, ma, mb, metalScale,
++                                 Clamp(texEval(diffuseRoughness, ctx), 0, 1));
+     }
+ 
+     PBRT_CPU_GPU
+@@ -736,7 +744,7 @@ class HdPbrtLayeredMaterial {
+     SpectrumTexture coatTint;
+     FloatTexture coatWeight, coatRoughness;
+     SpectrumTexture metalA, metalB;
+-    FloatTexture metalWeight;
++    FloatTexture metalWeight, diffuseRoughness;
+     Float eta, coatEta, metalScale;
+     int metalMode;
+     bool sheenOnTop;
+-- 
+2.43.0
+

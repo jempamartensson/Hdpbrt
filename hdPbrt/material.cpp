@@ -324,6 +324,20 @@ struct _MtlxMapper {
         d.baseColorFromPrimvar = fromPrimvar;
     }
 
+    // oren_nayar_diffuse_bsdf roughness, as the pbrt parameter `name`
+    // (energy-preserving Oren-Nayar, pbrt patch 20; Typhoon uses EON whatever
+    // energy_compensation says for the surface shaders, and here too).
+    static std::string DiffuseRough(const HdMaterialNode2 *n, const char *name) {
+        if (!_Is(n, "ND_oren_nayar_diffuse_bsdf"))
+            return {};
+        const float r = std::min(std::max(_Float(*n, "roughness", 0), 0.f), 1.f);
+        if (r <= 0)
+            return {};
+        std::ostringstream os;
+        os << " \"float " << name << "\" " << r;
+        return os.str();
+    }
+
     // Dielectric reflection over a diffuse base (or over black).
     void Layered(const HdMaterialNode2 &spec, const HdMaterialNode2 *base,
                  HdPbrtMaterialDesc &d) {
@@ -341,6 +355,7 @@ struct _MtlxMapper {
         GfVec3f tint = _Clamp01(_Color(spec, "tint", GfVec3f(1)));
         if (tint != GfVec3f(1))
             os << " \"rgb speculartint\" " << HdPbrt_Rgb(tint);
+        os << DiffuseRough(base, "diffuseroughness");
         d.otherParams = os.str();
     }
 
@@ -360,6 +375,7 @@ struct _MtlxMapper {
            << " \"float sheenroughness\" "
            << std::min(std::max(_Float(sheen, "roughness", 0.3f), 0.f), 1.f)
            << " \"bool sheenontop\" true";
+        os << DiffuseRough(base, "diffuseroughness");
         d.otherParams = os.str();
     }
 
@@ -430,6 +446,7 @@ struct _MtlxMapper {
         } else if (IsDiffuse(n)) {
             d.type = "diffuse";
             DiffuseBase(*n, d);
+            d.otherParams = DiffuseRough(n, "roughness");
         } else if (_Is(n, "ND_translucent_bsdf")) {
             d.type = "diffusetransmission";
             d.baseColor = GfVec3f(0);
@@ -580,6 +597,8 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             // keep pbrt's conductor.
             bool layeredMetal = false, metalF82 = false;
             GfVec3f metalBase(0.8f), metalEdge(1.f);
+            // Diffuse roughness: energy-preserving Oren-Nayar (patch 20).
+            float diffRough = 0;
             float metalScale = 1;
             // No specular lobe at all (specular weight or color 0, or ior 1,
             // i.e. no Fresnel reflection): a plain Lambertian "diffuse".
@@ -636,6 +655,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 sheenColor = _Color(*surf, "sheen_color", GfVec3f(1));
                 sheenRough = _Float(*surf, "sheen_roughness", 0.3f);
                 thinWalled = _Float(*surf, "thin_walled", 0) > 0.5f;
+                diffRough = _Float(*surf, "diffuse_roughness", 0);
                 layeredMetal = true;
                 metalBase = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base", 1);
                 metalEdge = _Color(*surf, "specular_color", GfVec3f(1)) * _Float(*surf, "specular", 1);
@@ -688,6 +708,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 sheenRough = _Float(*surf, "fuzz_roughness", 0.5f);
                 sheenOnTop = true;
                 thinWalled = _Float(*surf, "geometry_thin_walled", 0) > 0.5f;
+                diffRough = _Float(*surf, "base_diffuse_roughness", 0);
                 layeredMetal = metalF82 = true;
                 metalBase = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base_weight", 1);
                 // MaterialX: the metal BSDF is weighted by specular_weight and
@@ -871,6 +892,11 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                     other << " \"rgb speculartint\" " << HdPbrt_Rgb(t);
                 }
             }
+            diffRough = std::min(std::max(diffRough, 0.f), 1.f);
+            if (diffRough > 0 && d.type == "diffuse")
+                other << " \"float roughness\" " << diffRough;
+            else if (diffRough > 0 && d.type == "hdpbrtlayered")
+                other << " \"float diffuseroughness\" " << diffRough;
             d.otherParams = other.str();
             result = d;
             }  // !mtlxGraph

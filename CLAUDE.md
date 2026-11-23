@@ -324,6 +324,12 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   OpenPBR specular_weight on the metal lobe (patch 19, pbrt `metalscale`): weights the metal
   BSDF and its edge color (specular_color * specular_weight), as MaterialX. No suite fixture
   covers it: `tests/typhoon/materials_extra/open_pbr_metal` (4 fixtures, all match).
+  Diffuse roughness (patch 20): energy-preserving Oren-Nayar (EON, Portsmouth et al. 2024,
+  Typhoon's formula) for pbrt `diffuse` ("roughness") and the hdpbrtlayered base
+  ("diffuseroughness"); cosine sampling. From standard_surface diffuse_roughness, OpenPBR
+  base_diffuse_roughness, pbrlib oren_nayar_diffuse_bsdf roughness (EON even when
+  energy_compensation is false; Typhoon uses the classic qualitative ON there). Rough-1 fixtures
+  RMSE 0.059 -> 0.031; pbr oren_nayar 0.046 -> 0.033. Burley diffuse stays Lambert.
   Open: thin-film;
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
