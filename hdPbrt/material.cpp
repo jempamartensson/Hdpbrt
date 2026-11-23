@@ -563,6 +563,10 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             float sheenW = 0, sheenRough = 0.3f;
             GfVec3f sheenColor(1.f);
             bool sheenOnTop = false, thinWalled = false;
+            // Coat: a GGX dielectric layer on top; coatTint (coat color and
+            // OpenPBR darkening) multiplies everything below it.
+            float coatW = 0, coatRough = 0, coatIor = 1.5f;
+            GfVec3f coatTint(1.f);
             // No specular lobe at all (specular weight or color 0, or ior 1,
             // i.e. no Fresnel reflection): a plain Lambertian "diffuse".
             bool noSpecular = false;
@@ -618,6 +622,22 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 sheenColor = _Color(*surf, "sheen_color", GfVec3f(1));
                 sheenRough = _Float(*surf, "sheen_roughness", 0.3f);
                 thinWalled = _Float(*surf, "thin_walled", 0) > 0.5f;
+                coatW = std::min(std::max(_Float(*surf, "coat", 0), 0.f), 1.f);
+                if (coatW > 0) {
+                    coatRough = _Float(*surf, "coat_roughness", 0.1f);
+                    coatIor = _Float(*surf, "coat_IOR", 1.5f);
+                    const GfVec3f cc = _Clamp01(_Color(*surf, "coat_color", GfVec3f(1)));
+                    coatTint = GfVec3f(1.f) * (1 - coatW) + cc * coatW;
+                    // coat_affect_color: base^(1 + coat * affect).
+                    const float gamma =
+                        1 + coatW * std::min(std::max(_Float(*surf, "coat_affect_color", 0), 0.f), 1.f);
+                    for (int i = 0; i < 3; ++i)
+                        base[i] = std::pow(std::max(base[i], 0.f), gamma);
+                    // coat_affect_roughness pushes the specular toward rough.
+                    const float mix = std::min(std::max(_Float(*surf, "coat_affect_roughness", 0), 0.f), 1.f) *
+                                      coatW * std::min(std::max(coatRough, 0.f), 1.f);
+                    rough = rough * (1 - mix) + mix;
+                }
                 noSpecular = specWeight <= 0.f && _Float(*surf, "coat", 0) <= 0.f;
             } else if (TfStringStartsWith(type, "ND_open_pbr_surface")) {
                 base = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base_weight", 1);
@@ -651,6 +671,31 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 sheenRough = _Float(*surf, "fuzz_roughness", 0.5f);
                 sheenOnTop = true;
                 thinWalled = _Float(*surf, "geometry_thin_walled", 0) > 0.5f;
+                coatW = std::min(std::max(_Float(*surf, "coat_weight", 0), 0.f), 1.f);
+                if (coatW > 0) {
+                    // OpenPBR spec: the coat roughens the specular below,
+                    // r' = (r^4 + 2 c^4)^(1/4), and the specular's IOR becomes
+                    // relative to the coat's, both blended by the coat weight.
+                    coatRough = _Float(*surf, "coat_roughness", 0);
+                    coatIor = std::max(_Float(*surf, "coat_ior", 1.6f), 1.f);
+                    const float r4 = std::pow(std::max(rough, 0.f), 4.f);
+                    const float c4 = std::pow(std::max(coatRough, 0.f), 4.f);
+                    rough = rough * (1 - coatW) + std::pow(std::min(1.f, 2 * c4 + r4), 0.25f) * coatW;
+                    const float iorS = std::max(ior, 1.f);
+                    ior = iorS * (1 - coatW) + std::max(iorS / coatIor, coatIor / iorS) * coatW;
+                    // Darkening from light trapped under the coat (internal
+                    // reflection K of the coat, base albedo E):
+                    // (1 - K) / (1 - E K), blended by weight * coat_darkening.
+                    const float f0 = std::pow((coatIor - 1) / (coatIor + 1), 2.f);
+                    const float K = 1 - (1 - f0) / (coatIor * coatIor);
+                    const float dk = coatW * std::min(std::max(_Float(*surf, "coat_darkening", 1), 0.f), 1.f);
+                    const GfVec3f cc = _Clamp01(_Color(*surf, "coat_color", GfVec3f(1)));
+                    for (int i = 0; i < 3; ++i) {
+                        const float e = std::min(std::max(base[i], 0.f), 1.f);
+                        const float dark = std::min((1 - K) / std::max(1 - e * K, 1e-5f), 1.f);
+                        coatTint[i] = (1 - dk + dark * dk) * (1 - coatW + cc[i] * coatW);
+                    }
+                }
                 noSpecular = specWeight <= 0.f && _Float(*surf, "coat_weight", 0) <= 0.f;
             } else {
                 // Unknown shader: look for common names, else grey diffuse.
@@ -718,7 +763,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 }
                 if ((!medium || tintWithMedium) && transColor != GfVec3f(1.f))
                     other << " \"rgb transmissiontint\" " << HdPbrt_Rgb(_Clamp01(transColor));
-            } else if (noSpecular && sheenW <= 0 && !(thinWalled && transmission > 0)) {
+            } else if (noSpecular && sheenW <= 0 && coatW <= 0 && !(thinWalled && transmission > 0)) {
                 d.type = "diffuse";
             } else {
                 d.type = "hdpbrtlayered";
@@ -726,6 +771,11 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 other << " \"float eta\" " << ior;
                 if (noSpecular)
                     specWeight = 0;
+                if (coatW > 0)
+                    other << " \"float coatweight\" " << coatW << " \"float coatroughness\" "
+                          << std::pow(std::min(std::max(coatRough, 0.f), 1.f), 2.f)
+                          << " \"float coateta\" " << coatIor
+                          << " \"rgb coattint\" " << HdPbrt_Rgb(_Clamp01(coatTint));
                 if (sheenW > 0) {
                     other << " \"float sheenweight\" " << std::min(sheenW, 1.f)
                           << " \"rgb sheencolor\" " << HdPbrt_Rgb(_Clamp01(sheenColor))

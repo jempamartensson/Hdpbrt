@@ -1,0 +1,436 @@
+From 0321e3f7f2903ab084006314a364940785055001 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Mon, 23 Nov 2026 07:33:13 +0100
+Subject: [PATCH 16/16] hdpbrtlayered: coat layer (GGX dielectric with a tint
+ on the layers below) (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/bxdfs.cpp     |  11 +--
+ src/pbrt/bxdfs.h       | 178 ++++++++++++++++++++++++++---------------
+ src/pbrt/materials.cpp |  14 +++-
+ src/pbrt/materials.h   |  26 ++++--
+ 4 files changed, 151 insertions(+), 78 deletions(-)
+
+diff --git a/src/pbrt/bxdfs.cpp b/src/pbrt/bxdfs.cpp
+index bce8dd1..3d11ef3 100644
+--- a/src/pbrt/bxdfs.cpp
++++ b/src/pbrt/bxdfs.cpp
+@@ -1275,11 +1275,12 @@ PBRT_CPU_GPU Float HdPbrtSheenAlbedo(Float cosTheta, Float alpha) {
+ }
+ 
+ std::string HdPbrtLayeredBxDF::ToString() const {
+-    return StringPrintf("[ HdPbrtLayeredBxDF R: %s T: %s specTint: %s specWeight: %f "
+-                        "eta: %f mfDistrib: %s sheenColor: %s sheenWeight: %f "
+-                        "sheenAlpha: %f sheenOnTop: %s ]",
+-                        R, T, specTint, specWeight, eta, mfDistrib, sheenColor,
+-                        sheenWeight, sheenAlpha, sheenOnTop);
++    return StringPrintf("[ HdPbrtLayeredBxDF R: %s T: %s specTint: %s spec: [ w %f eta %f %s ] "
++                        "sheenColor: %s sheenWeight: %f sheenAlpha: %f sheenOnTop: %s "
++                        "coat: [ w %f eta %f %s ] coatTint: %s ]",
++                        R, T, specTint, spec.weight, spec.eta, spec.distrib, sheenColor,
++                        sheenWeight, sheenAlpha, sheenOnTop, coat.weight, coat.eta,
++                        coat.distrib, coatTint);
+ }
+ 
+ template class LayeredBxDF<DielectricBxDF, DiffuseBxDF, true>;
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index 16014ee..eecebc6 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -1152,10 +1152,42 @@ PBRT_CPU_GPU inline Float HdPbrtAshikhminV(Float cosO, Float cosI) {
+     return 1 / (4 * (cosI + cosO - cosI * cosO) + 1e-6f);
+ }
+ 
++// HdPbrtDielectricLobe: a weighted GGX dielectric reflection lobe (a coat or
++// a specular layer), used by HdPbrtLayeredBxDF.
++struct HdPbrtDielectricLobe {
++    Float weight = 0, eta = 1;
++    TrowbridgeReitzDistribution distrib;
++
++    PBRT_CPU_GPU bool Active() const { return weight > 0 && eta != 1; }
++    PBRT_CPU_GPU bool Smooth() const { return distrib.EffectivelySmooth(); }
++    // Untinted, unweighted directional albedo for wo (upper hemisphere).
++    PBRT_CPU_GPU Float Albedo(Vector3f wo) const {
++        if (Smooth())
++            return FrDielectric(wo.z, eta);
++        return HdPbrtDielectricAlbedo(wo.z, distrib.MeanAlpha(), eta);
++    }
++    // 1 - w E(wo): what reaches the layers below.
++    PBRT_CPU_GPU Float Throughput(Vector3f wo) const {
++        return Active() ? Clamp(1 - weight * Albedo(wo), 0, 1) : Float(1);
++    }
++    // Weighted BRDF for rough lobes (0 for smooth ones), wo/wi upper.
++    PBRT_CPU_GPU Float F(Vector3f wo, Vector3f wi, Vector3f wm) const {
++        if (!Active() || Smooth())
++            return 0;
++        Float F = FrDielectric(AbsDot(wo, wm), eta);
++        return weight * distrib.D(wm) * distrib.G(wo, wi) * F /
++               (4 * AbsCosTheta(wi) * AbsCosTheta(wo));
++    }
++    PBRT_CPU_GPU Float PDF(Vector3f wo, Vector3f wm) const {
++        return distrib.PDF(wo, wm) / (4 * AbsDot(wo, wm));
++    }
++};
++
+ // HdPbrtLayeredBxDF Definition
+ // MaterialX/OpenPBR-style vertical layering, as USD's reference renderer and
+ // MaterialX's shaders do it. Layers, top to bottom:
+ //   [sheen]        Charlie sheen (OpenPBR fuzz: on top of everything)
++//   [coat]         GGX dielectric reflection; tints everything below
+ //   specular       GGX dielectric reflection, weight w, tint
+ //   [sheen]        (standard_surface sheen: between specular and base)
+ //   base           Lambert R / pi  +  straight transmission T (thin walls)
+@@ -1167,19 +1199,20 @@ class HdPbrtLayeredBxDF {
+     HdPbrtLayeredBxDF() = default;
+     PBRT_CPU_GPU
+     HdPbrtLayeredBxDF(SampledSpectrum R, SampledSpectrum T, SampledSpectrum specTint,
+-                      Float specWeight, Float eta, TrowbridgeReitzDistribution mfDistrib,
+-                      SampledSpectrum sheenColor, Float sheenWeight, Float sheenAlpha,
+-                      bool sheenOnTop)
+-        : R(R), T(T), specTint(specTint), sheenColor(sheenColor),
+-          specWeight(specWeight), eta(eta), sheenWeight(sheenWeight),
+-          sheenAlpha(sheenAlpha), sheenOnTop(sheenOnTop), mfDistrib(mfDistrib) {}
++                      HdPbrtDielectricLobe spec, SampledSpectrum sheenColor,
++                      Float sheenWeight, Float sheenAlpha, bool sheenOnTop,
++                      HdPbrtDielectricLobe coat, SampledSpectrum coatTint)
++        : R(R), T(T), specTint(specTint), sheenColor(sheenColor), coatTint(coatTint),
++          spec(spec), coat(coat), sheenWeight(sheenWeight), sheenAlpha(sheenAlpha),
++          sheenOnTop(sheenOnTop) {}
+ 
+     PBRT_CPU_GPU
+     BxDFFlags Flags() const {
+         BxDFFlags flags = (R || HasSheen()) ? BxDFFlags::DiffuseReflection : BxDFFlags::Unset;
+-        if (HasSpec())
+-            flags = flags | (mfDistrib.EffectivelySmooth() ? BxDFFlags::SpecularReflection
+-                                                           : BxDFFlags::GlossyReflection);
++        for (const HdPbrtDielectricLobe *l : {&spec, &coat})
++            if (l->Active())
++                flags = flags | (l->Smooth() ? BxDFFlags::SpecularReflection
++                                             : BxDFFlags::GlossyReflection);
+         if (T)
+             flags = flags | BxDFFlags::SpecularTransmission;
+         return flags;
+@@ -1193,8 +1226,7 @@ class HdPbrtLayeredBxDF {
+             wo = -wo;
+             wi = -wi;
+         }
+-        Weights k = LayerWeights(wo);
+-        return FUpper(wo, wi, k);
++        return FUpper(wo, wi, LayerWeights(wo));
+     }
+ 
+     PBRT_CPU_GPU
+@@ -1211,21 +1243,34 @@ class HdPbrtLayeredBxDF {
+         if (p.sum == 0)
+             return {};
+         pstd::optional<BSDFSample> bs;
+-        if (uc < p.spec) {
+-            if (mfDistrib.EffectivelySmooth()) {
++        // Dielectric lobes: coat, then specular.
++        const HdPbrtDielectricLobe *lobe = nullptr;
++        Float pLobe = 0;
++        SampledSpectrum lobeScale;
++        if (uc < p.coat) {
++            lobe = &coat;
++            pLobe = p.coat;
++            lobeScale = SampledSpectrum(k.coat);
++        } else if (uc < p.coat + p.spec) {
++            lobe = &spec;
++            pLobe = p.spec;
++            lobeScale = specTint * k.under * k.spec;
++        }
++        if (lobe) {
++            if (lobe->Smooth()) {
+                 Vector3f wi(-wo.x, -wo.y, wo.z);
+-                SampledSpectrum f = specTint * (k.spec * specWeight *
+-                                                FrDielectric(wo.z, eta) / AbsCosTheta(wi));
+-                bs = BSDFSample(f, wi, p.spec, BxDFFlags::SpecularReflection);
++                SampledSpectrum f =
++                    lobeScale * (lobe->weight * FrDielectric(wo.z, lobe->eta) / AbsCosTheta(wi));
++                bs = BSDFSample(f, wi, pLobe, BxDFFlags::SpecularReflection);
+             } else {
+-                Vector3f wm = mfDistrib.Sample_wm(wo, u);
++                Vector3f wm = lobe->distrib.Sample_wm(wo, u);
+                 Vector3f wi = Reflect(wo, wm);
+                 if (wi.z <= 0)
+                     return {};
+                 bs = BSDFSample(FUpper(wo, wi, k), wi, PDFUpper(wo, wi, p),
+                                 BxDFFlags::GlossyReflection);
+             }
+-        } else if (uc < p.spec + p.cos) {
++        } else if (uc < p.coat + p.spec + p.cos) {
+             Vector3f wi = SampleCosineHemisphere(u);
+             if (wi.z <= 0)
+                 return {};
+@@ -1234,7 +1279,7 @@ class HdPbrtLayeredBxDF {
+         } else {
+             // Straight transmission (thin wall, eta 1): a delta lobe.
+             Vector3f wi = -wo;
+-            bs = BSDFSample(T * (k.base / AbsCosTheta(wi)), wi, p.trans,
++            bs = BSDFSample(T * k.under * (k.base / AbsCosTheta(wi)), wi, p.trans,
+                             BxDFFlags::SpecularTransmission);
+         }
+         if (flip)
+@@ -1264,70 +1309,73 @@ class HdPbrtLayeredBxDF {
+     std::string ToString() const;
+ 
+     PBRT_CPU_GPU
+-    void Regularize() { mfDistrib.Regularize(); }
++    void Regularize() {
++        spec.distrib.Regularize();
++        coat.distrib.Regularize();
++    }
+ 
+   private:
+-    // Scale of each layer's lobe for outgoing direction wo.
++    // Scale of each layer's lobe for outgoing direction wo; `under` (the coat
++    // tint) also multiplies every layer below the coat.
+     struct Weights {
+-        Float sheen = 0, spec = 0, base = 0;
++        Float sheen = 0, coat = 0, spec = 0, base = 0;
++        bool sheenUnderCoat = false;
++        SampledSpectrum under;
+     };
+-    // Lobe selection probabilities: specular, cosine-sampled (sheen +
+-    // diffuse), straight transmission.
++    // Lobe selection probabilities.
+     struct Probs {
+-        Float spec = 0, cos = 0, trans = 0, sum = 0;
++        Float coat = 0, spec = 0, cos = 0, trans = 0, sum = 0;
+     };
+ 
+     PBRT_CPU_GPU
+-    bool HasSpec() const { return specWeight > 0 && eta != 1 && bool(specTint); }
++    bool HasSpec() const { return spec.Active() && bool(specTint); }
+     PBRT_CPU_GPU
+     bool HasSheen() const { return sheenWeight > 0 && bool(sheenColor); }
+ 
+-    // Specular albedo for wo (upper hemisphere), untinted, unweighted.
+-    PBRT_CPU_GPU
+-    Float SpecAlbedo(Vector3f wo) const {
+-        if (mfDistrib.EffectivelySmooth())
+-            return FrDielectric(wo.z, eta);
+-        return HdPbrtDielectricAlbedo(wo.z, mfDistrib.MeanAlpha(), eta);
+-    }
+-
+     PBRT_CPU_GPU
+     Weights LayerWeights(Vector3f wo) const {
+-        Float tSpec = (specWeight > 0 && eta != 1)
+-                          ? Clamp(1 - specWeight * SpecAlbedo(wo), 0, 1) : Float(1);
++        Float tSpec = spec.Throughput(wo), tCoat = coat.Throughput(wo);
+         Float tSheen = sheenWeight > 0
+                            ? Clamp(1 - sheenWeight * HdPbrtSheenAlbedo(wo.z, sheenAlpha), 0, 1)
+                            : Float(1);
+         Weights k;
++        k.under = coat.Active() ? coatTint : SampledSpectrum(1.f);
+         if (sheenOnTop) {
+             k.sheen = 1;
+-            k.spec = tSheen;
++            k.coat = tSheen;
++            k.spec = tSheen * tCoat;
+         } else {
+-            k.spec = 1;
+-            k.sheen = tSpec;
++            k.coat = 1;
++            k.spec = tCoat;
++            k.sheen = tCoat * tSpec;
++            k.sheenUnderCoat = true;
+         }
+-        k.base = tSpec * tSheen;
++        k.base = tCoat * tSpec * tSheen;
+         return k;
+     }
+ 
+     PBRT_CPU_GPU
+     Probs LobeProbs(Vector3f wo, const Weights &k, BxDFReflTransFlags flags) const {
+         Probs p;
++        Float under = k.under.Average();
+         if (flags & BxDFReflTransFlags::Reflection) {
++            if (coat.Active())
++                p.coat = std::max<Float>(k.coat * coat.weight * coat.Albedo(wo), 1e-3f);
+             if (HasSpec())
+-                p.spec = k.spec * specWeight * SpecAlbedo(wo) * specTint.Average();
++                p.spec = std::max<Float>(
++                    k.spec * under * spec.weight * spec.Albedo(wo) * specTint.Average(), 1e-3f);
+             if (HasSheen())
+-                p.cos += k.sheen * HdPbrtSheenAlbedo(wo.z, sheenAlpha) * sheenColor.Average();
+-            p.cos += k.base * R.Average();
+-            // A lobe whose estimate is ~0 must still be sampled now and then.
+-            if (HasSpec())
+-                p.spec = std::max<Float>(p.spec, 1e-3f);
++                p.cos += k.sheen * (k.sheenUnderCoat ? under : Float(1)) *
++                         HdPbrtSheenAlbedo(wo.z, sheenAlpha) * sheenColor.Average();
++            p.cos += k.base * under * R.Average();
+             if (R || HasSheen())
+                 p.cos = std::max<Float>(p.cos, 1e-3f);
+         }
+         if ((flags & BxDFReflTransFlags::Transmission) && T)
+-            p.trans = std::max<Float>(k.base * T.Average(), 1e-3f);
+-        p.sum = p.spec + p.cos + p.trans;
++            p.trans = std::max<Float>(k.base * under * T.Average(), 1e-3f);
++        p.sum = p.coat + p.spec + p.cos + p.trans;
+         if (p.sum > 0) {
++            p.coat /= p.sum;
+             p.spec /= p.sum;
+             p.cos /= p.sum;
+             p.trans /= p.sum;
+@@ -1337,22 +1385,21 @@ class HdPbrtLayeredBxDF {
+ 
+     PBRT_CPU_GPU
+     SampledSpectrum FUpper(Vector3f wo, Vector3f wi, const Weights &k) const {
+-        SampledSpectrum result = R * (k.base * InvPi);
+-        Float cosO = AbsCosTheta(wo), cosI = AbsCosTheta(wi);
+-        if (cosO == 0 || cosI == 0)
++        SampledSpectrum result = R * k.under * (k.base * InvPi);
++        if (AbsCosTheta(wo) == 0 || AbsCosTheta(wi) == 0)
+             return result;
+         Vector3f wm = wi + wo;
+         if (LengthSquared(wm) == 0)
+             return result;
+         wm = Normalize(wm);
+-        if (HasSpec() && !mfDistrib.EffectivelySmooth()) {
+-            Float F = FrDielectric(AbsDot(wo, wm), eta);
+-            result += specTint * (k.spec * specWeight * mfDistrib.D(wm) *
+-                                  mfDistrib.G(wo, wi) * F / (4 * cosI * cosO));
++        if (HasSpec())
++            result += specTint * k.under * (k.spec * spec.F(wo, wi, wm));
++        result += SampledSpectrum(k.coat * coat.F(wo, wi, wm));
++        if (HasSheen()) {
++            SampledSpectrum s = sheenColor * (k.sheen * HdPbrtCharlieD(sheenAlpha, wm.z) *
++                                              HdPbrtAshikhminV(AbsCosTheta(wo), AbsCosTheta(wi)));
++            result += k.sheenUnderCoat ? s * k.under : s;
+         }
+-        if (HasSheen())
+-            result += sheenColor * (k.sheen * HdPbrtCharlieD(sheenAlpha, wm.z) *
+-                                    HdPbrtAshikhminV(cosO, cosI));
+         return result;
+     }
+ 
+@@ -1362,17 +1409,18 @@ class HdPbrtLayeredBxDF {
+         if (wi.z <= 0)
+             return 0;
+         Float pdf = p.cos * CosineHemispherePDF(wi.z);
+-        if (p.spec > 0 && HasSpec() && !mfDistrib.EffectivelySmooth()) {
+-            Vector3f wm = Normalize(wo + wi);
+-            pdf += p.spec * mfDistrib.PDF(wo, wm) / (4 * AbsDot(wo, wm));
+-        }
++        Vector3f wm = Normalize(wo + wi);
++        if (p.spec > 0 && HasSpec() && !spec.Smooth())
++            pdf += p.spec * spec.PDF(wo, wm);
++        if (p.coat > 0 && coat.Active() && !coat.Smooth())
++            pdf += p.coat * coat.PDF(wo, wm);
+         return pdf;
+     }
+ 
+-    SampledSpectrum R, T, specTint, sheenColor;
+-    Float specWeight, eta, sheenWeight, sheenAlpha;
++    SampledSpectrum R, T, specTint, sheenColor, coatTint;
++    HdPbrtDielectricLobe spec, coat;
++    Float sheenWeight, sheenAlpha;
+     bool sheenOnTop;
+-    TrowbridgeReitzDistribution mfDistrib;
+ };
+ 
+ PBRT_CPU_GPU inline SampledSpectrum BxDF::f(Vector3f wo, Vector3f wi, TransportMode mode) const {
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index 71f82d8..dee7e38 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -667,6 +667,16 @@ HdPbrtLayeredMaterial *HdPbrtLayeredMaterial::Create(
+     FloatTexture sheenWeight = parameters.GetFloatTexture("sheenweight", 0.f, alloc);
+     FloatTexture sheenRoughness = parameters.GetFloatTexture("sheenroughness", 0.3f, alloc);
+     bool sheenOnTop = parameters.GetOneBool("sheenontop", false);
++    FloatTexture coatWeight = parameters.GetFloatTexture("coatweight", 0.f, alloc);
++    FloatTexture coatRoughness = parameters.GetFloatTexture("coatroughness", 0.f, alloc);
++    Float coatEta = parameters.GetOneFloat("coateta", 1.5f);
++    if (coatEta <= 0)
++        coatEta = 1;
++    SpectrumTexture coatTint = parameters.GetSpectrumTexture(
++        "coattint", nullptr, SpectrumType::Albedo, alloc);
++    if (!coatTint)
++        coatTint = alloc.new_object<SpectrumConstantTexture>(
++            alloc.new_object<ConstantSpectrum>(1.f));
+     FloatTexture uRoughness = parameters.GetFloatTextureOrNull("uroughness", alloc);
+     FloatTexture vRoughness = parameters.GetFloatTextureOrNull("vroughness", alloc);
+     if (!uRoughness)
+@@ -680,8 +690,8 @@ HdPbrtLayeredMaterial *HdPbrtLayeredMaterial::Create(
+     bool remapRoughness = parameters.GetOneBool("remaproughness", true);
+     return alloc.new_object<HdPbrtLayeredMaterial>(
+         reflectance, transmittance, specTint, specWeight, uRoughness, vRoughness, eta,
+-        sheenColor, sheenWeight, sheenRoughness, sheenOnTop, displacement, normalMap,
+-        remapRoughness);
++        sheenColor, sheenWeight, sheenRoughness, sheenOnTop, coatWeight, coatRoughness,
++        coatEta, coatTint, displacement, normalMap, remapRoughness);
+ }
+ 
+ STAT_COUNTER("Scene/Materials", nMaterialsCreated);
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index 380493f..cf4bd70 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -634,6 +634,8 @@ class HdPbrtLayeredMaterial {
+                           FloatTexture uRoughness, FloatTexture vRoughness, Float eta,
+                           SpectrumTexture sheenColor, FloatTexture sheenWeight,
+                           FloatTexture sheenRoughness, bool sheenOnTop,
++                          FloatTexture coatWeight, FloatTexture coatRoughness, Float coatEta,
++                          SpectrumTexture coatTint,
+                           FloatTexture displacement, Image *normalMap, bool remapRoughness)
+         : displacement(displacement),
+           normalMap(normalMap),
+@@ -646,7 +648,11 @@ class HdPbrtLayeredMaterial {
+           vRoughness(vRoughness),
+           sheenWeight(sheenWeight),
+           sheenRoughness(sheenRoughness),
++          coatTint(coatTint),
++          coatWeight(coatWeight),
++          coatRoughness(coatRoughness),
+           eta(eta),
++          coatEta(coatEta),
+           sheenOnTop(sheenOnTop),
+           remapRoughness(remapRoughness) {}
+ 
+@@ -655,8 +661,9 @@ class HdPbrtLayeredMaterial {
+     template <typename TextureEvaluator>
+     PBRT_CPU_GPU bool CanEvaluateTextures(TextureEvaluator texEval) const {
+         return texEval.CanEvaluate({uRoughness, vRoughness, specWeight, sheenWeight,
+-                                    sheenRoughness},
+-                                   {reflectance, transmittance, specTint, sheenColor});
++                                    sheenRoughness, coatWeight, coatRoughness},
++                                   {reflectance, transmittance, specTint, sheenColor,
++                                    coatTint});
+     }
+ 
+     template <typename TextureEvaluator>
+@@ -675,9 +682,14 @@ class HdPbrtLayeredMaterial {
+         Float sw = Clamp(texEval(sheenWeight, ctx), 0, 1);
+         SampledSpectrum sc = Clamp(texEval(sheenColor, ctx, lambda), 0, 1) * sw;
+         Float sa = Clamp(texEval(sheenRoughness, ctx), 0, 1);
+-        return HdPbrtLayeredBxDF(r, t, tint, w, eta,
+-                                 TrowbridgeReitzDistribution(urough, vrough), sc, sw, sa,
+-                                 sheenOnTop);
++        HdPbrtDielectricLobe spec{w, eta, TrowbridgeReitzDistribution(urough, vrough)};
++        Float cr = texEval(coatRoughness, ctx);
++        if (remapRoughness)
++            cr = TrowbridgeReitzDistribution::RoughnessToAlpha(cr);
++        HdPbrtDielectricLobe coat{Clamp(texEval(coatWeight, ctx), 0, 1), coatEta,
++                                  TrowbridgeReitzDistribution(cr, cr)};
++        SampledSpectrum ct = Clamp(texEval(coatTint, ctx, lambda), 0, 1);
++        return HdPbrtLayeredBxDF(r, t, tint, spec, sc, sw, sa, sheenOnTop, coat, ct);
+     }
+ 
+     PBRT_CPU_GPU
+@@ -702,7 +714,9 @@ class HdPbrtLayeredMaterial {
+     Image *normalMap;
+     SpectrumTexture reflectance, transmittance, specTint, sheenColor;
+     FloatTexture specWeight, uRoughness, vRoughness, sheenWeight, sheenRoughness;
+-    Float eta;
++    SpectrumTexture coatTint;
++    FloatTexture coatWeight, coatRoughness;
++    Float eta, coatEta;
+     bool sheenOnTop;
+     bool remapRoughness;
+ };
+-- 
+2.43.0
+

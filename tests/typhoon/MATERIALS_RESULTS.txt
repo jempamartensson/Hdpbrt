@@ -1,6 +1,6 @@
 open_pbr--displacement                                         mean ratio  1.057   rel RMSE  0.085   match
 open_pbr--feature_base_color                                   mean ratio  1.028   rel RMSE  0.039   match
-open_pbr--feature_coat                                         mean ratio  1.141   rel RMSE  0.197   close
+open_pbr--feature_coat                                         mean ratio  1.016   rel RMSE  0.034   match
 open_pbr--feature_emission                                     mean ratio  1.028   rel RMSE  0.033   match
 open_pbr--feature_fuzz                                         mean ratio  1.031   rel RMSE  0.035   match
 open_pbr--feature_geometry_normal                              mean ratio  1.033   rel RMSE  0.038   match
@@ -40,4 +40,4 @@ standard_surface--input_transmission_extra_roughness           mean ratio  0.927
 standard_surface--input_transmission_scatter_anisotropy        mean ratio  0.996   rel RMSE  0.081   match
 standard_surface--ior                                          mean ratio  1.032   rel RMSE  0.039   match
 standard_surface--textured                                     mean ratio  1.031   rel RMSE  0.041   match
-match 29  close 13  differs 0  missing 0
+match 30  close 12  differs 0  missing 0

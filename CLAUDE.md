@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (15 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (16 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -92,6 +92,9 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    E_spec) under the specular (standard_surface sheen) or on top (`bool sheenontop`: OpenPBR
    fuzz, pbrlib sheen_bsdf); `transmittance`: straight eta-1 transmission base (thin walls).
    Each layer scales those below by 1 - w * E(wo). Furnace: 1.000 for all combinations.
+16. `hdpbrtlayered` coat: `coatweight`, `coatroughness` (alpha unless remapped), `coateta`,
+   `coattint` (multiplies every layer under the coat). Above the specular, under
+   `sheenontop` sheen. `HdPbrtDielectricLobe` is shared by coat and specular.
 
 ## Done in the 2026-11-22 session
 
@@ -300,7 +303,13 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   sigma_a/sigma_s as 3-band steps (490/590 nm, fitted to RGB-exact transmittance). honey
   differ -> close (0.86 -> 0.90), scatter_anisotropy close -> match, dielectric_layer_absorption
   and _anisotropic match -> close (RMSE 0.09 -> 0.105, 1.07 -> 1.08 bright).
-  Open: coat;
+  Coat (2026-11-23, patch 16): OpenPBR coat roughens the specular below
+  (r' = (r^4 + 2 c^4)^(1/4)), makes its IOR relative to the coat (both blended by weight),
+  and darkens the base, (1 - K) / (1 - E K) with K = 1 - (1 - F0) / n^2 (spec; Typhoon does
+  the same); coattint = darkening * lerp(1, coat_color, w). standard_surface: coat_color,
+  coat_affect_color (base^(1 + w a)), coat_affect_roughness. feature_coat 1.14 -> 1.02
+  (match). Not done: coat over metal (conductor path), textured base color in darkening.
+  Open:
   dispersion; Oren-Nayar roughness; real subsurface.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Last: velocity motion blur (meshes whose point count changes, e.g. simulations; Jens
