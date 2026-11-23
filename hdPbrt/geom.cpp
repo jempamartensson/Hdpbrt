@@ -288,8 +288,11 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
                 os << mat.textures;
         }
     }
-    const std::string matLine =
+    std::string matLine =
         HdPbrt_MaterialLine(mat, _hasDisplayColor ? &_displayColor : nullptr);
+    // Transmissive materials with an interior medium (pbrt's volpath).
+    if (!mat.mediumName.empty())
+        matLine += "  MediumInterface " + HdPbrt_Quote(mat.mediumName) + " \"\"\n";
     const bool emissive =
         _CanEmit() && (mat.emission[0] > 0 || mat.emission[1] > 0 || mat.emission[2] > 0);
 

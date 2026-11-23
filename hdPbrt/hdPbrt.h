@@ -160,11 +160,13 @@ public:
 // Material: UsdPreviewSurface / MaterialX standard_surface / OpenPBR mapped
 // to pbrt's diffuse, hdpbrtlayered, conductor and dielectric materials.
 struct HdPbrtMaterialDesc {
-    std::string type = "coateddiffuse";
+    std::string type = "diffuse";
     GfVec3f baseColor{0.18f, 0.18f, 0.18f};
     std::string baseColorTexture;    // named pbrt texture, or empty
     bool baseColorFromPrimvar = false;  // use the mesh's displayColor
     std::string otherParams;         // remaining pbrt parameters
+    bool writeReflectance = true;    // false: no "reflectance" (conductor with eta/k)
+    std::string mediumName;          // interior medium (defined in `textures`), or empty
     std::string textures;            // Texture directives this material needs
     GfVec3f emission{0, 0, 0};
     float opacity = 1.f;

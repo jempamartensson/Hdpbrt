@@ -34,7 +34,7 @@ std::string HdPbrt_MaterialLine(const HdPbrtMaterialDesc &m, const GfVec3f *disp
 {
     std::ostringstream os;
     os << "Material " << HdPbrt_Quote(m.type);
-    if (m.type != "dielectric") {
+    if (m.type != "dielectric" && m.writeReflectance) {
         if (!m.baseColorTexture.empty())
             os << " \"texture reflectance\" " << HdPbrt_Quote(m.baseColorTexture);
         else {
@@ -230,6 +230,251 @@ struct _Builder {
     }
 };
 
+// ---------------------------------------------------------------------------
+// MaterialX pbrlib BSDF graphs (ND_surface / ND_surface_unlit). The graph is
+// reduced to one pbrt material: layer/mix/add nodes are resolved, each BSDF
+// node becomes the closest pbrt material. Unauthored inputs take the pbrlib
+// nodedef defaults (Hydra passes authored values only). Roughness on BSDF
+// nodes is already GGX alpha.
+
+GfVec2f _Vec2(const HdMaterialNode2 &n, const char *name, GfVec2f def)
+{
+    VtValue v = _Param(n, name);
+    if (v.IsHolding<GfVec2f>()) return v.UncheckedGet<GfVec2f>();
+    if (v.IsHolding<GfVec2d>()) return GfVec2f(v.UncheckedGet<GfVec2d>());
+    if (v.IsHolding<float>()) return GfVec2f(v.UncheckedGet<float>());
+    return def;
+}
+
+std::string _String(const HdMaterialNode2 &n, const char *name, const char *def)
+{
+    VtValue v = _Param(n, name);
+    if (v.IsHolding<std::string>()) return v.UncheckedGet<std::string>();
+    if (v.IsHolding<TfToken>()) return v.UncheckedGet<TfToken>().GetString();
+    return def;
+}
+
+bool _Is(const HdMaterialNode2 *n, const char *nodePrefix)
+{
+    return n && TfStringStartsWith(n->nodeTypeId.GetString(), nodePrefix);
+}
+
+GfVec3f _Clamp01(GfVec3f c)
+{
+    for (int i = 0; i < 3; ++i)
+        c[i] = std::min(std::max(c[i], 0.f), 1.f);
+    return c;
+}
+
+struct _MtlxMapper {
+    _Builder &b;
+    const HdMaterialNode2 *vdf = nullptr;  // volume under a layer_vdf
+
+    // layer_vdf (a BSDF with a volume below it): the BSDF part; the volume
+    // becomes the interior medium of a transmissive result.
+    const HdMaterialNode2 *ThroughVdf(const HdMaterialNode2 *n) {
+        while (_Is(n, "ND_layer_vdf")) {
+            if (!vdf)
+                vdf = b.net.Upstream(*n, TfToken("base"));
+            n = b.net.Upstream(*n, TfToken("top"));
+        }
+        return n;
+    }
+
+    static bool IsDiffuse(const HdMaterialNode2 *n) {
+        return _Is(n, "ND_oren_nayar_diffuse_bsdf") || _Is(n, "ND_burley_diffuse_bsdf") ||
+               _Is(n, "ND_subsurface_bsdf") || _Is(n, "ND_sheen_bsdf");
+    }
+
+    static bool IsDielectric(const HdMaterialNode2 *n, bool *reflects, bool *transmits) {
+        if (!_Is(n, "ND_dielectric_bsdf"))
+            return false;
+        const std::string mode = _String(*n, "scatter_mode", "R");
+        *reflects = mode.find('R') != std::string::npos;
+        *transmits = mode.find('T') != std::string::npos;
+        return true;
+    }
+
+    void Rough(std::ostringstream &os, const HdMaterialNode2 &n) {
+        GfVec2f a = _Vec2(n, "roughness", GfVec2f(0.05f));
+        os << " \"float uroughness\" " << std::max(a[0], 0.f) << " \"float vroughness\" "
+           << std::max(a[1], 0.f) << " \"bool remaproughness\" false";
+    }
+
+    // Diffuse-like base color (color * weight); a texture on "color" wins.
+    void DiffuseBase(const HdMaterialNode2 &n, HdPbrtMaterialDesc &d) {
+        const GfVec3f def = _Is(&n, "ND_sheen_bsdf") ? GfVec3f(1.f) : GfVec3f(0.18f);
+        d.baseColor = _Color(n, "color", def) * _Float(n, "weight", 1);
+        bool fromPrimvar = false;
+        d.baseColorTexture = b.Texture(n, "color", true, &fromPrimvar);
+        d.baseColorFromPrimvar = fromPrimvar;
+    }
+
+    // Dielectric reflection over a diffuse base (or over black).
+    void Layered(const HdMaterialNode2 &spec, const HdMaterialNode2 *base,
+                 HdPbrtMaterialDesc &d) {
+        std::ostringstream os;
+        d.type = "hdpbrtlayered";
+        if (base)
+            DiffuseBase(*base, d);
+        else
+            d.baseColor = GfVec3f(0);
+        Rough(os, spec);
+        os << " \"float eta\" " << _Float(spec, "ior", 1.5f);
+        const float w = std::min(std::max(_Float(spec, "weight", 1), 0.f), 1.f);
+        if (w != 1.f)
+            os << " \"float specularweight\" " << w;
+        GfVec3f tint = _Clamp01(_Color(spec, "tint", GfVec3f(1)));
+        if (tint != GfVec3f(1))
+            os << " \"rgb speculartint\" " << HdPbrt_Rgb(tint);
+        d.otherParams = os.str();
+    }
+
+    void Map(const HdMaterialNode2 *n, HdPbrtMaterialDesc &d) {
+        std::ostringstream os;
+        n = ThroughVdf(n);
+        bool refl = false, trans = false;
+        if (!n) {
+            d.type = "diffuse";
+            d.baseColor = GfVec3f(0);
+        } else if (_Is(n, "ND_layer_bsdf")) {
+            const HdMaterialNode2 *top = ThroughVdf(b.net.Upstream(*n, TfToken("top")));
+            const HdMaterialNode2 *base = ThroughVdf(b.net.Upstream(*n, TfToken("base")));
+            bool br = false, bt = false;
+            if (IsDielectric(top, &refl, &trans) && refl) {
+                if (!base || IsDiffuse(base)) {
+                    Layered(*top, base, d);
+                } else if (IsDielectric(base, &br, &bt) && bt) {
+                    // Reflection on top of transmission: one glass interface.
+                    d.type = "dielectric";
+                    Rough(os, *top);
+                    os << " \"float eta\" " << _Float(*top, "ior", 1.5f);
+                    d.otherParams = os.str();
+                } else if (_Is(base, "ND_conductor_bsdf")) {
+                    d.type = "coatedconductor";
+                    d.writeReflectance = false;
+                    GfVec2f ia = _Vec2(*top, "roughness", GfVec2f(0.05f));
+                    GfVec2f ca = _Vec2(*base, "roughness", GfVec2f(0.05f));
+                    os << " \"float interface.uroughness\" " << ia[0]
+                       << " \"float interface.vroughness\" " << ia[1]
+                       << " \"float interface.eta\" " << _Float(*top, "ior", 1.5f)
+                       << " \"float conductor.uroughness\" " << ca[0]
+                       << " \"float conductor.vroughness\" " << ca[1]
+                       << " \"rgb conductor.eta\" "
+                       << HdPbrt_Rgb(_Color(*base, "ior", GfVec3f(0.183f, 0.421f, 1.373f)))
+                       << " \"rgb conductor.k\" "
+                       << HdPbrt_Rgb(_Color(*base, "extinction", GfVec3f(3.424f, 2.346f, 1.770f)))
+                       << " \"bool remaproughness\" false";
+                    d.otherParams = os.str();
+                } else {
+                    Map(base, d);
+                }
+            } else if (_Is(top, "ND_sheen_bsdf") && base) {
+                Map(base, d);  // sheen not translated yet
+            } else {
+                Map(top ? top : base, d);
+            }
+        } else if (_Is(n, "ND_mix_bsdf")) {
+            const float mix = _Float(*n, "mix", 0);
+            const HdMaterialNode2 *fg = b.net.Upstream(*n, TfToken("fg"));
+            const HdMaterialNode2 *bg = b.net.Upstream(*n, TfToken("bg"));
+            Map(mix >= 0.5f ? (fg ? fg : bg) : (bg ? bg : fg), d);
+        } else if (_Is(n, "ND_add_bsdf")) {
+            const HdMaterialNode2 *a = b.net.Upstream(*n, TfToken("in1"));
+            Map(a ? a : b.net.Upstream(*n, TfToken("in2")), d);
+        } else if (IsDiffuse(n)) {
+            d.type = "diffuse";
+            DiffuseBase(*n, d);
+        } else if (_Is(n, "ND_translucent_bsdf")) {
+            d.type = "diffusetransmission";
+            d.baseColor = GfVec3f(0);
+            os << " \"rgb transmittance\" "
+               << HdPbrt_Rgb(_Clamp01(_Color(*n, "color", GfVec3f(1)) * _Float(*n, "weight", 1)));
+            d.otherParams = os.str();
+        } else if (_Is(n, "ND_conductor_bsdf")) {
+            d.type = "conductor";
+            d.writeReflectance = false;
+            Rough(os, *n);
+            os << " \"rgb eta\" " << HdPbrt_Rgb(_Color(*n, "ior", GfVec3f(0.183f, 0.421f, 1.373f)))
+               << " \"rgb k\" " << HdPbrt_Rgb(_Color(*n, "extinction", GfVec3f(3.424f, 2.346f, 1.770f)));
+            d.otherParams = os.str();
+        } else if (_Is(n, "ND_generalized_schlick_bsdf")) {
+            // A conductor whose normal-incidence reflectance is color0.
+            d.type = "conductor";
+            d.baseColor = _Color(*n, "color0", GfVec3f(1)) * _Float(*n, "weight", 1);
+            Rough(os, *n);
+            d.otherParams = os.str();
+        } else if (IsDielectric(n, &refl, &trans)) {
+            if (trans) {
+                d.type = "dielectric";
+                Rough(os, *n);
+                os << " \"float eta\" " << _Float(*n, "ior", 1.5f);
+                d.otherParams = os.str();
+            } else {
+                Layered(*n, nullptr, d);
+            }
+        } else {
+            TF_WARN("hdPbrt: unsupported MaterialX BSDF node %s, using diffuse",
+                    n->nodeTypeId.GetText());
+            d.type = "diffuse";
+            d.baseColor = GfVec3f(0.18f);
+        }
+    }
+
+    // Emission of an EDF graph: uniform_edf color; generalized_schlick_edf
+    // scales its base by its cosine-weighted hemispherical average,
+    // color0 + (color90 - color0) * 2 / ((e + 1)(e + 2)).
+    GfVec3f Edf(const HdMaterialNode2 *n) {
+        if (_Is(n, "ND_uniform_edf"))
+            return _Color(*n, "color", GfVec3f(1));
+        if (_Is(n, "ND_generalized_schlick_edf")) {
+            const GfVec3f c0 = _Color(*n, "color0", GfVec3f(1));
+            const GfVec3f c90 = _Color(*n, "color90", GfVec3f(1));
+            const float e = std::max(_Float(*n, "exponent", 5), 0.f);
+            const GfVec3f avg = c0 + (c90 - c0) * (2.f / ((e + 1) * (e + 2)));
+            const GfVec3f base = Edf(b.net.Upstream(*n, TfToken("base")));
+            return GfVec3f(avg[0] * base[0], avg[1] * base[1], avg[2] * base[2]);
+        }
+        if (_Is(n, "ND_add_edf"))
+            return Edf(b.net.Upstream(*n, TfToken("in1"))) + Edf(b.net.Upstream(*n, TfToken("in2")));
+        return GfVec3f(0);
+    }
+
+    // Returns false when `surf` isn't an ND_surface / ND_surface_unlit.
+    bool MapSurface(const HdMaterialNode2 &surf, HdPbrtMaterialDesc &d) {
+        const std::string &type = surf.nodeTypeId.GetString();
+        if (TfStringStartsWith(type, "ND_surface_unlit")) {
+            d.type = "diffuse";
+            d.baseColor = GfVec3f(0);
+            d.emission = _Color(surf, "emission_color", GfVec3f(1)) * _Float(surf, "emission", 1);
+            d.opacity = _Float(surf, "opacity", 1);
+            return true;
+        }
+        if (type != "ND_surface")
+            return false;
+        Map(b.net.Upstream(surf, TfToken("bsdf")), d);
+        // absorption_vdf / anisotropic_vdf: coefficients per unit length.
+        if (d.type == "dielectric" &&
+            (_Is(vdf, "ND_absorption_vdf") || _Is(vdf, "ND_anisotropic_vdf"))) {
+            GfVec3f sigA = _Color(*vdf, "absorption", GfVec3f(0));
+            GfVec3f sigS = _Is(vdf, "ND_anisotropic_vdf") ? _Color(*vdf, "scattering", GfVec3f(0))
+                                                          : GfVec3f(0);
+            const float g = _Is(vdf, "ND_anisotropic_vdf") ? _Float(*vdf, "anisotropy", 0) : 0;
+            d.mediumName = b.prefix + "_interior";
+            std::ostringstream m;
+            m << "MakeNamedMedium " << HdPbrt_Quote(d.mediumName)
+              << " \"string type\" \"homogeneous\" \"rgb sigma_a\" " << HdPbrt_Rgb(sigA)
+              << " \"rgb sigma_s\" " << HdPbrt_Rgb(sigS) << " \"float scale\" 1 \"float g\" "
+              << std::min(std::max(g, -0.99f), 0.99f) << "\n";
+            d.textures += m.str();
+        }
+        d.emission = Edf(b.net.Upstream(surf, TfToken("edf")));
+        d.opacity = _Float(surf, "opacity", 1);
+        d.opacityTexture = b.Texture(surf, "opacity", false);
+        return true;
+    }
+};
+
 }  // namespace
 
 HdPbrtMaterial::HdPbrtMaterial(SdfPath const &id) : HdMaterial(id) {}
@@ -261,12 +506,21 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             std::string pfx = TfMakeValidIdentifier(GetId().GetString());
             _Builder b{_Net{net2}, pfx, HdPbrtMaterialDesc{}, 0};
             const std::string type = surf->nodeTypeId.GetString();
+            // MaterialX BSDF-node graphs (ND_surface) go through their own mapper.
+            const bool mtlxGraph = _MtlxMapper{b}.MapSurface(*surf, b.desc);
+            if (mtlxGraph)
+                result = b.desc;
+            else {
 
             // Gather the generic inputs for the supported surface types.
             GfVec3f base(0.18f), emission(0.f);
             float metallic = 0, rough = 0.5f, transmission = 0, ior = 1.5f, opacity = 1;
             float specWeight = 1;
             GfVec3f specTint(1.f);
+            // Transmission: tint, interior medium (depth > 0), extra roughness.
+            GfVec3f transColor(1.f), transScatter(0.f);
+            float transDepth = 0, transAniso = 0, transExtraRough = 0;
+            bool tintWithMedium = true;  // standard_surface tints the BTDF too
             // No specular lobe at all (specular weight or color 0, or ior 1,
             // i.e. no Fresnel reflection): a plain Lambertian "diffuse".
             bool noSpecular = false;
@@ -313,6 +567,11 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 }
                 specWeight = _Float(*surf, "specular", 1);
                 specTint = _Color(*surf, "specular_color", GfVec3f(1));
+                transColor = _Color(*surf, "transmission_color", GfVec3f(1));
+                transDepth = _Float(*surf, "transmission_depth", 0);
+                transScatter = _Color(*surf, "transmission_scatter", GfVec3f(0));
+                transAniso = _Float(*surf, "transmission_scatter_anisotropy", 0);
+                transExtraRough = _Float(*surf, "transmission_extra_roughness", 0);
                 noSpecular = specWeight <= 0.f && _Float(*surf, "coat", 0) <= 0.f;
             } else if (TfStringStartsWith(type, "ND_open_pbr_surface")) {
                 base = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base_weight", 1);
@@ -336,6 +595,11 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 }
                 specWeight = _Float(*surf, "specular_weight", 1);
                 specTint = _Color(*surf, "specular_color", GfVec3f(1));
+                transColor = _Color(*surf, "transmission_color", GfVec3f(1));
+                transDepth = _Float(*surf, "transmission_depth", 0);
+                transScatter = _Color(*surf, "transmission_scatter", GfVec3f(0));
+                transAniso = _Float(*surf, "transmission_scatter_anisotropy", 0);
+                tintWithMedium = false;  // OpenPBR: the medium carries the color
                 noSpecular = specWeight <= 0.f && _Float(*surf, "coat_weight", 0) <= 0.f;
             } else {
                 // Unknown shader: look for common names, else grey diffuse.
@@ -376,7 +640,33 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             } else if (transmission >= 0.5f) {
                 d.type = "dielectric";
                 other << " \"float eta\" " << ior;
+                rough = std::min(std::max(rough + transExtraRough, 0.f), 1.f);
                 roughParam("roughness");
+                // Interior medium, MaterialX's conversion: extinction
+                // -ln(color) / depth, scattering scatter / depth, absorption
+                // the difference shifted so that no channel is negative.
+                const bool medium = transDepth > 1e-6f;
+                if (medium) {
+                    GfVec3f sigS, sigA;
+                    float minA = 1e30f;
+                    for (int i = 0; i < 3; ++i) {
+                        const float c = std::min(std::max(transColor[i], 1e-6f), 1.f);
+                        sigS[i] = std::max(transScatter[i], 0.f) / transDepth;
+                        sigA[i] = -std::log(c) / transDepth - sigS[i];
+                        minA = std::min(minA, sigA[i]);
+                    }
+                    if (minA < 0)
+                        sigA -= GfVec3f(minA);
+                    d.mediumName = pfx + "_interior";
+                    std::ostringstream m;
+                    m << "MakeNamedMedium " << HdPbrt_Quote(d.mediumName)
+                      << " \"string type\" \"homogeneous\" \"rgb sigma_a\" " << HdPbrt_Rgb(sigA)
+                      << " \"rgb sigma_s\" " << HdPbrt_Rgb(sigS) << " \"float scale\" 1"
+                      << " \"float g\" " << std::min(std::max(transAniso, -0.99f), 0.99f) << "\n";
+                    d.textures += m.str();
+                }
+                if ((!medium || tintWithMedium) && transColor != GfVec3f(1.f))
+                    other << " \"rgb transmissiontint\" " << HdPbrt_Rgb(_Clamp01(transColor));
             } else if (noSpecular) {
                 d.type = "diffuse";
             } else {
@@ -394,6 +684,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             }
             d.otherParams = other.str();
             result = d;
+            }  // !mtlxGraph
         }
     }
 
