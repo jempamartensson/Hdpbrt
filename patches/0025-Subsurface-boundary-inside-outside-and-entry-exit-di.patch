@@ -1,0 +1,132 @@
+From 1ee7ae0e082a6257c5b9498ce5762e0705ad47ac Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Mon, 23 Nov 2026 20:25:34 +0100
+Subject: [PATCH] Subsurface boundary: inside/outside and entry/exit directions
+ by the geometric normal (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/bxdfs.h     | 42 ++++++++++++++++++++++++++++++------------
+ src/pbrt/materials.h |  8 ++++++--
+ 2 files changed, 36 insertions(+), 14 deletions(-)
+
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index fd96248..7f2e5de 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -1308,9 +1308,16 @@ class HdPbrtLayeredBxDF {
+     // the sampled wavelengths (nm).
+     // Subsurface scattering (random walk in the interior medium): from
+     // outside, weight w of the base enters by cosine-weighted transmission;
+-    // from inside (wo.z < 0) the surface is a Lambertian exit, nothing else.
+-    PBRT_CPU_GPU
+-    void SetSubsurface(Float w) { sssWeight = Clamp(w, 0, 1); }
++    // from inside the surface is a Lambertian exit, nothing else. Inside and
++    // outside, and whether an entry/exit direction really crosses the
++    // surface, follow the geometric normal ngLocal (in the shading frame):
++    // the medium switches by it, and on coarse meshes the smooth shading
++    // normal disagrees near the terminator (blocky artifacts).
++    PBRT_CPU_GPU
++    void SetSubsurface(Float w, Vector3f ngLocal) {
++        sssWeight = Clamp(w, 0, 1);
++        sssNg = ngLocal;
++    }
+ 
+     PBRT_CPU_GPU
+     void SetFilm(Float weight, Float thicknessNm, Float eta, const SampledSpectrum &lambdaNm) {
+@@ -1340,10 +1347,13 @@ class HdPbrtLayeredBxDF {
+     PBRT_CPU_GPU
+     SampledSpectrum f(Vector3f wo, Vector3f wi, TransportMode mode) const {
+         if (sssWeight > 0 && wo.z != 0) {
+-            if (wo.z < 0)  // leaving the interior
+-                return wi.z > 0 ? SampledSpectrum(InvPi) : SampledSpectrum(0.f);
+-            if (wi.z < 0)
+-                return SSSEntry(LayerWeights(wo));
++            if (Dot(wo, sssNg) < 0)  // leaving the interior
++                return (wi.z > 0 && Dot(wi, sssNg) > 0) ? SampledSpectrum(InvPi)
++                                                        : SampledSpectrum(0.f);
++            if (wi.z < 0 || Dot(wi, sssNg) < 0)
++                return (wo.z > 0 && wi.z < 0 && Dot(wi, sssNg) < 0)
++                           ? SSSEntry(LayerWeights(wo))
++                           : SampledSpectrum(0.f);
+         }
+         if (!SameHemisphere(wo, wi) || wo.z == 0)
+             return SampledSpectrum(0.f);
+@@ -1360,12 +1370,12 @@ class HdPbrtLayeredBxDF {
+         BxDFReflTransFlags sampleFlags = BxDFReflTransFlags::All) const {
+         if (wo.z == 0)
+             return {};
+-        if (sssWeight > 0 && wo.z < 0) {
++        if (sssWeight > 0 && Dot(wo, sssNg) < 0) {
+             // Leaving the interior: Lambertian exit.
+             if (!(sampleFlags & BxDFReflTransFlags::Transmission))
+                 return {};
+             Vector3f wi = SampleCosineHemisphere(u);
+-            if (wi.z <= 0)
++            if (wi.z <= 0 || Dot(wi, sssNg) <= 0)
+                 return {};
+             return BSDFSample(SampledSpectrum(InvPi), wi, CosineHemispherePDF(wi.z),
+                               BxDFFlags::DiffuseTransmission);
+@@ -1379,10 +1389,14 @@ class HdPbrtLayeredBxDF {
+             return {};
+         if (uc >= 1 - p.sss) {
+             // Into the interior: cosine-weighted transmission.
++            if (flip)
++                return {};  // outside by the geometry, inside by the shading
+             Vector3f wi = SampleCosineHemisphere(u);
+             if (wi.z <= 0)
+                 return {};
+             wi.z = -wi.z;
++            if (Dot(wi, sssNg) >= 0)
++                return {};
+             return BSDFSample(SSSEntry(k), wi, p.sss * CosineHemispherePDF(-wi.z),
+                               BxDFFlags::DiffuseTransmission);
+         }
+@@ -1453,11 +1467,14 @@ class HdPbrtLayeredBxDF {
+     Float PDF(Vector3f wo, Vector3f wi, TransportMode mode,
+               BxDFReflTransFlags sampleFlags = BxDFReflTransFlags::All) const {
+         if (sssWeight > 0 && wo.z != 0) {
+-            if (wo.z < 0)
+-                return (wi.z > 0 && (sampleFlags & BxDFReflTransFlags::Transmission))
++            if (Dot(wo, sssNg) < 0)
++                return (wi.z > 0 && Dot(wi, sssNg) > 0 &&
++                        (sampleFlags & BxDFReflTransFlags::Transmission))
+                            ? CosineHemispherePDF(wi.z)
+                            : 0;
+-            if (wi.z < 0) {
++            if (wi.z < 0 || Dot(wi, sssNg) < 0) {
++                if (!(wo.z > 0 && wi.z < 0 && Dot(wi, sssNg) < 0))
++                    return 0;
+                 Probs p = LobeProbs(wo, LayerWeights(wo), sampleFlags);
+                 return p.sum > 0 ? p.sss * CosineHemispherePDF(-wi.z) : 0;
+             }
+@@ -1673,6 +1690,7 @@ class HdPbrtLayeredBxDF {
+     Float filmWeight = 0, filmThickness = 0, filmEta = 1.4f;
+     SampledSpectrum filmLambda;
+     Float sssWeight = 0;
++    Vector3f sssNg = Vector3f(0, 0, 1);
+     int metalMode;
+     bool sheenOnTop;
+ };
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index c48c568..e9d9c91 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -726,8 +726,12 @@ class HdPbrtLayeredMaterial {
+                 lambdaNm[i] = lambda[i];
+             bxdf.SetFilm(filmWeight, filmThickness, filmEta, lambdaNm);
+         }
+-        if (sssWeight > 0)
+-            bxdf.SetSubsurface(sssWeight);
++        if (sssWeight > 0) {
++            // The geometric normal in the BSDF's shading frame (as BSDF
++            // builds it from ns and dpdus).
++            Frame frame = Frame::FromXZ(Normalize(ctx.dpdus), Vector3f(ctx.ns));
++            bxdf.SetSubsurface(sssWeight, Normalize(frame.ToLocal(Vector3f(ctx.n))));
++        }
+         return bxdf;
+     }
+ 
+-- 
+2.43.0
+

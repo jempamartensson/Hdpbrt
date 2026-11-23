@@ -361,6 +361,9 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   base texture stays unscaled unless w ~ 1. Other objects inside the mesh aren't handled
   (Typhoon walks only against the owner mesh). long_radius_anisotropic close -> match
   (0.159 -> 0.082); 33 match / 9 close. White furnace walk: 1.000.
+  Patch 25: inside/outside and the entry/exit directions use the geometric normal (passed
+  to the BxDF in the shading frame), as the medium switches by it; with the smooth shading
+  normal, coarse meshes showed bright blotches along the terminator at short radii.
   Dispersion (patch 24): OpenPBR transmission_dispersion_scale/abbe_number -> "spectrum eta"
   (360-830 nm every 10) from a two-term Cauchy fit through n_d (589.3) with V = (n_d - 1) /
   (n_F - n_C), Abbe / scale, as Typhoon; pbrt traces it at the hero wavelength. pbrt fix in
