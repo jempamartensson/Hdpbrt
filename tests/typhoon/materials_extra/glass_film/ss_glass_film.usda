@@ -1,0 +1,53 @@
+#usda 1.0
+(
+    defaultPrim = "standard_shader_ball_scene"
+    metersPerUnit = 0.01
+    renderSettingsPrimPath = "/Render/RenderSettings"
+    subLayers = [
+        @../_assets/shaderball/scene.usda@
+    ]
+    upAxis = "Y"
+)
+
+def Scope "Looks"
+{
+    def Material "ss_glass_film" (
+    )
+    {
+        token outputs:mtlx:surface.connect = </Looks/ss_glass_film/surface_shader1.outputs:out>
+        token outputs:surface.connect = </Looks/ss_glass_film/surface_shader1.outputs:out>
+
+        def Shader "surface_shader1"
+        {
+            uniform token info:id = "ND_standard_surface_surfaceshader"
+            float inputs:base = 0
+            float inputs:transmission = 1
+            float inputs:specular_roughness = 0
+            float inputs:thin_film_thickness = 350
+            float inputs:thin_film_IOR = 1.33
+            token outputs:out
+        }
+    }
+}
+
+over "standard_shader_ball_scene"
+{
+    over "shader_ball"
+    {
+        over "material_surface" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            rel material:binding = </Looks/ss_glass_film>
+        }
+
+    }
+}
+
+over "Render"
+{
+    over "Product"
+    {
+        token productName = "glass_film/ss_glass_film.exr"
+    }
+}

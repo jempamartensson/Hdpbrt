@@ -388,7 +388,14 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   (the film used to be dropped). conductor_bsdf_thinfilm_aluminum_500 RMSE 0.097 -> 0.048;
   33/9/0. F82 metals with a film read 10-28% brighter than Typhoon, which is on Typhoon's
   side (`materials_extra/film_check`: its 1 nm film darkens the metal; ours equals no film).
-  Open: thin film on transmissive glass.
+  Thin film on glass (patch 29, 2026-11-24): pbrt `dielectric` takes "filmweight" /
+  "filmthickness" / "filmeta"; `DielectricBxDF::Fr` lerps Fresnel with the spectral Airy
+  reflectance of a film on the outside (from inside: the matching outside angle, since a
+  lossless stack reflects the same from both sides; TIR -> 1), transmission 1 - Fr, as Typhoon
+  (R + T = 1). Sampling uses the spectra's averages. From OpenPBR / standard_surface glass and
+  pbrlib dielectric_bsdf thinfilm_* (also on the R-over-T layer). Suite unchanged (no fixture
+  has a film on solid glass); `materials_extra/glass_film` match. Open: standard_surface solid
+  glass (base 0, transmission 1) reads 1.16x Typhoon with or without a film.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Shadow/reflection terminator (done 2026-11-23, pbrt patch 26): on coarse smooth-shaded
   meshes, rays leaving near a facet's horizon were blocked by neighboring facets (whole dark

@@ -372,6 +372,13 @@ struct _MtlxMapper {
         return std::max(_Float(n, "thinfilm_thickness", 0), 0.f);
     }
 
+    // A pbrlib dielectric's thin film on a pbrt dielectric (patch 29).
+    void DielectricFilm(std::ostringstream &os, const HdMaterialNode2 &n) {
+        if (Film(n) > 0)
+            os << " \"float filmweight\" 1 \"float filmthickness\" " << Film(n)
+               << " \"float filmeta\" " << std::max(_Float(n, "thinfilm_ior", 1.5f), 1.f);
+    }
+
     // A metal-only hdpbrtlayered: the node's weight and its thin film.
     void MetalWeightAndFilm(std::ostringstream &os, const HdMaterialNode2 &n) {
         const float w = std::max(_Float(n, "weight", 1), 0.f);
@@ -490,6 +497,7 @@ struct _MtlxMapper {
                     Rough(os, *top);
                     os << " \"float eta\" " << _Float(*top, "ior", 1.5f) << " \"float hdpbrttopweight\" "
                        << std::min(std::max(_Float(*top, "weight", 1), 0.f), 1.f);
+                    DielectricFilm(os, Film(*top) > 0 ? *top : *base);
                     const GfVec3f tint =
                         _Clamp01(_Color(*base, "tint", GfVec3f(1)) * _Float(*base, "weight", 1));
                     if (tint != GfVec3f(1))
@@ -584,6 +592,7 @@ struct _MtlxMapper {
                 d.type = "dielectric";
                 Rough(os, *n);
                 os << " \"float eta\" " << _Float(*n, "ior", 1.5f);
+                DielectricFilm(os, *n);
                 d.otherParams = os.str();
             } else {
                 Layered(*n, nullptr, d);
@@ -1068,7 +1077,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 d.mediumName = pfx + "_sss";
                 d.textures += HdPbrt_SubsurfaceMedium(d.mediumName, sssColor, sssRadius, sssAniso);
             }
-            if (filmW > 0 && filmNm > 0 && d.type == "hdpbrtlayered")
+            if (filmW > 0 && filmNm > 0 && (d.type == "hdpbrtlayered" || d.type == "dielectric"))
                 other << " \"float filmweight\" " << filmW << " \"float filmthickness\" " << filmNm
                       << " \"float filmeta\" " << filmIor;
             d.otherParams = other.str();

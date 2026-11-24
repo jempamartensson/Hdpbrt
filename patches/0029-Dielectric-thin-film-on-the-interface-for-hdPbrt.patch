@@ -1,0 +1,324 @@
+From a49e7c11ec0709d7ce3850b39f41b4a3a28dd054 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Tue, 24 Nov 2026 07:56:30 +0100
+Subject: [PATCH] Dielectric: thin film on the interface (for hdPbrt)
+
+"filmweight"/"filmthickness" (nm)/"filmeta" on the dielectric material: the
+interface reflectance becomes Fresnel lerped with the exact spectral Airy
+reflectance of a film on the outside (from inside, the matching outside
+angle; TIR stays 1), and transmission takes 1 - R. R and T are spectra;
+reflection/transmission sampling uses their averages.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/bxdfs.cpp     | 44 +++++++++----------
+ src/pbrt/bxdfs.h       | 95 +++++++++++++++++++++++++++++-------------
+ src/pbrt/materials.cpp | 10 +++--
+ src/pbrt/materials.h   | 18 +++++++-
+ 4 files changed, 113 insertions(+), 54 deletions(-)
+
+diff --git a/src/pbrt/bxdfs.cpp b/src/pbrt/bxdfs.cpp
+index 9829d30..35a587e 100644
+--- a/src/pbrt/bxdfs.cpp
++++ b/src/pbrt/bxdfs.cpp
+@@ -81,9 +81,10 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
+     BxDFReflTransFlags sampleFlags) const {
+     if (eta == 1 || mfDistrib.EffectivelySmooth()) {
+         // Sample perfect specular dielectric BSDF
+-        Float R = FrDielectric(CosTheta(wo), eta), T = 1 - R;
++        // hdPbrt: spectral with a thin film (Fr)
++        SampledSpectrum R = Fr(CosTheta(wo)), T = SampledSpectrum(1.f) - R;
+         // Compute probabilities _pr_ and _pt_ for sampling reflection and transmission
+-        Float pr = R, pt = T;
++        Float pr = R.Average(), pt = T.Average();
+         if (!(sampleFlags & BxDFReflTransFlags::Reflection))
+             pr = 0;
+         if (!(sampleFlags & BxDFReflTransFlags::Transmission))
+@@ -94,7 +95,7 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
+         if (uc < pr / (pr + pt)) {
+             // Sample perfect specular dielectric BRDF
+             Vector3f wi(-wo.x, -wo.y, wo.z);
+-            SampledSpectrum fr(R / AbsCosTheta(wi));
++            SampledSpectrum fr = R / AbsCosTheta(wi);
+             return BSDFSample(fr, wi, pr / (pr + pt), BxDFFlags::SpecularReflection);
+ 
+         } else {
+@@ -107,7 +108,7 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
+             if (!valid)
+                 return {};
+ 
+-            SampledSpectrum ft(T / AbsCosTheta(wi));
++            SampledSpectrum ft = T / AbsCosTheta(wi);
+             ft *= tint * TopThroughput(wo);
+             // Account for non-symmetry with transmission to different medium
+             if (mode == TransportMode::Radiance)
+@@ -120,10 +121,10 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
+     } else {
+         // Sample rough dielectric BSDF
+         Vector3f wm = mfDistrib.Sample_wm(wo, u);
+-        Float R = FrDielectric(Dot(wo, wm), eta);
+-        Float T = 1 - R;
++        SampledSpectrum R = Fr(Dot(wo, wm));
++        SampledSpectrum T = SampledSpectrum(1.f) - R;
+         // Compute probabilities _pr_ and _pt_ for sampling reflection and transmission
+-        Float pr = R, pt = T;
++        Float pr = R.Average(), pt = T.Average();
+         if (!(sampleFlags & BxDFReflTransFlags::Reflection))
+             pr = 0;
+         if (!(sampleFlags & BxDFReflTransFlags::Transmission))
+@@ -141,8 +142,8 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
+             pdf = mfDistrib.PDF(wo, wm) / (4 * AbsDot(wo, wm)) * pr / (pr + pt);
+ 
+             DCHECK(!IsNaN(pdf));
+-            SampledSpectrum f(mfDistrib.D(wm) * mfDistrib.G(wo, wi) * R /
+-                              (4 * CosTheta(wi) * CosTheta(wo)) * MultiScatterScale(wo));
++            SampledSpectrum f = R * (mfDistrib.D(wm) * mfDistrib.G(wo, wi) /
++                                     (4 * CosTheta(wi) * CosTheta(wo)) * MultiScatterScale(wo));
+             return BSDFSample(f, wi, pdf, BxDFFlags::GlossyReflection);
+ 
+         } else {
+@@ -160,9 +161,9 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
+ 
+             CHECK(!IsNaN(pdf));
+             // Evaluate BRDF and return _BSDFSample_ for rough transmission
+-            SampledSpectrum ft(T * mfDistrib.D(wm) * mfDistrib.G(wo, wi) *
+-                               std::abs(Dot(wi, wm) * Dot(wo, wm) /
+-                                        (CosTheta(wi) * CosTheta(wo) * denom)));
++            SampledSpectrum ft = T * (mfDistrib.D(wm) * mfDistrib.G(wo, wi) *
++                                      std::abs(Dot(wi, wm) * Dot(wo, wm) /
++                                               (CosTheta(wi) * CosTheta(wo) * denom)));
+             ft *= tint * (TopThroughput(wo) * MultiScatterScale(wo));
+             // Account for non-symmetry with transmission to different medium
+             if (mode == TransportMode::Radiance)
+@@ -193,22 +194,23 @@ PBRT_CPU_GPU SampledSpectrum DielectricBxDF::f(Vector3f wo, Vector3f wi, Transpo
+     if (Dot(wm, wi) * cosTheta_i < 0 || Dot(wm, wo) * cosTheta_o < 0)
+         return {};
+ 
+-    Float F = FrDielectric(Dot(wo, wm), eta);
++    SampledSpectrum F = Fr(Dot(wo, wm));
+     if (reflect) {
+         // Compute reflection at rough dielectric interface
+-        return SampledSpectrum(mfDistrib.D(wm) * mfDistrib.G(wo, wi) * F /
+-                               std::abs(4 * cosTheta_i * cosTheta_o) * MultiScatterScale(wo));
++        return F * (mfDistrib.D(wm) * mfDistrib.G(wo, wi) /
++                    std::abs(4 * cosTheta_i * cosTheta_o) * MultiScatterScale(wo));
+ 
+     } else {
+         // Compute transmission at rough dielectric interface
+         Float denom = Sqr(Dot(wi, wm) + Dot(wo, wm) / etap) * cosTheta_i * cosTheta_o;
+-        Float ft = mfDistrib.D(wm) * (1 - F) * mfDistrib.G(wo, wi) *
+-                   std::abs(Dot(wi, wm) * Dot(wo, wm) / denom);
++        SampledSpectrum ft = (SampledSpectrum(1.f) - F) *
++                             (mfDistrib.D(wm) * mfDistrib.G(wo, wi) *
++                              std::abs(Dot(wi, wm) * Dot(wo, wm) / denom));
+         // Account for non-symmetry with transmission to different medium
+         if (mode == TransportMode::Radiance)
+             ft /= Sqr(etap);
+ 
+-        return tint * (ft * TopThroughput(wo) * MultiScatterScale(wo));
++        return tint * ft * (TopThroughput(wo) * MultiScatterScale(wo));
+     }
+ }
+ 
+@@ -234,11 +236,11 @@ PBRT_CPU_GPU Float DielectricBxDF::PDF(Vector3f wo, Vector3f wi, TransportMode m
+         return {};
+ 
+     // Determine Fresnel reflectance of rough dielectric boundary
+-    Float R = FrDielectric(Dot(wo, wm), eta);
+-    Float T = 1 - R;
++    SampledSpectrum R = Fr(Dot(wo, wm));
++    SampledSpectrum T = SampledSpectrum(1.f) - R;
+ 
+     // Compute probabilities _pr_ and _pt_ for sampling reflection and transmission
+-    Float pr = R, pt = T;
++    Float pr = R.Average(), pt = T.Average();
+     if (!(sampleFlags & BxDFReflTransFlags::Reflection))
+         pr = 0;
+     if (!(sampleFlags & BxDFReflTransFlags::Transmission))
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index bc39e79..19cbc46 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -201,6 +201,35 @@ class DiffuseTransmissionBxDF {
+     SampledSpectrum R, T;
+ };
+ 
++// Thin-film interference (for hdPbrt): reflectance of a film of index nFilm
++// and thickness dNm (nanometres) between air and a dielectric substrate of
++// index nSub, at wavelength lambdaNm, for incidence cosine cosTheta. Exact
++// Airy summation of the amplitude coefficients, s and p averaged (OpenPBR's
++// thin film; MaterialX/Typhoon use Belcour and Barla's RGB approximation).
++PBRT_CPU_GPU inline Float HdPbrtThinFilmR(Float cosTheta, Float lambdaNm, Float dNm,
++                                          Float nFilm, Float nSub) {
++    const Float c1 = Clamp(cosTheta, 0, 1), s1Sq = 1 - c1 * c1;
++    nFilm = std::max<Float>(nFilm, 1e-3f);
++    nSub = std::max<Float>(nSub, 1);
++    const Float s2Sq = s1Sq / Sqr(nFilm);
++    if (s2Sq >= 1)
++        return 1;  // total internal reflection at the film (film index < 1)
++    const Float c2 = SafeSqrt(1 - s2Sq), c3 = SafeSqrt(1 - s1Sq / Sqr(nSub));
++    const Float n1 = 1, n2 = nFilm, n3 = nSub;
++    const Float delta = 4 * Pi * n2 * dNm * c2 / lambdaNm;
++    const Float cosD = std::cos(delta);
++    auto airy = [&](Float r12, Float r23) {
++        Float num = r12 * r12 + r23 * r23 + 2 * r12 * r23 * cosD;
++        Float den = 1 + r12 * r12 * r23 * r23 + 2 * r12 * r23 * cosD;
++        return Clamp(num / std::max<Float>(den, 1e-8f), 0, 1);
++    };
++    const Float rs12 = (n1 * c1 - n2 * c2) / (n1 * c1 + n2 * c2);
++    const Float rs23 = (n2 * c2 - n3 * c3) / (n2 * c2 + n3 * c3);
++    const Float rp12 = (n2 * c1 - n1 * c2) / (n2 * c1 + n1 * c2);
++    const Float rp23 = (n3 * c2 - n2 * c3) / (n3 * c2 + n2 * c3);
++    return (airy(rs12, rs23) + airy(rp12, rp23)) / 2;
++}
++
+ // DielectricBxDF Definition
+ class DielectricBxDF {
+   public:
+@@ -235,6 +264,17 @@ class DielectricBxDF {
+     Float PDF(Vector3f wo, Vector3f wi, TransportMode mode,
+               BxDFReflTransFlags sampleFlags = BxDFReflTransFlags::All) const;
+ 
++    // hdPbrt: a thin film on the outside of the interface (weight,
++    // thickness in nm, film index, the sampled wavelengths in nm).
++    PBRT_CPU_GPU
++    void SetFilm(Float weight, Float thicknessNm, Float filmEta_,
++                 const SampledSpectrum &lambdaNm) {
++        filmWeight = Clamp(weight, 0, 1);
++        filmThickness = std::max<Float>(thicknessNm, 0);
++        filmEta = filmEta_;
++        filmLambda = lambdaNm;
++    }
++
+     PBRT_CPU_GPU
+     static constexpr const char *Name() { return "DielectricBxDF"; }
+ 
+@@ -258,6 +298,32 @@ class DielectricBxDF {
+     // (as Typhoon's coupled dielectric interface does).
+     bool multiScatter = false;
+     PBRT_CPU_GPU Float MultiScatterScale(Vector3f wo) const;
++    // hdPbrt: thin film (see SetFilm). Fr() is the interface reflectance for
++    // incidence cosine cosTheta_i (negative: from inside), Fresnel lerped
++    // with the film's spectral Airy reflectance by the film weight; the
++    // transmission takes 1 - Fr (the film doesn't absorb).
++    Float filmWeight = 0, filmThickness = 0, filmEta = 1.4f;
++    SampledSpectrum filmLambda;
++    PBRT_CPU_GPU bool HasFilm() const { return filmWeight > 0 && filmThickness > 0 && eta > 1; }
++    PBRT_CPU_GPU SampledSpectrum Fr(Float cosTheta_i) const {
++        const Float F = FrDielectric(cosTheta_i, eta);
++        if (!HasFilm())
++            return SampledSpectrum(F);
++        // The film is on the outside: a lossless stack reflects the same
++        // from both sides, so from inside use the matching outside angle.
++        Float cosAir = Clamp(cosTheta_i, -1, 1);
++        if (cosAir < 0) {
++            const Float sin2Air = (1 - Sqr(cosAir)) * Sqr(eta);
++            if (sin2Air >= 1)
++                return SampledSpectrum(1.f);  // total internal reflection
++            cosAir = std::sqrt(1 - sin2Air);
++        }
++        SampledSpectrum r;
++        for (int i = 0; i < NSpectrumSamples; ++i)
++            r[i] = Lerp(filmWeight, F,
++                        HdPbrtThinFilmR(cosAir, filmLambda[i], filmThickness, filmEta, eta));
++        return r;
++    }
+ };
+ 
+ // ThinDielectricBxDF Definition
+@@ -1210,35 +1276,6 @@ PBRT_CPU_GPU inline Float HdPbrtAshikhminV(Float cosO, Float cosI) {
+ 
+ // HdPbrtDielectricLobe: a weighted GGX dielectric reflection lobe (a coat or
+ // a specular layer), used by HdPbrtLayeredBxDF.
+-// Thin-film interference (for hdPbrt): reflectance of a film of index nFilm
+-// and thickness dNm (nanometres) between air and a dielectric substrate of
+-// index nSub, at wavelength lambdaNm, for incidence cosine cosTheta. Exact
+-// Airy summation of the amplitude coefficients, s and p averaged (OpenPBR's
+-// thin film; MaterialX/Typhoon use Belcour and Barla's RGB approximation).
+-PBRT_CPU_GPU inline Float HdPbrtThinFilmR(Float cosTheta, Float lambdaNm, Float dNm,
+-                                          Float nFilm, Float nSub) {
+-    const Float c1 = Clamp(cosTheta, 0, 1), s1Sq = 1 - c1 * c1;
+-    nFilm = std::max<Float>(nFilm, 1e-3f);
+-    nSub = std::max<Float>(nSub, 1);
+-    const Float s2Sq = s1Sq / Sqr(nFilm);
+-    if (s2Sq >= 1)
+-        return 1;  // total internal reflection at the film (film index < 1)
+-    const Float c2 = SafeSqrt(1 - s2Sq), c3 = SafeSqrt(1 - s1Sq / Sqr(nSub));
+-    const Float n1 = 1, n2 = nFilm, n3 = nSub;
+-    const Float delta = 4 * Pi * n2 * dNm * c2 / lambdaNm;
+-    const Float cosD = std::cos(delta);
+-    auto airy = [&](Float r12, Float r23) {
+-        Float num = r12 * r12 + r23 * r23 + 2 * r12 * r23 * cosD;
+-        Float den = 1 + r12 * r12 * r23 * r23 + 2 * r12 * r23 * cosD;
+-        return Clamp(num / std::max<Float>(den, 1e-8f), 0, 1);
+-    };
+-    const Float rs12 = (n1 * c1 - n2 * c2) / (n1 * c1 + n2 * c2);
+-    const Float rs23 = (n2 * c2 - n3 * c3) / (n2 * c2 + n3 * c3);
+-    const Float rp12 = (n2 * c1 - n1 * c2) / (n2 * c1 + n1 * c2);
+-    const Float rp23 = (n3 * c2 - n2 * c3) / (n3 * c2 + n2 * c3);
+-    return (airy(rs12, rs23) + airy(rp12, rp23)) / 2;
+-}
+-
+ // Thin film over a metal (for hdPbrt): as HdPbrtThinFilmR, but the substrate
+ // is a conductor of complex index a + i b (relative to air), or, with f82,
+ // an F82-tint metal (F0 = a, F82 tint = b). The F82 reflectance is defined
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index 4d6b081..554a5a6 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -76,9 +76,13 @@ DielectricMaterial *DielectricMaterial::Create(
+     bool multiScatter = parameters.GetOneBool("hdpbrtmultiscatter", false);
+     if (topWeight > 0 || multiScatter)
+         HdPbrtInitDielectricAlbedo();
+-    return alloc.new_object<DielectricMaterial>(uRoughness, vRoughness, eta, displacement,
+-                                                normalMap, remapRoughness, tint, topWeight,
+-                                                multiScatter);
++    DielectricMaterial *m = alloc.new_object<DielectricMaterial>(
++        uRoughness, vRoughness, eta, displacement, normalMap, remapRoughness, tint, topWeight,
++        multiScatter);
++    m->SetFilm(Clamp(parameters.GetOneFloat("filmweight", 0.f), 0, 1),
++               parameters.GetOneFloat("filmthickness", 0.f),
++               parameters.GetOneFloat("filmeta", 1.4f));
++    return m;
+ }
+ 
+ // ThinDielectricMaterial Method Definitions
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index e9d9c91..dad2ff2 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -207,7 +207,22 @@ class DielectricMaterial {
+         SampledSpectrum t(1.f);
+         if (tint)
+             t = Clamp(texEval(tint, ctx, lambda), 0, 1);
+-        return DielectricBxDF(sampledEta, distrib, t, topWeight, multiScatter);
++        DielectricBxDF bxdf(sampledEta, distrib, t, topWeight, multiScatter);
++        if (filmWeight > 0 && filmThickness > 0) {
++            SampledSpectrum lambdaNm;
++            for (int i = 0; i < NSpectrumSamples; ++i)
++                lambdaNm[i] = lambda[i];
++            bxdf.SetFilm(filmWeight, filmThickness, filmEta, lambdaNm);
++        }
++        return bxdf;
++    }
++
++    // hdPbrt: thin film on the outside ("filmweight", "filmthickness" in nm,
++    // "filmeta").
++    void SetFilm(Float weight, Float thicknessNm, Float eta) {
++        filmWeight = weight;
++        filmThickness = thicknessNm;
++        filmEta = eta;
+     }
+ 
+   private:
+@@ -215,6 +230,7 @@ class DielectricMaterial {
+     SpectrumTexture tint;  // hdPbrt: "transmissiontint"
+     Float topWeight;       // hdPbrt: "hdpbrttopweight"
+     bool multiScatter;     // hdPbrt: "hdpbrtmultiscatter"
++    Float filmWeight = 0, filmThickness = 0, filmEta = 1.4f;
+     Image *normalMap;
+     FloatTexture displacement;
+     FloatTexture uRoughness, vRoughness;
+-- 
+2.43.0
+

@@ -4,7 +4,7 @@ them and point SUITE at a directory whose `materials/` holds both:
 
     mkdir -p $X/materials && ln -s $SUITE/materials/_assets $X/materials/_assets
     ln -s $PWD/tests/typhoon/materials_extra/* $X/materials/
-    SUITE=$X OUT=... tests/typhoon/run_materials.sh open_pbr_metal diffuse_rough rough_glass furnace thin_film dispersion metal_film film_check
+    SUITE=$X OUT=... tests/typhoon/run_materials.sh open_pbr_metal diffuse_rough rough_glass furnace thin_film dispersion metal_film film_check glass_film
 
 - `open_pbr_metal`: OpenPBR metal with specular_weight 0.5 / tinted specular_color /
   half metalness (pbrt patch 19). All match Typhoon (2026-11-23).
@@ -42,3 +42,11 @@ them and point SUITE at a directory whose `materials/` holds both:
   (RGB) over the ball. Likely cause: its Schlick-substrate Airy term (`thinFilm.cpp`) sets
   each polarization's substrate reflectance to half the Fresnel value (R23p = R23s = F / 2). Without a film the
   same metal matches (1.032).
+- `glass_film`: thin film on solid glass (pbrt patch 29): OpenPBR smooth (film ior 1.8, 400 nm)
+  and rough (0.3, film weight 0.7), pbrlib dielectric_bsdf RT with thinfilm, standard_surface
+  transmission 1 with a 350 nm film, and OpenPBR with a 1 nm film / no film (2026-11-24).
+  OpenPBR and pbrlib all match (1.02; RMSE vs Typhoon's film refs 0.086 -> 0.073 and
+  0.075 -> 0.060 against dropping the film). hdPbrt's 1 nm film equals no film; Typhoon's
+  shifts the glass by +1% (it leaves its coupled-interface path when any film is present), while
+  the 400 nm film's own effect is about the same in both. ss_glass_film and ss_glass_nofilm are
+  both close at 1.16: a standard_surface glass gap that has nothing to do with the film (open).
