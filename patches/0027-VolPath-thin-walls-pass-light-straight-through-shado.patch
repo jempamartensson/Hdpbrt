@@ -1,0 +1,187 @@
+From dc32bb70cf8b29aed23e3fa8fc085097d8bc9725 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Tue, 24 Nov 2026 07:29:29 +0100
+Subject: [PATCH] VolPath: thin walls pass light straight through, shadow rays
+ included (for hdPbrt)
+
+HdPbrtLayeredBxDF's straight (eta 1) transmission now acts like a medium
+boundary: shadow rays that hit such a surface continue, scaled by the lobe's
+weight, instead of stopping (as Typhoon does). When a path samples that lobe
+it doesn't count as a bounce, and MIS keeps weighing against the last real
+vertex (light sampling passes the wall with certainty; BSDF sampling picks it
+with the lobe's probability), so light seen through a thin wall isn't counted
+twice.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/bsdf.h              |  3 ++
+ src/pbrt/bxdfs.h             | 23 ++++++++++++
+ src/pbrt/cpu/integrators.cpp | 72 +++++++++++++++++++++++++++++++++---
+ 3 files changed, 93 insertions(+), 5 deletions(-)
+
+diff --git a/src/pbrt/bsdf.h b/src/pbrt/bsdf.h
+index 691180e..d89025d 100644
+--- a/src/pbrt/bsdf.h
++++ b/src/pbrt/bsdf.h
+@@ -28,6 +28,9 @@ class BSDF {
+     operator bool() const { return (bool)bxdf; }
+     PBRT_CPU_GPU
+     BxDFFlags Flags() const { return bxdf.Flags(); }
++    // hdPbrt: the BxDF itself (thin-wall pass-through in volpath).
++    PBRT_CPU_GPU
++    BxDF GetBxDF() const { return bxdf; }
+ 
+     PBRT_CPU_GPU
+     Vector3f RenderToLocal(Vector3f v) const { return shadingFrame.ToLocal(v); }
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index 7f2e5de..62aeeb8 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -1492,6 +1492,29 @@ class HdPbrtLayeredBxDF {
+         return PDFUpper(wo, wi, p);
+     }
+ 
++    // Straight transmission (thin wall, eta 1) as a pass-through for volpath:
++    // the delta lobe's weight for wo (f |cos|, so the factor a ray going
++    // straight through gets) and the probability that Sample_f picks it.
++    // False when there is no such lobe for wo.
++    PBRT_CPU_GPU
++    bool HasPassThrough() const { return bool(T); }
++    PBRT_CPU_GPU
++    bool PassThrough(Vector3f wo, SampledSpectrum *weight, Float *prob) const {
++        if (!T || wo.z == 0)
++            return false;
++        if (sssWeight > 0 && Dot(wo, sssNg) < 0)
++            return false;
++        if (wo.z < 0)
++            wo = -wo;
++        Weights k = LayerWeights(wo);
++        Probs p = LobeProbs(wo, k, BxDFReflTransFlags::All);
++        if (p.sum == 0 || p.trans == 0)
++            return false;
++        *weight = T * k.under * k.film * k.base;
++        *prob = p.trans;
++        return true;
++    }
++
+     PBRT_CPU_GPU
+     static constexpr const char *Name() { return "HdPbrtLayeredBxDF"; }
+ 
+diff --git a/src/pbrt/cpu/integrators.cpp b/src/pbrt/cpu/integrators.cpp
+index b44d40a..b758ce4 100644
+--- a/src/pbrt/cpu/integrators.cpp
++++ b/src/pbrt/cpu/integrators.cpp
+@@ -1038,6 +1038,37 @@ static inline Float HdPbrtMisAverage(const SampledSpectrum &r, const SampledWave
+     return lambda.SecondaryTerminated() ? r[0] : r.Average();
+ }
+ 
++// hdPbrt: thin walls. A BSDF with straight (eta 1) transmission, as
++// HdPbrtLayeredBxDF has for thin-walled materials, lets light go straight
++// through. Volpath treats that lobe like a medium boundary: shadow rays pass
++// it (times its weight, Typhoon does the same), and when a path samples it,
++// it doesn't count as a bounce and MIS keeps weighing against the last real
++// vertex. Returns the lobe's weight for a ray along `d` and the probability
++// that BSDF sampling picks it.
++static bool HdPbrtPassThrough(const BSDF &bsdf, Vector3f d, SampledSpectrum *weight,
++                              Float *prob) {
++    const HdPbrtLayeredBxDF *bxdf = bsdf.GetBxDF().CastOrNullptr<HdPbrtLayeredBxDF>();
++    return bxdf && bxdf->PassThrough(bsdf.RenderToLocal(-d), weight, prob);
++}
++
++static bool HdPbrtCanPassThrough(const BSDF &bsdf) {
++    const HdPbrtLayeredBxDF *bxdf = bsdf.GetBxDF().CastOrNullptr<HdPbrtLayeredBxDF>();
++    return bxdf && bxdf->HasPassThrough();
++}
++
++// The same for a shadow ray's hit (evaluates the material there).
++static bool HdPbrtShadowPassThrough(SurfaceInteraction &isect, const Ray &ray,
++                                    SampledWavelengths &lambda, Camera camera,
++                                    Sampler sampler, SampledSpectrum *weight,
++                                    Float *prob) {
++    if (!isect.material.Is<HdPbrtLayeredMaterial>() && !isect.material.Is<MixMaterial>())
++        return false;
++    static thread_local ScratchBuffer buf(4096);
++    buf.Reset();
++    BSDF bsdf = isect.GetBSDF(RayDifferential(ray), lambda, camera, buf, sampler);
++    return bsdf && HdPbrtPassThrough(bsdf, ray.d, weight, prob);
++}
++
+ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &lambda,
+                                       Sampler sampler, ScratchBuffer &scratchBuffer,
+                                       VisibleSurface *visibleSurf) const {
+@@ -1266,9 +1297,13 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+             *visibleSurf = VisibleSurface(isect, albedo, lambda);
+         }
+ 
+-        // Terminate path if maximum depth reached
+-        if (depth++ >= maxDepth)
++        // Terminate path if maximum depth reached (hdPbrt: unless it can
++        // pass straight through a thin wall, which isn't a bounce)
++        const int depthIn = depth;
++        const bool canPass = HdPbrtCanPassThrough(bsdf);
++        if (depth++ >= maxDepth && !canPass)
+             return L;
++        const bool atMaxDepth = depth > maxDepth;
+         sssSteps = 0;
+ 
+         ++surfaceInteractions;
+@@ -1279,10 +1314,12 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+         }
+ 
+         // Sample illumination from lights to find attenuated path contribution
+-        if (IsNonSpecular(bsdf.Flags())) {
++        if (IsNonSpecular(bsdf.Flags()) && !atMaxDepth) {
+             L += SampleLd(isect, &bsdf, lambda, sampler, beta, r_u);
+             DCHECK(IsInf(L.y(lambda)) == false);
+         }
++        const LightSampleContext prevIntrContextIn = prevIntrContext;
++        const uint64_t prevLinkMaskIn = prevLinkMask;
+         prevIntrContext = LightSampleContext(isect);
+         prevLinkMask = isect.hdpbrtLinkMask;
+ 
+@@ -1292,6 +1329,22 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+         pstd::optional<BSDFSample> bs = bsdf.Sample_f(wo, u, sampler.Get2D());
+         if (!bs)
+             break;
++        if (canPass && bs->IsSpecular() && bs->IsTransmission()) {
++            // hdPbrt: straight through a thin wall (see HdPbrtPassThrough):
++            // no bounce; light sampling from the last vertex passes the wall
++            // with certainty, BSDF sampling picked it with bs->pdf.
++            beta *= bs->f * AbsDot(bs->wi, isect.shading.n) / bs->pdf;
++            r_l /= bs->pdf;
++            depth = depthIn;
++            prevIntrContext = prevIntrContextIn;
++            prevLinkMask = prevLinkMaskIn;
++            ray = isect.SpawnRay(ray, bsdf, bs->wi, bs->flags, bs->eta);
++            if (!beta)
++                break;
++            continue;
++        }
++        if (atMaxDepth)
++            return L;
+         // Update _beta_ and rescaled path probabilities for BSDF scattering
+         beta *= bs->f * AbsDot(bs->wi, isect.shading.n) / bs->pdf;
+         if (bs->pdfIsProportional)
+@@ -1483,8 +1536,17 @@ SampledSpectrum VolPathIntegrator::SampleLd(const Interaction &intr, const BSDF
+         // Handle opaque surface along ray's path (hdPbrt: unless shadow
+         // linking says it doesn't block this light; then it's passed through
+         // like a medium boundary)
+-        if (si && si->intr.material && HdPbrtBlocks(light, si->intr.hdpbrtLinkMask))
+-            return SampledSpectrum(0.f);
++        if (si && si->intr.material && HdPbrtBlocks(light, si->intr.hdpbrtLinkMask)) {
++            // hdPbrt: thin walls pass light straight through (see
++            // HdPbrtPassThrough); BSDF sampling would pick that lobe with prob.
++            SampledSpectrum weight;
++            Float prob;
++            if (!HdPbrtShadowPassThrough(si->intr, lightRay, lambda, camera, sampler,
++                                         &weight, &prob))
++                return SampledSpectrum(0.f);
++            T_ray *= weight;
++            r_u *= prob;
++        }
+ 
+         // Update transmittance for current ray segment
+         if (lightRay.medium) {
+-- 
+2.43.0
+

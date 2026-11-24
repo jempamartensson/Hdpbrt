@@ -300,8 +300,7 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   (`ty:maxBounces` b vs `pbrt:maxDepth` b+1).
   Thin walls: transmission passes straight through under the specular layer (Typhoon:
   ior 1 transmission), base takes 1 - transmission; standard_surface `thin_walled`, OpenPBR
-  `geometry_thin_walled`. pbrt shadow rays still stop at thin walls (Typhoon lets them
-  through), so light behind a thin shell arrives only by path continuation.
+  `geometry_thin_walled`. Shadow rays pass thin walls (patch 27, below).
   Media as band spectra (2026-11-23, not pushed: 2 fixtures match -> close): pbrt's RGB
   upsampling leaks absorption into zero channels (honey red 0.75x); `_MediumSpectrum` writes
   sigma_a/sigma_s as 3-band steps (490/590 nm, fitted to RGB-exact transmittance). honey
@@ -348,8 +347,8 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   thin_film_* (um) and standard_surface thin_film_thickness (nm)/thin_film_IOR. Not yet on
   metal or on transmissive (dielectric) glass. feature_thin_film RMSE 0.048 -> 0.041.
   soapbubble stays close (0.891, RMSE 0.212): the film matches (bubble centre 0.784 vs
-  0.779), but what's seen through it is darker (0.55 vs 0.70): pbrt shadow rays stop at
-  thin-walled straight transmission; Typhoon's pass. Same suspect for input_thin_walled.
+  0.779), but what's seen through it was darker (0.55 vs 0.70): pbrt shadow rays stopped at
+  thin-walled straight transmission; Typhoon's pass. Fixed by patch 27 (below).
   Subsurface (patch 23): a random walk, as Typhoon/Cycles. hdpbrtlayered "subsurface" w: from
   outside the base's share w enters by cosine-weighted transmission (no Fresnel); from inside
   (wo.z < 0) the surface is a Lambertian exit only. The interior is a homogeneous medium
@@ -371,8 +370,15 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   the secondaries were terminated, biasing chromatic media (dispersion sweep went 2.4x blue,
   "differs"); now hero-only when terminated. Sweep 0.159 -> 0.153; dispersive glasses keep
   their means but get single-wavelength color noise (open_pbr--glass RMSE 0.069 -> 0.084).
-  Open: thin-walled straight transmission in shadow rays;
-  dispersion; Oren-Nayar roughness; real subsurface.
+  Thin-wall pass-through (patch 27, 2026-11-24): volpath treats hdpbrtlayered's straight
+  (eta 1) transmission like a medium boundary. Shadow rays continue through it times the
+  lobe's weight (`HdPbrtLayeredBxDF::PassThrough`, material evaluated at the shadow hit);
+  a path that samples it doesn't count a bounce, keeps the previous vertex for light MIS
+  and divides r_l by the lobe probability (NEE multiplies r_u by it), so light seen
+  through a wall isn't counted twice. soapbubble 0.891 -> 0.922 (RMSE 0.212 -> 0.187),
+  input_thin_walled 0.971 -> 0.999 (0.168 -> 0.156); both still close. 33/9/0, usdlux
+  326/328 unchanged.
+  Open: thin film on metal and on transmissive glass.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Shadow/reflection terminator (done 2026-11-23, pbrt patch 26): on coarse smooth-shaded
   meshes, rays leaving near a facet's horizon were blocked by neighboring facets (whole dark
