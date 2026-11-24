@@ -1,0 +1,107 @@
+From 57f2ac88172d85c74aab506ac0a2b2351332c360 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Tue, 24 Nov 2026 07:45:05 +0100
+Subject: [PATCH] HdPbrtLayered: thin film on the metal lobe (for hdPbrt)
+
+The metal Fresnel is lerped by the film weight with an exact spectral Airy
+reflectance of the film over the metal: complex-index conductors directly,
+F82-tint metals through the film-side amplitude that reproduces the F82
+reflectance under a zero-thickness film (sign of a dielectric of F0's
+index). A vanishing film gives back the bare metal exactly.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/bxdfs.h | 63 ++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 61 insertions(+), 2 deletions(-)
+
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index 62aeeb8..bc39e79 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -1239,6 +1239,55 @@ PBRT_CPU_GPU inline Float HdPbrtThinFilmR(Float cosTheta, Float lambdaNm, Float
+     return (airy(rs12, rs23) + airy(rp12, rp23)) / 2;
+ }
+ 
++// Thin film over a metal (for hdPbrt): as HdPbrtThinFilmR, but the substrate
++// is a conductor of complex index a + i b (relative to air), or, with f82,
++// an F82-tint metal (F0 = a, F82 tint = b). The F82 reflectance is defined
++// against air, so its film-side amplitude is the one that, under a film of
++// zero thickness, gives back exactly the F82 reflectance at cosTheta, with
++// the phase (sign) of a dielectric of F0's index (Typhoon and Belcour and
++// Barla also take a dielectric's phase for Schlick substrates).
++PBRT_CPU_GPU inline Float HdPbrtThinFilmMetalR(Float cosTheta, Float lambdaNm, Float dNm,
++                                               Float nFilm, Float a, Float b, bool f82) {
++    using Complex = pstd::complex<Float>;
++    const Float c1 = Clamp(cosTheta, 0, 1), s1Sq = 1 - c1 * c1;
++    nFilm = std::max<Float>(nFilm, 1e-3f);
++    const Float s2Sq = s1Sq / Sqr(nFilm);
++    if (s2Sq >= 1)
++        return 1;  // total internal reflection at the film (film index < 1)
++    const Float c2 = SafeSqrt(1 - s2Sq);
++    const Float r12s = (c1 - nFilm * c2) / (c1 + nFilm * c2);
++    const Float r12p = (nFilm * c1 - c2) / (nFilm * c1 + c2);
++    Complex r23s(0), r23p(0);
++    if (f82) {
++        const Float F0 = Clamp(a, 0, 0.999f), sF0 = std::sqrt(F0);
++        const Float n3 = (1 + sF0) / (1 - sF0), c3 = SafeSqrt(1 - s1Sq / Sqr(n3));
++        // F82-tint reflectance against air at cosTheta (Kutz et al. 2021).
++        const Float muBar = 1.f / 7.f, denom = muBar * Pow<6>(1 - muBar);
++        const Float fBar = F0 + (1 - F0) * Pow<5>(1 - muBar);
++        const Float k = fBar * (1 - Clamp(b, 0, 1)) / denom;
++        const Float sqrtF =
++            std::sqrt(Clamp(F0 + (1 - F0) * Pow<5>(1 - c1) - k * c1 * Pow<6>(1 - c1), 0, 1));
++        // Air-side amplitudes: F82 magnitude, the dielectric's sign; then
++        // remove the air-film interface: r13 = (r12 + r23) / (1 + r12 r23).
++        const Float r13s = (c1 - n3 * c3) < 0 ? -sqrtF : sqrtF;
++        const Float r13p = (n3 * c1 - c3) < 0 ? -sqrtF : sqrtF;
++        r23s = Complex((r13s - r12s) / (1 - r12s * r13s));
++        r23p = Complex((r13p - r12p) / (1 - r12p * r13p));
++    } else {
++        const Complex eta3 = Complex(a, b) / nFilm;  // relative to the film
++        const Complex c3 = pstd::sqrt(Complex(1) - Complex(s2Sq) / (eta3 * eta3));
++        r23s = (Complex(c2) - eta3 * c3) / (Complex(c2) + eta3 * c3);
++        r23p = (eta3 * c2 - c3) / (eta3 * c2 + c3);
++    }
++    const Float delta = 4 * Pi * nFilm * dNm * c2 / lambdaNm;
++    const Complex z(std::cos(delta), std::sin(delta));
++    auto airy = [&](Float r12, Complex r23) {
++        const Complex num = Complex(r12) + r23 * z, den = Complex(1) + r12 * r23 * z;
++        return Clamp(pstd::norm(num) / std::max<Float>(pstd::norm(den), 1e-12f), 0, 1);
++    };
++    return (airy(r12s, r23s) + airy(r12p, r23p)) / 2;
++}
++
+ struct HdPbrtDielectricLobe {
+     Float weight = 0, eta = 1;
+     TrowbridgeReitzDistribution distrib;
+@@ -1696,15 +1745,25 @@ class HdPbrtLayeredBxDF {
+     PBRT_CPU_GPU
+     SampledSpectrum MetalFresnel(Float mu) const {
+         mu = Clamp(mu, 0, 1);
++        SampledSpectrum F = MetalFresnelNoFilm(mu);
++        if (HasFilm())
++            for (int i = 0; i < NSpectrumSamples; ++i)
++                F[i] = Lerp(filmWeight, F[i],
++                            HdPbrtThinFilmMetalR(mu, filmLambda[i], filmThickness, filmEta,
++                                                 metalA[i], metalB[i], metalMode != 1));
++        return F * metalScale;
++    }
++    PBRT_CPU_GPU
++    SampledSpectrum MetalFresnelNoFilm(Float mu) const {
+         if (metalMode == 1)
+-            return FrComplex(mu, metalA, metalB) * metalScale;
++            return FrComplex(mu, metalA, metalB);
+         const Float muBar = 1.f / 7.f;
+         const Float denom = muBar * Pow<6>(1 - muBar);
+         SampledSpectrum F0 = metalA, one(1.f);
+         SampledSpectrum fBar = F0 + (one - F0) * Pow<5>(1 - muBar);
+         SampledSpectrum a = fBar * (one - metalB) / denom;
+         SampledSpectrum F = F0 + (one - F0) * Pow<5>(1 - mu) - a * (mu * Pow<6>(1 - mu));
+-        return ClampZero(F) * metalScale;
++        return ClampZero(F);
+     }
+ 
+     SampledSpectrum R, T, specTint, sheenColor, coatTint, metalA, metalB;
+-- 
+2.43.0
+

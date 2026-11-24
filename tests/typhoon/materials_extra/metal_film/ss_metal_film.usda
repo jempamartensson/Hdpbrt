@@ -1,0 +1,53 @@
+#usda 1.0
+(
+    defaultPrim = "standard_shader_ball_scene"
+    metersPerUnit = 0.01
+    renderSettingsPrimPath = "/Render/RenderSettings"
+    subLayers = [
+        @../_assets/shaderball/scene.usda@
+    ]
+    upAxis = "Y"
+)
+
+def Scope "Looks"
+{
+    def Material "ss_metal_film" (
+    )
+    {
+        token outputs:mtlx:surface.connect = </Looks/ss_metal_film/surface_shader1.outputs:out>
+        token outputs:surface.connect = </Looks/ss_metal_film/surface_shader1.outputs:out>
+
+        def Shader "surface_shader1"
+        {
+            uniform token info:id = "ND_standard_surface_surfaceshader"
+            float inputs:metalness = 1
+            color3f inputs:base_color = (0.95, 0.75, 0.4)
+            float inputs:specular_roughness = 0.1
+            float inputs:thin_film_thickness = 400
+            float inputs:thin_film_IOR = 1.5
+            token outputs:out
+        }
+    }
+}
+
+over "standard_shader_ball_scene"
+{
+    over "shader_ball"
+    {
+        over "material_surface" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            rel material:binding = </Looks/ss_metal_film>
+        }
+
+    }
+}
+
+over "Render"
+{
+    over "Product"
+    {
+        token productName = "metal_film/ss_metal_film.exr"
+    }
+}

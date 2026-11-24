@@ -367,6 +367,20 @@ struct _MtlxMapper {
         return true;
     }
 
+    // MaterialX BSDF-node thin film (thinfilm_thickness in nm; 0 = none).
+    float Film(const HdMaterialNode2 &n) {
+        return std::max(_Float(n, "thinfilm_thickness", 0), 0.f);
+    }
+
+    // A metal-only hdpbrtlayered: the node's weight and its thin film.
+    void MetalWeightAndFilm(std::ostringstream &os, const HdMaterialNode2 &n) {
+        const float w = std::max(_Float(n, "weight", 1), 0.f);
+        if (std::fabs(w - 1.f) > 1e-6f)
+            os << " \"float metalscale\" " << w;
+        os << " \"float filmweight\" 1 \"float filmthickness\" " << Film(n)
+           << " \"float filmeta\" " << std::max(_Float(n, "thinfilm_ior", 1.5f), 1.f);
+    }
+
     void Rough(std::ostringstream &os, const HdMaterialNode2 &n) {
         GfVec2f a = _Vec2(n, "roughness", GfVec2f(0.05f));
         os << " \"float uroughness\" " << std::max(a[0], 0.f) << " \"float vroughness\" "
@@ -529,6 +543,28 @@ struct _MtlxMapper {
             d.baseColor = GfVec3f(0);
             os << " \"rgb transmittance\" "
                << HdPbrt_Rgb(_Clamp01(_Color(*n, "color", GfVec3f(1)) * _Float(*n, "weight", 1)));
+            d.otherParams = os.str();
+        } else if (_Is(n, "ND_conductor_bsdf") && Film(*n) > 0) {
+            // Thin film on a conductor: hdpbrtlayered's metal lobe alone
+            // (pbrt patch 28: the film over a complex-index substrate).
+            d.type = "hdpbrtlayered";
+            d.writeReflectance = false;
+            Rough(os, *n);
+            os << " \"float specularweight\" 0 \"float metalweight\" 1"
+               << " \"rgb metaleta\" " << HdPbrt_Rgb(_Color(*n, "ior", GfVec3f(0.183f, 0.421f, 1.373f)))
+               << " \"rgb metalk\" " << HdPbrt_Rgb(_Color(*n, "extinction", GfVec3f(3.424f, 2.346f, 1.770f)));
+            MetalWeightAndFilm(os, *n);
+            d.otherParams = os.str();
+        } else if (_Is(n, "ND_generalized_schlick_bsdf") && Film(*n) > 0) {
+            // Thin film on a Schlick metal: the F82-tint metal lobe (color0,
+            // color82; color90 and exponent are taken as 1 and 5).
+            d.type = "hdpbrtlayered";
+            d.writeReflectance = false;
+            Rough(os, *n);
+            os << " \"float specularweight\" 0 \"float metalweight\" 1"
+               << " \"rgb metalf0\" " << HdPbrt_Rgb(_Clamp01(_Color(*n, "color0", GfVec3f(1))))
+               << " \"rgb metalf82\" " << HdPbrt_Rgb(_Clamp01(_Color(*n, "color82", GfVec3f(1))));
+            MetalWeightAndFilm(os, *n);
             d.otherParams = os.str();
         } else if (_Is(n, "ND_conductor_bsdf")) {
             d.type = "conductor";

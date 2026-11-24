@@ -4,7 +4,7 @@ them and point SUITE at a directory whose `materials/` holds both:
 
     mkdir -p $X/materials && ln -s $SUITE/materials/_assets $X/materials/_assets
     ln -s $PWD/tests/typhoon/materials_extra/* $X/materials/
-    SUITE=$X OUT=... tests/typhoon/run_materials.sh open_pbr_metal diffuse_rough rough_glass furnace thin_film dispersion
+    SUITE=$X OUT=... tests/typhoon/run_materials.sh open_pbr_metal diffuse_rough rough_glass furnace thin_film dispersion metal_film film_check
 
 - `open_pbr_metal`: OpenPBR metal with specular_weight 0.5 / tinted specular_color /
   half metalness (pbrt patch 19). All match Typhoon (2026-11-23).
@@ -31,3 +31,14 @@ them and point SUITE at a directory whose `materials/` holds both:
   light crosses a sphere only ~3 mean free paths thick).
 - `dispersion`: smooth OpenPBR glass, dispersion scale 1, Abbe 10 (patch 24): ratio 1.025,
   RMSE 0.086 (0.077 without dispersion: single-wavelength color noise).
+- `metal_film`: thin film on metal (pbrt patch 28): OpenPBR metalness 1 with a full film and
+  a half-weight film on a tinted metal, standard_surface metalness 1 and 0.5 (2026-11-24, ratio /
+  RMSE): op_metal_film 1.177 / 0.315 differs, op_metal_film_w05 1.100 / 0.131 close,
+  ss_metal_film 1.280 / 0.455 differs, ss_metal_film_half 1.140 / 0.206 close. Typhoon's side:
+  see `film_check`. (The suite's conductor_bsdf_thinfilm_aluminum_500, a complex-index
+  conductor, went from RMSE 0.097 to 0.048.)
+- `film_check`: op_metal_film with no film and with a 1 nm film, which physically is no film.
+  hdPbrt renders both the same; Typhoon's 1 nm film darkens the metal by 0.85 / 0.74 / 0.92
+  (RGB) over the ball. Likely cause: its Schlick-substrate Airy term (`thinFilm.cpp`) sets
+  each polarization's substrate reflectance to half the Fresnel value (R23p = R23s = F / 2). Without a film the
+  same metal matches (1.032).

@@ -1,0 +1,53 @@
+#usda 1.0
+(
+    defaultPrim = "standard_shader_ball_scene"
+    metersPerUnit = 0.01
+    renderSettingsPrimPath = "/Render/RenderSettings"
+    subLayers = [
+        @../_assets/shaderball/scene.usda@
+    ]
+    upAxis = "Y"
+)
+
+def Scope "Looks"
+{
+    def Material "opm_none" (
+    )
+    {
+        token outputs:mtlx:surface.connect = </Looks/opm_none/surface_shader1.outputs:out>
+        token outputs:surface.connect = </Looks/opm_none/surface_shader1.outputs:out>
+
+        def Shader "surface_shader1"
+        {
+            uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+            float inputs:base_metalness = 1
+            color3f inputs:base_color = (0.95, 0.75, 0.4)
+            float inputs:specular_roughness = 0.1
+            float inputs:thin_film_thickness = 0
+            float inputs:thin_film_ior = 1.5
+            token outputs:out
+        }
+    }
+}
+
+over "standard_shader_ball_scene"
+{
+    over "shader_ball"
+    {
+        over "material_surface" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            rel material:binding = </Looks/opm_none>
+        }
+
+    }
+}
+
+over "Render"
+{
+    over "Product"
+    {
+        token productName = "film_check/opm_none.exr"
+    }
+}

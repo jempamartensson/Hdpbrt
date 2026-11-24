@@ -378,7 +378,17 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   through a wall isn't counted twice. soapbubble 0.891 -> 0.922 (RMSE 0.212 -> 0.187),
   input_thin_walled 0.971 -> 0.999 (0.168 -> 0.156); both still close. 33/9/0, usdlux
   326/328 unchanged.
-  Open: thin film on metal and on transmissive glass.
+  Thin film on metal (patch 28, 2026-11-24): the metal lobe's Fresnel is lerped by film
+  weight with an exact spectral Airy reflectance over the metal (`HdPbrtThinFilmMetalR`):
+  complex-index conductors directly (eta + ik relative to the film); F82-tint metals by the
+  film-side amplitude that gives back the F82 value under a zero-thickness film, with the
+  sign of a dielectric of F0's index (Typhoon also takes a dielectric's phase). OpenPBR and
+  standard_surface metals get it through hdpbrtlayered; pbrlib conductor_bsdf /
+  generalized_schlick_bsdf with `thinfilm_thickness` > 0 become a metal-only hdpbrtlayered
+  (the film used to be dropped). conductor_bsdf_thinfilm_aluminum_500 RMSE 0.097 -> 0.048;
+  33/9/0. F82 metals with a film read 10-28% brighter than Typhoon, which is on Typhoon's
+  side (`materials_extra/film_check`: its 1 nm film darkens the metal; ours equals no film).
+  Open: thin film on transmissive glass.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Shadow/reflection terminator (done 2026-11-23, pbrt patch 26): on coarse smooth-shaded
   meshes, rays leaving near a facet's horizon were blocked by neighboring facets (whole dark
