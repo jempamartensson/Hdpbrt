@@ -249,7 +249,9 @@ HdAovDescriptor HdPbrtRenderDelegate::GetDefaultAovDescriptor(TfToken const &nam
 
 TfTokenVector HdPbrtRenderDelegate::GetMaterialRenderContexts() const
 {
-    return {TfToken("mtlx"), TfToken()};
+    // "kma" last: only Karma-specific terminals no other context provides,
+    // such as the Karma pyro shader's kma:volume.
+    return {TfToken("mtlx"), TfToken(), TfToken("kma")};
 }
 
 HdRenderPassSharedPtr HdPbrtRenderDelegate::CreateRenderPass(HdRenderIndex *index,

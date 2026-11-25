@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (34 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (35 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -124,6 +124,15 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    weight x coat_darkening) multiplies the coat tint by lerp(1, (1 - K) / (1 - E K), w), K =
    1 - (1 - F0) / n^2 from `coateta`, E = lerp(diffuse reflectance + `"rgb coatdarkeningadd"`,
    metal F0 x min(metalscale, 1), metal weight) (Typhoon's base albedo).
+35. `nanovdb` medium Karma pyro mode (`"bool hdpbrtpyro"`, `HdPbrtPyro`): `hdpbrtdensityrange`
+   remap; with `"bool hdpbrtfire"` the temperature grid emits color(T) x intensity(T) per unit
+   length (`MediumProperties::LeIsCoefficient`: volpath adds Le, not sigma_a Le), intensity =
+   `hdpbrtfireintscale` x clamp over `hdpbrtfireintrange`, color a two-key ramp
+   (`hdpbrtfirecolor0/1` over `hdpbrtfirecolorrange`) or blackbody(T x `hdpbrtfiretempscale`)
+   from `hdpbrtfirebbtable` [K r g b ...] (else MaterialX's formula); RGB through
+   RGBIlluminantSpectrum / photometric(illuminant), like pbrt's lights. Majorant cells the
+   temperature can reach get >= 1 and SampleRay a sigma floor of 4 / cell, so fire without smoke
+   is sampled.
 
 ## Done in the 2026-11-22 session
 
@@ -241,8 +250,25 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   instance. Before that, point instances were in no collection (unlit by any linked light). Area-light shapes don't block, shadow or show a
   back (pbrt `interface` material, patch 10; rechecked 2026-11-25 with a rect light seen
   from behind over a floor).
-- Not translated yet: volume
-  materials (Karma pyro shaders), in-memory Houdini volumes (`op:` paths).
+- Not translated yet: in-memory Houdini volumes (`op:` paths). Volume materials other than
+  the Karma pyro shader (e.g. MaterialX volumes on Volume prims) use the renderer settings.
+- Karma pyro shader (2026-11-25, pbrt patch 35): Houdini exports kma_pyroshader as a MaterialX
+  graph behind `outputs:kma:volume`; hdPbrt now asks for the "kma" render context (last, after
+  mtlx and universal). Hydra delivers the pyro nodegraph as one node with the shader's own
+  parameters (`HDPBRT_DUMP_MATERIALS=1` prints networks), recognized by `enablesmoke` /
+  `densityscale` / `firetempscale` (`HdPbrt_PyroVolume`, material.cpp): extinction = density x
+  densityscale x complement(absorpcolor) (Karma's hmtlxcomplementcolor: same luminance,
+  chromaticity mirrored through D65), scattering = that x smokecolor x smokeint, fire from the
+  field `fireint` reads (`temperature` by default). The internal ramps aren't visible through
+  Hydra (defaults assumed: identity intensity, black -> (1, 0.327, 0.1)); color remaps, scatter
+  emission, masks, Cd tint, shadow tweaks and constant emission warn once. Karma's ND_blackbody
+  isn't MaterialX's luminance-1 one: measured table `_karmaBlackbody`
+  (`tests/pyro/measure_karma_blackbody.py`). `HdPbrtVolume` takes the material's density and
+  fire fields at sync and its medium parameters when the scene is written (material edits
+  don't resync the volume); vdb2nvdb's box covers the temperature grid too. Test:
+  `tests/pyro/run_pyro.sh` (builds the scene in hython, Karma via husk works under Apprentice):
+  `PYRO_RESULTS.txt`, smoke / fire / blackbody within 1%, tinted smoke with multiple
+  scattering 0.95 in red and blue (spectral).
 - Volumes (done 2026-11-22): `volume.cpp` (`HdPbrtField` bprims, `HdPbrtVolume`), converter
   `tools/vdb2nvdb.cpp` -> `hdpbrt_vdb2nvdb` next to pbrt (Houdini flavor, needs
   `-DPBRT_SOURCE`; Blender's install links to it). The interface box must face outward.

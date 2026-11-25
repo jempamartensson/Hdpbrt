@@ -1,0 +1,13 @@
+# run_pyro.sh, 2026-11-25: hdPbrt (pbrt:maxDepth 9, 256 spp) vs Karma CPU (husk, volume limit 8,
+# 64 spp), Houdini 22.0.508. Image channel means; ratio = hdPbrt / Karma.
+1 smoke            karma [0.0185 0.0185 0.0185]  hdPbrt [0.0186 0.0186 0.0186]  ratio [1.003 1.003 1.003]
+2 fire, ramp       karma [0.0061 0.002  0.0006]  hdPbrt [0.0061 0.002  0.0006]  ratio [1.    0.999 0.996]
+3 fire, blackbody  karma [0.0022 0.0004 0.    ]  hdPbrt [0.0022 0.0004 0.    ]  ratio [1.003 1.005 0.99 ]
+4 tinted smoke x3  karma [0.029  0.0148 0.0061]  hdPbrt [0.0277 0.0148 0.0058]  ratio [0.953 1.003 0.956]
+5 smoke + fire     karma [0.0156 0.0112 0.0104]  hdPbrt [0.0153 0.0112 0.0104]  ratio [0.977 0.996 1.001]
+# Single scattering (Karma's default volume limit 0, pbrt:maxDepth 1): frames 1-4 within 1%,
+# frame 5 0.977 / 0.995 / 1.000. Frame 4's red/blue -4.5% with multiple scattering is spectral
+# (pbrt's smooth RGB upsampling of a colored albedo); hdPbrt's 3-band media spectra did worse
+# (blue 0.87). Fire was 107x bright before dividing by the illuminant's photometric scale, and
+# blackbody needs Karma's own ND_blackbody (tabulated by measure_karma_blackbody.py): it has
+# MaterialX's chromaticity above ~2000 K but grows ~T^4 instead of luminance 1.

@@ -172,6 +172,10 @@ struct HdPbrtMaterialDesc {
     float opacity = 1.f;
     std::string opacityTexture;
     TfToken uvPrimvar;
+    // Volume shading (Karma pyro shader): parameters for pbrt's nanovdb
+    // medium (pbrt patch 35) and the fields it reads. Empty: not a pyro material.
+    std::string volumeParams;
+    TfToken densityField, fireField;
 };
 
 class HdPbrtMaterial final : public HdMaterial {
@@ -190,6 +194,10 @@ private:
     mutable std::mutex _mutex;
     HdPbrtMaterialDesc _desc;
 };
+
+// Karma pyro shader node -> HdPbrtMaterialDesc volume fields (material.cpp).
+bool HdPbrt_PyroVolume(const HdMaterialNetwork2 &net, const HdMaterialNode2 &n,
+                       SdfPath const &id, HdPbrtMaterialDesc *d);
 
 // Writes the pbrt "Material" line for a material (or the default material).
 std::string HdPbrt_MaterialLine(const HdPbrtMaterialDesc &m,

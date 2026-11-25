@@ -1,0 +1,292 @@
+From 292a1a22a7c5e26095624b80d0ef9c5fab0add39 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Wed, 25 Nov 2026 21:47:20 +0100
+Subject: [PATCH] NanoVDB medium: Karma pyro mode (density remap, fire emission
+ coefficient from temperature, majorant floor in fire cells) (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/cpu/integrators.cpp |   4 +-
+ src/pbrt/media.cpp           |  99 +++++++++++++++++++++++++++++++-
+ src/pbrt/media.h             | 106 ++++++++++++++++++++++++++++++++++-
+ 3 files changed, 206 insertions(+), 3 deletions(-)
+
+diff --git a/src/pbrt/cpu/integrators.cpp b/src/pbrt/cpu/integrators.cpp
+index c6d68c0..a815a89 100644
+--- a/src/pbrt/cpu/integrators.cpp
++++ b/src/pbrt/cpu/integrators.cpp
+@@ -1119,7 +1119,9 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+ 
+                         // Update _L_ for medium emission
+                         if (r_e)
+-                            L += betap * mp.sigma_a * mp.Le / HdPbrtMisAverage(r_e, lambda);
++                            // hdPbrt: Karma pyro fire's Le is already a coefficient.
++                            L += betap * (mp.LeIsCoefficient ? mp.Le : mp.sigma_a * mp.Le) /
++                                 HdPbrtMisAverage(r_e, lambda);
+                     }
+ 
+                     // Compute medium event probabilities for interaction
+diff --git a/src/pbrt/media.cpp b/src/pbrt/media.cpp
+index 0b152d9..5304b79 100644
+--- a/src/pbrt/media.cpp
++++ b/src/pbrt/media.cpp
+@@ -661,9 +661,106 @@ NanoVDBMedium *NanoVDBMedium::Create(const ParameterDictionary &parameters,
+         sigma_s = alloc.new_object<ConstantSpectrum>(1.f);
+     Float sigmaScale = parameters.GetOneFloat("scale", 1.f);
+ 
+-    return alloc.new_object<NanoVDBMedium>(
++    NanoVDBMedium *m = alloc.new_object<NanoVDBMedium>(
+         renderFromMedium, sigma_a, sigma_s, sigmaScale, g, std::move(densityGrid),
+         std::move(temperatureGrid), LeScale, temperatureOffset, temperatureScale, alloc);
++
++    // hdPbrt: Karma pyro shader ("bool hdpbrtpyro"). Smoke comes from sigma_a,
++    // sigma_s and scale as usual, the density optionally remapped by
++    // "hdpbrtdensityrange" [lo hi]; with "bool hdpbrtfire" the temperature grid
++    // emits color(T) x intensity(T) per unit length (not times sigma_a):
++    // intensity = "hdpbrtfireintscale" x clamp((T - lo) / (hi - lo)) over
++    // "hdpbrtfireintrange", color from "hdpbrtfirecolor0".."hdpbrtfirecolor1"
++    // over "hdpbrtfirecolorrange" ("integer hdpbrtfirecolormode" 0) or
++    // MaterialX's blackbody at T x "hdpbrtfiretempscale" (mode 1).
++    if (parameters.GetOneBool("hdpbrtpyro", false)) {
++        HdPbrtPyro p;
++        p.on = true;
++        auto range = [&](const char *name, Float *lo, Float *hi) {
++            std::vector<Float> r = parameters.GetFloatArray(name);
++            if (r.size() == 2) {
++                *lo = r[0];
++                *hi = r[1];
++            }
++        };
++        range("hdpbrtdensityrange", &p.densityLo, &p.densityHi);
++        p.fire = parameters.GetOneBool("hdpbrtfire", false);
++        range("hdpbrtfireintrange", &p.intLo, &p.intHi);
++        p.intScale = parameters.GetOneFloat("hdpbrtfireintscale", 1.f);
++        p.colorMode = parameters.GetOneInt("hdpbrtfirecolormode", 0);
++        range("hdpbrtfirecolorrange", &p.colorLo, &p.colorHi);
++        p.tempScale = parameters.GetOneFloat("hdpbrtfiretempscale", 2500.f);
++        auto rgb = [&](const char *name, RGB def) {
++            std::vector<RGB> v = parameters.GetRGBArray(name);
++            return v.empty() ? def : v[0];
++        };
++        p.c0 = rgb("hdpbrtfirecolor0", RGB(0, 0, 0));
++        p.c1 = rgb("hdpbrtfirecolor1", RGB(1, 0.327f, 0.1f));
++        p.colorSpace = parameters.ColorSpace();
++        // Like pbrt's lights: an RGB illuminant spectrum carries the
++        // illuminant's photometric scale.
++        p.illuminantScale = 1 / SpectrumToPhotometric(&p.colorSpace->illuminant);
++        std::vector<Float> bb = parameters.GetFloatArray("hdpbrtfirebbtable");
++        for (size_t i = 0; i + 3 < bb.size() + 0 && p.nBlackbody < HdPbrtPyro::MaxBlackbody;
++             i += 4) {
++            p.bbKelvin[p.nBlackbody] = bb[i];
++            p.bbColor[p.nBlackbody] = RGB(bb[i + 1], bb[i + 2], bb[i + 3]);
++            ++p.nBlackbody;
++        }
++        m->SetPyro(p);
++    }
++    return m;
++}
++
++void NanoVDBMedium::SetPyro(const HdPbrtPyro &p) {
++    pyro = p;
++    if (!temperatureFloatGrid)
++        pyro.fire = false;
++    // Majorants: the density remap is monotone, so remapping each cell's
++    // maximum stays conservative. Cells where the temperature can reach the
++    // fire's intensity range get a value >= 1, which SampleRay pairs with a
++    // sigma_t of at least nullSigma (about 4 null collisions per cell).
++    const Vector3f d = bounds.Diagonal();
++    const Float cell = std::min({d.x / majorantGrid.res.x, d.y / majorantGrid.res.y,
++                                 d.z / majorantGrid.res.z});
++    pyro.nullSigma = 4 / std::max<Float>(cell, 1e-6f);
++    int gridSize = majorantGrid.res.x * majorantGrid.res.y * majorantGrid.res.z;
++    ParallelFor(0, gridSize, [&](size_t index) {
++        int x = index % majorantGrid.res.x;
++        int y = (index / majorantGrid.res.x) % majorantGrid.res.y;
++        int z = index / (majorantGrid.res.x * majorantGrid.res.y);
++        Float v = majorantGrid.Lookup(x, y, z);
++        if (pyro.densityHi > pyro.densityLo)
++            v = Clamp((v - pyro.densityLo) / (pyro.densityHi - pyro.densityLo), 0, 1);
++        if (pyro.fire) {
++            Bounds3f wb(bounds.Lerp(Point3f(Float(x) / majorantGrid.res.x,
++                                            Float(y) / majorantGrid.res.y,
++                                            Float(z) / majorantGrid.res.z)),
++                        bounds.Lerp(Point3f(Float(x + 1) / majorantGrid.res.x,
++                                            Float(y + 1) / majorantGrid.res.y,
++                                            Float(z + 1) / majorantGrid.res.z)));
++            nanovdb::Vec3R i0 = temperatureFloatGrid->worldToIndexF(
++                nanovdb::Vec3R(wb.pMin.x, wb.pMin.y, wb.pMin.z));
++            nanovdb::Vec3R i1 = temperatureFloatGrid->worldToIndexF(
++                nanovdb::Vec3R(wb.pMax.x, wb.pMax.y, wb.pMax.z));
++            auto bbox = temperatureFloatGrid->indexBBox();
++            int nx0 = std::max(int(i0[0] - 1), bbox.min()[0]);
++            int nx1 = std::min(int(i1[0] + 1), bbox.max()[0]);
++            int ny0 = std::max(int(i0[1] - 1), bbox.min()[1]);
++            int ny1 = std::min(int(i1[1] + 1), bbox.max()[1]);
++            int nz0 = std::max(int(i0[2] - 1), bbox.min()[2]);
++            int nz1 = std::min(int(i1[2] + 1), bbox.max()[2]);
++            float tMax = -Infinity;
++            auto accessor = temperatureFloatGrid->getAccessor();
++            for (int nz = nz0; nz <= nz1; ++nz)
++                for (int ny = ny0; ny <= ny1; ++ny)
++                    for (int nx = nx0; nx <= nx1; ++nx)
++                        tMax = std::max(tMax, accessor.getValue({nx, ny, nz}));
++            if (tMax > pyro.intLo)
++                v = std::max<Float>(v, 1);
++        }
++        majorantGrid.Set(x, y, z, v);
++    });
+ }
+ 
+ Medium Medium::Create(const std::string &name, const ParameterDictionary &parameters,
+diff --git a/src/pbrt/media.h b/src/pbrt/media.h
+index dce61da..53f963f 100644
+--- a/src/pbrt/media.h
++++ b/src/pbrt/media.h
+@@ -76,6 +76,30 @@ struct MediumProperties {
+     SampledSpectrum Le;
+     // hdPbrt: subsurface random walk (own step budget, no light sampling).
+     bool sss = false;
++    // hdPbrt: Le is an emission coefficient (radiance added per unit length),
++    // not multiplied by sigma_a (Karma pyro fire).
++    bool LeIsCoefficient = false;
++};
++
++// hdPbrt: Karma pyro shader mapping for NanoVDBMedium (see Create): density
++// range remap, and fire emission from the temperature grid = color(T) x
++// intensity(T), color from a two-key ramp or MaterialX's blackbody.
++struct HdPbrtPyro {
++    bool on = false, fire = false;
++    Float densityLo = 0, densityHi = 0;  // remap when hi > lo
++    Float intLo = 0, intHi = 1, intScale = 1;
++    int colorMode = 0;  // 0: ramp c0..c1 over colorLo..colorHi, 1: blackbody(T x tempScale)
++    Float colorLo = 0, colorHi = 1, tempScale = 2500;
++    RGB c0, c1;
++    Float nullSigma = 0;  // majorant floor in fire cells
++    const RGBColorSpace *colorSpace = nullptr;
++    Float illuminantScale = 1;  // 1 / photometric of the color space's illuminant
++    // Blackbody colors by temperature (K), linear in between (Karma's ND_blackbody,
++    // tabulated by hdPbrt); empty: MaterialX's luminance-1 formula.
++    static constexpr int MaxBlackbody = 128;
++    int nBlackbody = 0;
++    Float bbKelvin[MaxBlackbody];
++    RGB bbColor[MaxBlackbody];
+ };
+ 
+ // HomogeneousMajorantIterator Definition
+@@ -618,7 +642,12 @@ class NanoVDBMedium {
+                   Float temperatureOffset, Float temperatureScale, Allocator alloc);
+ 
+     PBRT_CPU_GPU
+-    bool IsEmissive() const { return temperatureFloatGrid && LeScale > 0; }
++    bool IsEmissive() const {
++        return temperatureFloatGrid && (pyro.on ? pyro.fire : LeScale > 0);
++    }
++
++    // hdPbrt: Karma pyro mode (after construction, before rendering).
++    void SetPyro(const HdPbrtPyro &p);
+ 
+     PBRT_CPU_GPU
+     MediumProperties SamplePoint(Point3f p, const SampledWavelengths &lambda) const {
+@@ -634,6 +663,13 @@ class NanoVDBMedium {
+         using Sampler = nanovdb::SampleFromVoxels<nanovdb::FloatGrid::TreeType, 1, false>;
+         Float d = Sampler(densityFloatGrid->tree())(pIndex);
+ 
++        if (pyro.on) {
++            if (pyro.densityHi > pyro.densityLo)
++                d = Clamp((d - pyro.densityLo) / (pyro.densityHi - pyro.densityLo), 0, 1);
++            MediumProperties mp{sigma_a * d, sigma_s * d, &phase, PyroLe(p, lambda)};
++            mp.LeIsCoefficient = true;
++            return mp;
++        }
+         return MediumProperties{sigma_a * d, sigma_s * d, &phase, Le(p, lambda)};
+     }
+ 
+@@ -652,10 +688,77 @@ class NanoVDBMedium {
+         SampledSpectrum sigma_s = sigma_s_spec.Sample(lambda);
+ 
+         SampledSpectrum sigma_t = sigma_a + sigma_s;
++        if (pyro.on && pyro.fire)
++            // Fire cells have a grid value >= 1 (see SetPyro): at least
++            // nullSigma there, so emission without smoke is still sampled.
++            for (int i = 0; i < NSpectrumSamples; ++i)
++                sigma_t[i] = std::max(sigma_t[i], pyro.nullSigma);
+         return DDAMajorantIterator(ray, tMin, tMax, &majorantGrid, sigma_t);
+     }
+ 
+   private:
++    PBRT_CPU_GPU
++    SampledSpectrum PyroLe(Point3f p, const SampledWavelengths &lambda) const {
++        if (!pyro.fire || !temperatureFloatGrid)
++            return SampledSpectrum(0.f);
++        nanovdb::Vec3<float> pIndex =
++            temperatureFloatGrid->worldToIndexF(nanovdb::Vec3<float>(p.x, p.y, p.z));
++        using Sampler = nanovdb::SampleFromVoxels<nanovdb::FloatGrid::TreeType, 1, false>;
++        const Float T = Sampler(temperatureFloatGrid->tree())(pIndex);
++        const Float intensity =
++            pyro.intScale *
++            Clamp((T - pyro.intLo) / std::max<Float>(pyro.intHi - pyro.intLo, 1e-6f), 0, 1);
++        if (intensity <= 0)
++            return SampledSpectrum(0.f);
++        RGB c;
++        if (pyro.colorMode == 0) {
++            const Float t = Clamp((T - pyro.colorLo) /
++                                      std::max<Float>(pyro.colorHi - pyro.colorLo, 1e-6f),
++                                  0, 1);
++            c = pyro.c0 * (1 - t) + pyro.c1 * t;
++        } else
++            c = PyroBlackbody(T * pyro.tempScale);
++        c = ClampZero(c * intensity);
++        if (c.r <= 0 && c.g <= 0 && c.b <= 0)
++            return SampledSpectrum(0.f);
++        return pyro.illuminantScale *
++               RGBIlluminantSpectrum(*pyro.colorSpace, c).Sample(lambda);
++    }
++
++    PBRT_CPU_GPU
++    RGB PyroBlackbody(Float k) const {
++        const int n = pyro.nBlackbody;
++        if (n == 0)
++            return HdPbrtMtlxBlackbody(k);
++        if (k <= pyro.bbKelvin[0])
++            return pyro.bbColor[0];
++        if (k >= pyro.bbKelvin[n - 1])
++            return pyro.bbColor[n - 1];
++        int i = FindInterval(n, [&](int j) { return pyro.bbKelvin[j] <= k; });
++        const Float t = (k - pyro.bbKelvin[i]) / (pyro.bbKelvin[i + 1] - pyro.bbKelvin[i]);
++        return pyro.bbColor[i] * (1 - t) + pyro.bbColor[i + 1] * t;
++    }
++
++    // MaterialX ND_blackbody: Planckian locus chromaticity (Kang et al. 2002)
++    // at luminance 1 in Rec.709, temperature clamped to 800..25000 K.
++    PBRT_CPU_GPU static RGB HdPbrtMtlxBlackbody(Float k) {
++        k = Clamp(k, 800, 25000);
++        const Float t = 1000 / k, t2 = t * t, t3 = t2 * t;
++        const Float xc = k < 4000 ? -0.2661239f * t3 - 0.2343580f * t2 + 0.8776956f * t + 0.179910f
++                                  : -3.0258469f * t3 + 2.1070379f * t2 + 0.2226347f * t + 0.240390f;
++        const Float xc2 = xc * xc, xc3 = xc2 * xc;
++        const Float yc =
++            k < 2222 ? -1.1063814f * xc3 - 1.34811020f * xc2 + 2.18555832f * xc - 0.20219683f
++            : k < 4000 ? -0.9549476f * xc3 - 1.37418593f * xc2 + 2.09137015f * xc - 0.16748867f
++                       : 3.0817580f * xc3 - 5.87338670f * xc2 + 3.75112997f * xc - 0.37001483f;
++        if (yc <= 0)
++            return RGB(1, 1, 1);
++        const Float X = xc / yc, Y = 1, Z = (1 - xc - yc) / yc;
++        return ClampZero(RGB(3.2406f * X - 1.5372f * Y - 0.4986f * Z,
++                             -0.9689f * X + 1.8758f * Y + 0.0415f * Z,
++                             0.0557f * X - 0.2040f * Y + 1.0570f * Z));
++    }
++
+     // NanoVDBMedium Private Methods
+     PBRT_CPU_GPU
+     SampledSpectrum Le(Point3f p, const SampledWavelengths &lambda) const {
+@@ -682,6 +785,7 @@ class NanoVDBMedium {
+     const nanovdb::FloatGrid *densityFloatGrid = nullptr;
+     const nanovdb::FloatGrid *temperatureFloatGrid = nullptr;
+     Float LeScale, temperatureOffset, temperatureScale;
++    HdPbrtPyro pyro;
+ };
+ 
+ PBRT_CPU_GPU inline Float PhaseFunction::p(Vector3f wo, Vector3f wi) const {
+-- 
+2.43.0
+

@@ -60,16 +60,21 @@ int main(int argc, char **argv)
         }
         nanovdb::io::writeGrids(out, handles);
 
-        // World-space bounds of the active voxels (voxel corners).
-        const openvdb::CoordBBox ib = density->evalActiveVoxelBoundingBox();
+        // World-space bounds of the active voxels (voxel corners), of the
+        // temperature grid too (fire can reach past the smoke).
         openvdb::BBoxd wb;
-        if (!ib.empty()) {
+        for (const openvdb::FloatGrid::Ptr &g : {density, temperature}) {
+            if (!g)
+                continue;
+            const openvdb::CoordBBox ib = g->evalActiveVoxelBoundingBox();
+            if (ib.empty())
+                continue;
             const openvdb::Vec3d lo = ib.min().asVec3d() - openvdb::Vec3d(0.5);
             const openvdb::Vec3d hi = ib.max().asVec3d() + openvdb::Vec3d(0.5);
             for (int c = 0; c < 8; ++c) {
                 openvdb::Vec3d p((c & 1) ? hi.x() : lo.x(), (c & 2) ? hi.y() : lo.y(),
                                  (c & 4) ? hi.z() : lo.z());
-                wb.expand(density->transform().indexToWorld(p));
+                wb.expand(g->transform().indexToWorld(p));
             }
         }
         FILE *f = fopen((out + ".bbox").c_str(), "w");

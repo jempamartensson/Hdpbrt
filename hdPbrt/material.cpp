@@ -677,6 +677,179 @@ struct _MtlxMapper {
 
 }  // namespace
 
+// Karma's hmtlxcomplementcolor: the same luminance, chromaticity mirrored
+// through the D65 white point (grey stays grey).
+static GfVec3f _ComplementColor(const GfVec3f &c)
+{
+    const float X = 0.412391f * c[0] + 0.357584f * c[1] + 0.180481f * c[2];
+    const float Y = 0.212639f * c[0] + 0.715169f * c[1] + 0.0721923f * c[2];
+    const float Z = 0.0193308f * c[0] + 0.119195f * c[1] + 0.950532f * c[2];
+    const float s = X + Y + Z;
+    if (s == 0)
+        return GfVec3f(0);
+    const float x = 2 * 0.3127f - X / s, y = 2 * 0.329f - Y / s;
+    if (y <= 0)
+        return GfVec3f(0);
+    const float X2 = x * Y / y, Z2 = (1 - x - y) * Y / y;
+    return GfVec3f(3.24097f * X2 - 1.53738f * Y - 0.498611f * Z2,
+                   -0.969244f * X2 + 1.87597f * Y + 0.0415551f * Z2,
+                   0.0556301f * X2 - 0.203977f * Y + 1.05697f * Z2);
+}
+
+// Karma's ND_blackbody (linear Rec.709 by kelvin), measured from Karma CPU
+// (Houdini 22.0.508) on unlit quads, 2026-11-25. It has MaterialX's chromaticity
+// from ~2000 K up but not its luminance-1 normalization: the luminance grows
+// about as T^4 until the largest channel reaches 20, which then caps it.
+static const float _karmaBlackbody[][4] = {
+    {0, 0, 0, 0}, {100, 8.88109e-06, -8.9407e-07, -5.96046e-08},
+    {200, 0.000138283, -1.20401e-05, -1.01328e-06},
+    {300, 0.000679016, -5.10812e-05, -5.126e-06},
+    {400, 0.00208092, -0.000131011, -1.62721e-05},
+    {500, 0.00492096, -0.000246048, -4.01139e-05},
+    {600, 0.00988007, -0.000359058, -8.38041e-05},
+    {700, 0.0177155, -0.000387907, -0.000156522}, {800, 0.0292206, -0.000193834, -0.000269175},
+    {900, 0.0451965, 0.000432014, -0.000434875}, {1000, 0.0664673, 0.0017786, -0.000668049},
+    {1100, 0.0938721, 0.00422668, -0.000985146}, {1200, 0.128052, 0.00826263, -0.00140667},
+    {1300, 0.169678, 0.0144882, -0.00195122}, {1400, 0.21936, 0.0236206, -0.00264359},
+    {1500, 0.277344, 0.0365295, -0.00350952}, {1600, 0.344238, 0.0541992, -0.00457382},
+    {1700, 0.420898, 0.0772095, -0.00517654}, {1800, 0.508789, 0.105469, -0.00355148},
+    {1900, 0.607422, 0.140747, -0.000140071}, {2000, 0.717773, 0.18396, 0.00570679},
+    {2100, 0.84082, 0.235962, 0.0147324}, {2200, 0.977051, 0.297607, 0.0278015},
+    {2300, 1.12695, 0.369873, 0.0457458}, {2400, 1.29297, 0.454102, 0.0696411},
+    {2500, 1.47363, 0.550781, 0.100586}, {2600, 1.67188, 0.661621, 0.139893},
+    {2700, 1.8877, 0.787598, 0.188721}, {2800, 2.12109, 0.929688, 0.248901},
+    {2900, 2.375, 1.08984, 0.321533}, {3000, 2.64844, 1.26758, 0.408691},
+    {3250, 3.42969, 1.80371, 0.70166}, {3500, 4.35547, 2.48633, 1.12793},
+    {3750, 5.44531, 3.33789, 1.72363}, {4000, 6.71094, 4.38281, 2.5293},
+    {4250, 8.17188, 5.64844, 3.58984}, {4500, 9.84375, 7.16016, 4.94531},
+    {4750, 11.75, 8.94531, 6.64844}, {5000, 13.9141, 11.0312, 8.75781},
+    {5250, 16.3594, 13.4453, 11.3203}, {5500, 19.0938, 16.2344, 14.4141},
+    {5750, 20, 17.5156, 16.3125}, {6000, 20, 18, 17.5156}, {6250, 20, 18.4531, 18.7031},
+    {6500, 20, 18.875, 19.8594}, {6750, 19.0781, 18.375, 20}, {7000, 18.125, 17.8125, 20},
+    {7250, 17.2969, 17.2969, 20}, {7500, 16.5625, 16.8438, 20}, {7750, 15.9062, 16.4219, 20},
+    {8000, 15.3203, 16.0312, 20}, {8250, 14.7891, 15.6875, 20}, {8500, 14.3125, 15.3672, 20},
+    {8750, 13.875, 15.0781, 20}, {9000, 13.4766, 14.8047, 20}, {9250, 13.1172, 14.5547, 20},
+    {9500, 12.7891, 14.3203, 20}, {9750, 12.4844, 14.1094, 20}, {10000, 12.2031, 13.9062, 20},
+    {11000, 11.2656, 13.2266, 20}, {12000, 10.5547, 12.6953, 20},
+    {13000, 10.0078, 12.2656, 20}, {14000, 9.5625, 11.9219, 20}, {15000, 9.20312, 11.6328, 20},
+    {16000, 8.90625, 11.3984, 20}, {17000, 8.65625, 11.1875, 20},
+    {18000, 8.44531, 11.0156, 20}, {19000, 8.26562, 10.8594, 20},
+    {20000, 8.10156, 10.7266, 20}};
+
+// Karma pyro shader (kma_pyroshader) -> pbrt nanovdb medium parameters (pbrt
+// patch 35). Its MaterialX graph, with the defaults Hydra can't see (the
+// internal ramps: identity intensity, black -> (1, 0.327, 0.1) fire color):
+//   extinction = density x densityscale x complement(absorpcolor)
+//   scattering = extinction x smokecolor x smokeint, absorption = the rest
+//   fire emission (per unit length) = color(T) x fireintscale x
+//     clamp((T - lo) / (hi - lo)) over fireintrange, color a ramp over
+//     firecolorrange or blackbody(T x firetempscale)
+// Unsupported options (color remaps, scatter emission, masks, Cd tint, shadow
+// density tweaks, constant emission) warn once and are ignored.
+bool HdPbrt_PyroVolume(const HdMaterialNetwork2 &net, const HdMaterialNode2 &n,
+                       SdfPath const &id, HdPbrtMaterialDesc *d)
+{
+    auto has = [&](const char *p) { return n.parameters.count(TfToken(p)) > 0; };
+    if (!has("enablesmoke") || !has("densityscale") || !has("firetempscale"))
+        return false;
+    auto num = [&](const char *p, float def) -> float {
+        auto it = n.parameters.find(TfToken(p));
+        if (it == n.parameters.end())
+            return def;
+        const VtValue &v = it->second;
+        if (v.IsHolding<float>())
+            return v.UncheckedGet<float>();
+        if (v.IsHolding<int>())
+            return float(v.UncheckedGet<int>());
+        if (v.IsHolding<double>())
+            return float(v.UncheckedGet<double>());
+        return def;
+    };
+    auto col = [&](const char *p, GfVec3f def) -> GfVec3f {
+        auto it = n.parameters.find(TfToken(p));
+        return it != n.parameters.end() && it->second.IsHolding<GfVec3f>()
+                   ? it->second.UncheckedGet<GfVec3f>()
+                   : def;
+    };
+    auto range = [&](const char *p) -> GfVec2f {
+        auto it = n.parameters.find(TfToken(p));
+        return it != n.parameters.end() && it->second.IsHolding<GfVec2f>()
+                   ? it->second.UncheckedGet<GfVec2f>()
+                   : GfVec2f(0, 1);
+    };
+    // The field an input reads (its upstream geompropvalue's geomprop).
+    auto field = [&](const char *input, const char *def) -> TfToken {
+        auto it = n.inputConnections.find(TfToken(input));
+        if (it != n.inputConnections.end() && !it->second.empty()) {
+            auto up = net.nodes.find(it->second[0].upstreamNode);
+            if (up != net.nodes.end()) {
+                auto g = up->second.parameters.find(TfToken("geomprop"));
+                if (g != up->second.parameters.end() && g->second.IsHolding<std::string>())
+                    return TfToken(g->second.UncheckedGet<std::string>());
+            }
+        }
+        return TfToken(def);
+    };
+
+    std::vector<std::string> ignored;
+    for (const char *p : {"smokecolor_remapmode", "absorpcolor_remapmode", "shadowcolor_remapmode",
+                          "density_enablecontrolscale", "enablescatter", "fireenablemask",
+                          "tintwithcd", "mixusingalpha", "usesecondaryanisotropy",
+                          "useanisotropyroughness"})
+        if (num(p, 0) != 0)
+            ignored.push_back(p);
+    if (num("shadowint", 1) != 1 || col("shadowcolor", GfVec3f(1)) != GfVec3f(1))
+        ignored.push_back("shadowint/shadowcolor");
+    if (col("emission", GfVec3f(0)) != GfVec3f(0))
+        ignored.push_back("emission");
+    if (!ignored.empty())
+        TF_WARN("hdPbrt: %s: Karma pyro options not translated: %s", id.GetText(),
+                TfStringJoin(ignored, ", ").c_str());
+
+    const bool smoke = num("enablesmoke", 1) != 0;
+    const bool fire = num("enablefire", 0) != 0;
+    GfVec3f ext = _ComplementColor(col("absorpcolor", GfVec3f(1)));
+    for (int i = 0; i < 3; ++i)
+        ext[i] = std::max(ext[i], 0.f);
+    GfVec3f sigS(0), sigA(0);
+    if (smoke) {
+        const GfVec3f sc = col("smokecolor", GfVec3f(1)) * num("smokeint", 1);
+        for (int i = 0; i < 3; ++i) {
+            sigS[i] = ext[i] * std::max(sc[i], 0.f);
+            sigA[i] = std::max(ext[i] - sigS[i], 0.f);
+        }
+    }
+    std::ostringstream os;
+    // RGB (pbrt's smooth upsampling): tinted smoke with multiple scattering
+    // is within ~5% of Karma; the three-band spectra of the other media were
+    // worse here (blue 0.96 -> 0.87).
+    os << " \"rgb sigma_a\" " << HdPbrt_Rgb(sigA) << " \"rgb sigma_s\" " << HdPbrt_Rgb(sigS)
+       << " \"float scale\" " << std::max(num("densityscale", 1), 0.f) << " \"float g\" "
+       << std::min(std::max(num("anisotropy", 0), -0.99f), 0.99f) << " \"bool hdpbrtpyro\" true";
+    if (num("density_remapmode", 0) != 0) {
+        const GfVec2f r = range("density_sourcerange");
+        os << " \"float hdpbrtdensityrange\" [" << r[0] << " " << r[1] << "]";
+    }
+    if (fire) {
+        const GfVec2f ir = range("fireintrange"), cr = range("firecolorrange");
+        os << " \"bool hdpbrtfire\" true \"float hdpbrtfireintscale\" " << num("fireintscale", 1)
+           << " \"float hdpbrtfireintrange\" [" << ir[0] << " " << ir[1] << "]"
+           << " \"integer hdpbrtfirecolormode\" " << int(num("firecolormode", 0))
+           << " \"float hdpbrtfirecolorrange\" [" << cr[0] << " " << cr[1] << "]"
+           << " \"float hdpbrtfiretempscale\" " << num("firetempscale", 2500);
+        if (int(num("firecolormode", 0)) == 1) {
+            os << " \"float hdpbrtfirebbtable\" [";
+            for (const float(&e)[4] : _karmaBlackbody)
+                os << " " << e[0] << " " << e[1] << " " << e[2] << " " << e[3];
+            os << " ]";
+        }
+    }
+    d->volumeParams = os.str();
+    d->densityField = field("density", "density");
+    d->fireField = fire ? field("fireint", "temperature") : TfToken();
+    return true;
+}
+
 HdPbrtMaterial::HdPbrtMaterial(SdfPath const &id) : HdMaterial(id) {}
 
 void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
@@ -685,11 +858,30 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
     static_cast<HdPbrtRenderParam *>(renderParam)->Edit();
     HdPbrtMaterialDesc result = HdPbrt_DefaultMaterial();
 
+    HdPbrtMaterialDesc volume;  // volume shading (pyro), merged into result
     VtValue res = sceneDelegate->GetMaterialResource(GetId());
     if (res.IsHolding<HdMaterialNetworkMap>()) {
         bool isVolume = false;
         HdMaterialNetwork2 net2 =
             HdConvertToHdMaterialNetwork2(res.UncheckedGet<HdMaterialNetworkMap>(), &isVolume);
+        if (getenv("HDPBRT_DUMP_MATERIALS")) {
+            // The network as Hydra delivers it (after nodegraph flattening).
+            fprintf(stderr, "hdPbrt material %s\n", GetId().GetText());
+            for (auto const &t : net2.terminals)
+                fprintf(stderr, "  terminal %s -> %s\n", t.first.GetText(),
+                        t.second.upstreamNode.GetText());
+            for (auto const &kv : net2.nodes) {
+                fprintf(stderr, "  node %s %s\n", kv.first.GetText(),
+                        kv.second.nodeTypeId.GetText());
+                for (auto const &p : kv.second.parameters)
+                    fprintf(stderr, "    %s = %s\n", p.first.GetText(),
+                            TfStringify(p.second).c_str());
+                for (auto const &c : kv.second.inputConnections)
+                    for (auto const &cn : c.second)
+                        fprintf(stderr, "    %s <- %s.%s\n", c.first.GetText(),
+                                cn.upstreamNode.GetText(), cn.upstreamOutputName.GetText());
+            }
+        }
         auto term = net2.terminals.find(HdMaterialTerminalTokens->surface);
         const HdMaterialNode2 *surf = nullptr;
         if (term != net2.terminals.end()) {
@@ -702,6 +894,12 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             _Net n{net2};
             surf = n.Upstream(*surf, TfToken("surfaceshader"));
         }
+        // Karma pyro shader (kma:volume): Hydra delivers its nodegraph as one
+        // node with the shader's own parameters; map those to pbrt's nanovdb
+        // medium (see HdPbrt_PyroVolume).
+        for (auto const &kv : net2.nodes)
+            if (HdPbrt_PyroVolume(net2, kv.second, GetId(), &volume))
+                break;
         // Volume-only material (no surface; MaterialX ND_volume with an
         // absorption_vdf / anisotropic_vdf): an invisible boundary ("interface")
         // around a homogeneous interior medium, coefficients per unit length.
@@ -1149,6 +1347,9 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
         }
     }
 
+    result.volumeParams = volume.volumeParams;
+    result.densityField = volume.densityField;
+    result.fireField = volume.fireField;
     {
         std::lock_guard<std::mutex> l(_mutex);
         _desc = result;

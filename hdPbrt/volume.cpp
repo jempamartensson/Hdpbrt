@@ -88,7 +88,21 @@ void HdPbrtVolume::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderPar
 
     // Fields (always re-read: a field's file can change without the volume
     // being marked dirty). The density field is the one named "density", or
-    // the first; "temperature" is optional.
+    // the first; "temperature" is optional. A Karma pyro material names its
+    // own density and fire (emission) fields; its medium parameters are read
+    // when the scene is written (material edits don't resync the volume).
+    TfToken densityName = _tokens->density, temperatureName = _tokens->temperature;
+    if (!GetMaterialId().IsEmpty()) {
+        if (auto *m = static_cast<HdPbrtMaterial *>(sceneDelegate->GetRenderIndex().GetSprim(
+                HdPrimTypeTokens->material, GetMaterialId()))) {
+            const HdPbrtMaterialDesc desc = m->GetDesc();
+            if (!desc.volumeParams.empty()) {
+                densityName = desc.densityField;
+                if (!desc.fireField.IsEmpty())
+                    temperatureName = desc.fireField;
+            }
+        }
+    }
     std::string densityFile, densityGrid, temperatureFile, temperatureGrid;
     for (const HdVolumeFieldDescriptor &fd : sceneDelegate->GetVolumeFieldDescriptors(id)) {
         auto *field = dynamic_cast<HdPbrtField *>(
@@ -99,10 +113,10 @@ void HdPbrtVolume::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderPar
         field->Get(&file, &grid);
         if (grid.empty())
             grid = fd.fieldName.GetString();
-        if (fd.fieldName == _tokens->temperature) {
+        if (!temperatureName.IsEmpty() && fd.fieldName == temperatureName) {
             temperatureFile = file;
             temperatureGrid = grid;
-        } else if (fd.fieldName == _tokens->density || densityFile.empty()) {
+        } else if (fd.fieldName == densityName || densityFile.empty()) {
             densityFile = file;
             densityGrid = grid;
         }
@@ -178,13 +192,24 @@ void HdPbrtVolume::Write(std::ostream &os, HdRenderIndex &index, TfTokenVector c
              lo[0], lo[1], hi[2], hi[0], lo[1], hi[2], hi[0], hi[1], hi[2], lo[0], hi[1], hi[2]);
     os << "# " << GetId().GetString() << "\nAttributeBegin\n  Transform "
        << HdPbrt_Matrix(xf) << "\n  MakeNamedMedium " << HdPbrt_Quote(name)
-       << " \"string type\" \"nanovdb\" \"string filename\" " << HdPbrt_Quote(_nvdb)
-       << " \"rgb sigma_a\" " << HdPbrt_Rgb(sigmaA) << " \"rgb sigma_s\" " << HdPbrt_Rgb(sigmaS)
-       << " \"float scale\" " << density;
-    if (_hasTemperature && tempScale > 0.f)
-        os << " \"float temperaturescale\" " << tempScale;
-    else
-        os << " \"float Lescale\" 0";
+       << " \"string type\" \"nanovdb\" \"string filename\" " << HdPbrt_Quote(_nvdb);
+    std::string volumeParams;
+    if (!GetMaterialId().IsEmpty())
+        if (auto *m = static_cast<HdPbrtMaterial *>(
+                index.GetSprim(HdPrimTypeTokens->material, GetMaterialId())))
+            volumeParams = m->GetDesc().volumeParams;
+    if (!volumeParams.empty()) {
+        // Karma pyro material (HdPbrt_PyroVolume). Fire needs the
+        // temperature grid; without it pbrt renders smoke only.
+        os << volumeParams;
+    } else {
+        os << " \"rgb sigma_a\" " << HdPbrt_Rgb(sigmaA) << " \"rgb sigma_s\" "
+           << HdPbrt_Rgb(sigmaS) << " \"float scale\" " << density;
+        if (_hasTemperature && tempScale > 0.f)
+            os << " \"float temperaturescale\" " << tempScale;
+        else
+            os << " \"float Lescale\" 0";
+    }
     os << "\n  MediumInterface " << HdPbrt_Quote(name) << " \"\"\n  Material \"interface\"\n"
        << box << "AttributeEnd\n";
 }
