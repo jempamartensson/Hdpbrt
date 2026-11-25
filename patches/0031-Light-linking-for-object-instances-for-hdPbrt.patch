@@ -1,0 +1,184 @@
+From 899a3778457d59ee497ec05dcb7febebc16310a9 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Wed, 25 Nov 2026 07:54:29 +0100
+Subject: [PATCH 31/32] Light linking for object instances (for hdPbrt)
+
+ObjectInstance takes Attribute "shape" "integer hdpbrtlinks" [...]: the
+instance's own light-linking membership, OR'ed into the prototype shapes'
+masks on every hit through it (Transformed/Animated/MotionPrimitive). USD
+native instances share one prototype, so membership by the instance's path
+has to come per instance.
+---
+ src/pbrt/cpu/primitive.cpp |  3 +++
+ src/pbrt/cpu/primitive.h   | 12 ++++++++++++
+ src/pbrt/scene.cpp         | 16 ++++++++++++++++
+ src/pbrt/scene.h           |  3 +++
+ 4 files changed, 34 insertions(+)
+
+diff --git a/src/pbrt/cpu/primitive.cpp b/src/pbrt/cpu/primitive.cpp
+index 793b10e..01f06b2 100644
+--- a/src/pbrt/cpu/primitive.cpp
++++ b/src/pbrt/cpu/primitive.cpp
+@@ -125,6 +125,7 @@ pstd::optional<ShapeIntersection> TransformedPrimitive::Intersect(const Ray &r,
+     CHECK_GE(Dot(si->intr.n, si->intr.shading.n), 0);
+     if (hdpbrtInstanceId >= 0)
+         si->intr.hdpbrtInstanceId = hdpbrtInstanceId;
++    si->intr.hdpbrtLinkMask |= hdpbrtInstanceLinks;
+     return si;
+ }
+ 
+@@ -155,6 +156,7 @@ pstd::optional<ShapeIntersection> AnimatedPrimitive::Intersect(const Ray &r,
+     CHECK_GE(Dot(si->intr.n, si->intr.shading.n), 0);
+     if (hdpbrtInstanceId >= 0)
+         si->intr.hdpbrtInstanceId = hdpbrtInstanceId;
++    si->intr.hdpbrtLinkMask |= hdpbrtInstanceLinks;
+     return si;
+ }
+ 
+@@ -200,6 +202,7 @@ pstd::optional<ShapeIntersection> MotionPrimitive::Intersect(const Ray &r,
+     CHECK_GE(Dot(si->intr.n, si->intr.shading.n), 0);
+     if (hdpbrtInstanceId >= 0)
+         si->intr.hdpbrtInstanceId = hdpbrtInstanceId;
++    si->intr.hdpbrtLinkMask |= hdpbrtInstanceLinks;
+     return si;
+ }
+ 
+diff --git a/src/pbrt/cpu/primitive.h b/src/pbrt/cpu/primitive.h
+index d688eca..2c162e0 100644
+--- a/src/pbrt/cpu/primitive.h
++++ b/src/pbrt/cpu/primitive.h
+@@ -102,12 +102,16 @@ class TransformedPrimitive {
+     Bounds3f Bounds() const { return (*renderFromPrimitive)(primitive.Bounds()); }
+     // hdPbrt: object instance id reported for hits inside this instance.
+     void SetHdPbrtInstanceId(int id) { hdpbrtInstanceId = id; }
++    // hdPbrt: light-linking membership of this instance, added to the
++    // prototype shapes' own (0 = none of its own).
++    void SetHdPbrtInstanceLinks(uint64_t m) { hdpbrtInstanceLinks = m; }
+ 
+   private:
+     // TransformedPrimitive Private Members
+     Primitive primitive;
+     const Transform *renderFromPrimitive;
+     int hdpbrtInstanceId = -1;
++    uint64_t hdpbrtInstanceLinks = 0;
+ };
+ 
+ // AnimatedPrimitive Definition
+@@ -122,12 +126,16 @@ class AnimatedPrimitive {
+     pstd::optional<ShapeIntersection> Intersect(const Ray &r, Float tMax) const;
+     bool IntersectP(const Ray &r, Float tMax) const;
+     void SetHdPbrtInstanceId(int id) { hdpbrtInstanceId = id; }
++    // hdPbrt: light-linking membership of this instance, added to the
++    // prototype shapes' own (0 = none of its own).
++    void SetHdPbrtInstanceLinks(uint64_t m) { hdpbrtInstanceLinks = m; }
+ 
+   private:
+     // AnimatedPrimitive Private Members
+     Primitive primitive;
+     AnimatedTransform renderFromPrimitive;
+     int hdpbrtInstanceId = -1;
++    uint64_t hdpbrtInstanceLinks = 0;
+ };
+ 
+ // hdPbrt: MotionPrimitive Definition
+@@ -143,6 +151,9 @@ class MotionPrimitive {
+     pstd::optional<ShapeIntersection> Intersect(const Ray &r, Float tMax) const;
+     bool IntersectP(const Ray &r, Float tMax) const;
+     void SetHdPbrtInstanceId(int id) { hdpbrtInstanceId = id; }
++    // hdPbrt: light-linking membership of this instance, added to the
++    // prototype shapes' own (0 = none of its own).
++    void SetHdPbrtInstanceLinks(uint64_t m) { hdpbrtInstanceLinks = m; }
+ 
+   private:
+     const AnimatedTransform &Segment(Float time) const;
+@@ -151,6 +162,7 @@ class MotionPrimitive {
+     std::vector<AnimatedTransform> segments;  // key k -> k + 1
+     std::vector<Float> times;
+     int hdpbrtInstanceId = -1;
++    uint64_t hdpbrtInstanceLinks = 0;
+ };
+ 
+ }  // namespace pbrt
+diff --git a/src/pbrt/scene.cpp b/src/pbrt/scene.cpp
+index 7fbfac5..171054f 100644
+--- a/src/pbrt/scene.cpp
++++ b/src/pbrt/scene.cpp
+@@ -396,6 +396,16 @@ void BasicSceneBuilder::ObjectInstance(const std::string &origName, FileLoc loc)
+             hdpbrtInstanceId = p->ints[0];
+             p->lookedUp = true;
+         }
++    // hdPbrt: the instance's own light-linking membership ("hdpbrtlinks", as
++    // on shapes; [-1] = none).
++    uint64_t hdpbrtInstanceLinks = 0;
++    for (const ParsedParameter *p : graphicsState.shapeAttributes)
++        if (p->name == "hdpbrtlinks" && p->type == "integer") {
++            for (int l : p->ints)
++                if (l >= 0 && l < 64)
++                    hdpbrtInstanceLinks |= uint64_t(1) << l;
++            p->lookedUp = true;
++        }
+ 
+     // hdPbrt: N transform keys, Attribute "shape" "float hdpbrtmotionxforms"
+     // [16 * N] (world from instance, like Transform) "float hdpbrtmotiontimes" [N].
+@@ -429,6 +439,7 @@ void BasicSceneBuilder::ObjectInstance(const std::string &origName, FileLoc loc)
+                 instanceUses.back().renderFromInstanceKeys = keys;
+                 instanceUses.back().keyTimes = std::move(times);
+                 instanceUses.back().hdpbrtInstanceId = hdpbrtInstanceId;
++                instanceUses.back().hdpbrtInstanceLinks = hdpbrtInstanceLinks;
+                 return;
+             }
+         }
+@@ -446,6 +457,7 @@ void BasicSceneBuilder::ObjectInstance(const std::string &origName, FileLoc loc)
+             instanceUses.push_back(
+                 InstanceSceneEntity(name, loc, animatedRenderFromInstance));
+             instanceUses.back().hdpbrtInstanceId = hdpbrtInstanceId;
++            instanceUses.back().hdpbrtInstanceLinks = hdpbrtInstanceLinks;
+             return;
+         }
+     }
+@@ -454,6 +466,7 @@ void BasicSceneBuilder::ObjectInstance(const std::string &origName, FileLoc loc)
+         transformCache.Lookup(RenderFromObject(0) * worldFromRender);
+     instanceUses.push_back(InstanceSceneEntity(name, loc, renderFromInstance));
+     instanceUses.back().hdpbrtInstanceId = hdpbrtInstanceId;
++    instanceUses.back().hdpbrtInstanceLinks = hdpbrtInstanceLinks;
+ }
+ 
+ void BasicSceneBuilder::EndOfFiles() {
+@@ -1650,17 +1663,20 @@ Primitive BasicScene::CreateAggregate(
+             MotionPrimitive *mp = new MotionPrimitive(
+                 iter->second, std::move(*inst.renderFromInstanceKeys), inst.keyTimes);
+             mp->SetHdPbrtInstanceId(inst.hdpbrtInstanceId);
++            mp->SetHdPbrtInstanceLinks(inst.hdpbrtInstanceLinks);
+             primitives.push_back(mp);
+             delete inst.renderFromInstanceKeys;
+         } else if (inst.renderFromInstance) {
+             TransformedPrimitive *tp =
+                 new TransformedPrimitive(iter->second, inst.renderFromInstance);
+             tp->SetHdPbrtInstanceId(inst.hdpbrtInstanceId);
++            tp->SetHdPbrtInstanceLinks(inst.hdpbrtInstanceLinks);
+             primitives.push_back(tp);
+         } else {
+             AnimatedPrimitive *ap =
+                 new AnimatedPrimitive(iter->second, *inst.renderFromInstanceAnim);
+             ap->SetHdPbrtInstanceId(inst.hdpbrtInstanceId);
++            ap->SetHdPbrtInstanceLinks(inst.hdpbrtInstanceLinks);
+             primitives.push_back(ap);
+             delete inst.renderFromInstanceAnim;
+         }
+diff --git a/src/pbrt/scene.h b/src/pbrt/scene.h
+index a8bea5b..fc67441 100644
+--- a/src/pbrt/scene.h
++++ b/src/pbrt/scene.h
+@@ -223,6 +223,9 @@ struct InstanceSceneEntity {
+     const Transform *renderFromInstance = nullptr;
+     // hdPbrt: from Attribute "shape" "integer hdpbrtinstanceid" (-1 = none).
+     int hdpbrtInstanceId = -1;
++    // hdPbrt: Attribute "shape" "integer hdpbrtlinks" [...] on the instance:
++    // its light-linking membership, OR'ed into the prototype shapes' masks.
++    uint64_t hdpbrtInstanceLinks = 0;
+     // hdPbrt: N-key transform motion (Attribute "shape" "float
+     // hdpbrtmotionxforms" / "hdpbrtmotiontimes"); overrides the others.
+     std::vector<Transform> *renderFromInstanceKeys = nullptr;
+-- 
+2.43.0
+

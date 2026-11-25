@@ -1,0 +1,37 @@
+From bb598af7734538ac3a65aa23f71894c094553051 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Wed, 25 Nov 2026 07:54:29 +0100
+Subject: [PATCH 32/32] VolPath: MIS per infinite light for escaping rays (for
+ hdPbrt)
+
+The escaped-ray loop multiplied r_l by each infinite light's pdf in place,
+so a second infinite light with radiance in the same direction got the
+product of both pdfs: its BSDF-sampled contribution was weighted almost 1
+on top of light sampling (fireflies with a dome and a distant light's cone,
+pbrt patch 10, depending on their order).
+---
+ src/pbrt/cpu/integrators.cpp | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/src/pbrt/cpu/integrators.cpp b/src/pbrt/cpu/integrators.cpp
+index b758ce4..c6d68c0 100644
+--- a/src/pbrt/cpu/integrators.cpp
++++ b/src/pbrt/cpu/integrators.cpp
+@@ -1219,10 +1219,12 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+                         L += beta * Le / HdPbrtMisAverage(r_u, lambda);
+                     else {
+                         // Add infinite light contribution using both PDFs with MIS
++                        // hdPbrt: per light (pbrt multiplied r_l in place, so a
++                        // second infinite light lit in the same direction, e.g. a
++                        // dome and a distant light's cone, got both lights' pdfs).
+                         Float p_l = lightSampler.PMF(prevIntrContext, light) *
+                                     light.PDF_Li(prevIntrContext, ray.d, true);
+-                        r_l *= p_l;
+-                        L += beta * Le / HdPbrtMisAverage((r_u + r_l), lambda);
++                        L += beta * Le / HdPbrtMisAverage((r_u + r_l * p_l), lambda);
+                     }
+                 }
+             }
+-- 
+2.43.0
+

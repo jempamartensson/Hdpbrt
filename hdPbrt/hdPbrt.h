@@ -210,10 +210,14 @@ public:
     // relative to the current frame, within HdPbrt_SampleWindow, from the
     // cached samples and indices (no scene delegate calls).
     VtMatrix4dArray ComputeInstanceTransforms(SdfPath const &prototypeId, float time = 0.f);
+    // Light-linking categories per instance, flattened like the transforms
+    // (a nested instance is in its own and its parents' collections).
+    std::vector<VtArray<TfToken>> ComputeInstanceCategories(SdfPath const &prototypeId);
 
 private:
     std::mutex _mutex;
     std::map<SdfPath, VtIntArray> _indices;
+    std::vector<VtArray<TfToken>> _categories;  // by instance index
     std::map<TfToken, HdTimeSampleArray<VtValue, 4>> _primvars;
     HdTimeSampleArray<GfMatrix4d, 4> _xform;
     bool _visible = true;

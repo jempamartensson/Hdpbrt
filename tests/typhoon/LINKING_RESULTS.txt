@@ -1,0 +1,7 @@
+# run_linking.sh, 2026-11-25, 256 spp, direct lighting only (Typhoon via USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX=0)
+linking.01                                                     mean ratio  0.992   rel RMSE  0.040   match
+linking.02                                                     mean ratio  1.006   rel RMSE  0.296   differs
+linking.03                                                     mean ratio  0.999   rel RMSE  0.009   match
+linking.04                                                     mean ratio  0.985   rel RMSE  0.059   match
+linking.05                                                     mean ratio  0.977   rel RMSE  0.118   close
+match 3  close 1  differs 1  missing 0

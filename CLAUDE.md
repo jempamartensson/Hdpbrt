@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (30 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (32 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -106,6 +106,13 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    0.05-0.95) and sample their own microfacets; patch 17's top weight then uses the
    reflection roughness and, from inside, a reflection albedo with TIR (without it a wide
    transmission lobe adds to a TIR'd sharp reflection: furnace rim 1.34).
+31. `ObjectInstance` light linking: Attribute "shape" "integer hdpbrtlinks" [...] before an
+   ObjectInstance is the instance's own membership, OR'ed into its prototype shapes' masks
+   on each hit (native instances share one prototype; categories come per instance from
+   `HdPbrtInstancer::ComputeInstanceCategories`, flattened over nested instancers).
+32. volpath: escaped rays weight each infinite light by its own pdf (pbrt multiplied `r_l`
+   in place, so a second infinite light lit in the same direction, e.g. a dome and a
+   distant light's cone, got both pdfs: fireflies, depending on the lights' order).
 
 ## Done in the 2026-11-22 session
 
@@ -431,7 +438,17 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   mirror reads 4-10% low in hdPbrt at 2-90 deg (mirror centre reflectance 0.776 vs 0.741, so
   not the light; both tessellate spheres the same way). Typhoon draws `Cube` prims as
   ellipsoids? (its shadow was an oval): the plate is a box mesh.
-- Next: a Typhoon scene for light linking.
+- Light linking vs Typhoon (done 2026-11-25): `tests/typhoon/linking.usda` (rect light linked to
+  one sphere + a native instance, sun excluding a sphere, sphere light with a shadow link
+  excluding a wall, dome excluding the floor; frame 1 all, 2-5 one light each),
+  `run_linking.sh` (generic harness `run_frames.sh`), `LINKING_RESULTS.txt`. Typhoon doesn't
+  register `HdsiLightLinkingSceneIndex`: through scene-index emulation it gets no collections
+  and links nothing; `run_linking.sh` renders it with `USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX=0`
+  (USD's legacy delegate resolves categories). Found and fixed: native instances got no
+  categories (unlit by every linked light: pbrt patch 31) and fireflies with a dome plus a
+  distant cone (stock volpath MIS bug, patch 32). Now 3 match / 1 close / 1 "differs"; means
+  0.98-1.01; frames 2 (rect light alone, mostly black) and 5 (dome alone) are noise. usdlux
+  326/328, materials 33/9/0 unchanged.
 - Shadow/reflection terminator (done 2026-11-23, pbrt patch 26): on coarse smooth-shaded
   meshes, rays leaving near a facet's horizon were blocked by neighboring facets (whole dark
   polygons along the terminator; dark slivers in mirror reflections at silhouettes). Triangle

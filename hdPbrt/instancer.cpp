@@ -104,9 +104,12 @@ static bool _Sample(const VtValue &v, int index, T *out)
 void HdPbrtInstancer::UpdateInstanceIndices(SdfPath const &prototypeId)
 {
     VtIntArray indices = GetDelegate()->GetInstanceIndices(GetId(), prototypeId);
+    // Instancers have no categories dirty bit; refresh them with the indices.
+    std::vector<VtArray<TfToken>> categories = GetDelegate()->GetInstanceCategories(GetId());
     {
         std::lock_guard<std::mutex> lock(_mutex);
         _indices[prototypeId] = indices;
+        _categories = std::move(categories);
     }
     if (GetParentId().IsEmpty())
         return;
@@ -187,6 +190,39 @@ VtMatrix4dArray HdPbrtInstancer::ComputeInstanceTransforms(SdfPath const &protot
     for (size_t i = 0; i < parentXfs.size(); ++i)
         for (size_t j = 0; j < xfs.size(); ++j)
             result[i * xfs.size() + j] = xfs[j] * parentXfs[i];
+    return result;
+}
+
+std::vector<VtArray<TfToken>> HdPbrtInstancer::ComputeInstanceCategories(
+    SdfPath const &prototypeId)
+{
+    std::vector<VtArray<TfToken>> cats;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!_visible)
+            return {};
+        auto it = _indices.find(prototypeId);
+        if (it == _indices.end())
+            return {};
+        for (int idx : it->second)
+            cats.push_back(idx >= 0 && size_t(idx) < _categories.size() ? _categories[idx]
+                                                                       : VtArray<TfToken>());
+    }
+    if (GetParentId().IsEmpty())
+        return cats;
+    HdInstancer *parent = GetDelegate()->GetRenderIndex().GetInstancer(GetParentId());
+    if (!parent)
+        return cats;
+    std::vector<VtArray<TfToken>> parentCats =
+        static_cast<HdPbrtInstancer *>(parent)->ComputeInstanceCategories(GetId());
+    std::vector<VtArray<TfToken>> result(parentCats.size() * cats.size());
+    for (size_t i = 0; i < parentCats.size(); ++i)
+        for (size_t j = 0; j < cats.size(); ++j) {
+            VtArray<TfToken> &r = result[i * cats.size() + j];
+            r = cats[j];
+            for (TfToken const &t : parentCats[i])
+                r.push_back(t);
+        }
     return result;
 }
 

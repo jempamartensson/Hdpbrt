@@ -267,10 +267,13 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
     for (size_t k = 0; k < nx; ++k)
         xf[k] = HdPbrt_XformAt(_xform, xTimes[k]);
     std::vector<VtMatrix4dArray> inst;
+    std::vector<VtArray<TfToken>> instCats;  // light linking, per instance
     if (_instanced) {
-        if (auto *pi = static_cast<HdPbrtInstancer *>(index.GetInstancer(prim.GetInstancerId())))
+        if (auto *pi = static_cast<HdPbrtInstancer *>(index.GetInstancer(prim.GetInstancerId()))) {
             for (size_t k = 0; k < nx; ++k)
                 inst.push_back(pi->ComputeInstanceTransforms(prim.GetId(), xTimes[k]));
+            instCats = pi->ComputeInstanceCategories(prim.GetId());
+        }
         if (inst.empty() || inst[0].empty())
             return;
         for (size_t k = 1; k < nx; ++k)
@@ -347,8 +350,14 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
             const std::string xform = _MotionTransform(keys, xTimes, &motionAttr);
             os << "AttributeBegin " << xform << (xform.empty() ? "" : " ") << motionAttr
                << (motionAttr.empty() ? "" : " ")
-               << "Attribute \"shape\" \"integer hdpbrtinstanceid\" " << i
-               << " ObjectInstance " << HdPbrt_Quote(name) << " AttributeEnd\n";
+               << "Attribute \"shape\" \"integer hdpbrtinstanceid\" " << i;
+            // The instance's own collections (pbrt ORs them into the
+            // prototype shapes' membership).
+            const std::string links =
+                _delegate->LinkParam(i < instCats.size() ? instCats[i] : VtArray<TfToken>());
+            if (!links.empty())
+                os << " Attribute \"shape\"" << links;
+            os << " ObjectInstance " << HdPbrt_Quote(name) << " AttributeEnd\n";
         }
         ctx.numInstances += inst[0].size();
     }
