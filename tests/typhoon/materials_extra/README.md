@@ -24,6 +24,10 @@ them and point SUITE at a directory whose `materials/` holds both:
   f_op_r03 / f_op_r05: OpenPBR glass (transmission_weight 1) at specular_roughness 0.3 / 0.5,
   with pbrt patch 21's multiple-scattering compensation: hdPbrt 0.951 -> 0.976 and 0.808 -> 0.996
   (Typhoon 1.001 / 0.998).
+  f_op_r0 / f_ss_r0 / f_ss_r02: OpenPBR glass at 0 and standard_surface glass (base 0,
+  transmission 1) at 0 / 0.2. Typhoon 1.000 / 0.909 / 0.905: standard_surface is MaterialX's
+  layer(R over T), so T pays Fresnel twice per crossing. hdPbrt with `hdpbrttopweight` on
+  standard_surface glass (2026-11-25): 1.000 / 0.904 / 0.890 (was 1.000 / 1.000 / 0.982).
 - `thin_film`: standard_surface thin_film_thickness 400 nm / IOR 1.33 and OpenPBR
   thin_film_weight 0.5 / 0.3 um (pbrt patch 22). RMSE 0.061 -> 0.039 and 0.042 -> 0.036.
   f_sss_white / f_sss_08: OpenPBR subsurface (weight 1, radius 0.3, no specular) with walk
@@ -49,4 +53,6 @@ them and point SUITE at a directory whose `materials/` holds both:
   0.075 -> 0.060 against dropping the film). hdPbrt's 1 nm film equals no film; Typhoon's
   shifts the glass by +1% (it leaves its coupled-interface path when any film is present), while
   the 400 nm film's own effect is about the same in both. ss_glass_film and ss_glass_nofilm are
-  both close at 1.16: a standard_surface glass gap that has nothing to do with the film (open).
+  both close at 1.16: a standard_surface glass gap that has nothing to do with the film. Fixed
+  2026-11-25 (standard_surface glass gets `hdpbrttopweight`, see `furnace` f_ss_*): 1.077 / 1.066,
+  RMSE 0.124 / 0.113, still close.

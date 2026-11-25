@@ -725,6 +725,10 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             // Rough glass with microfacet multiple-scattering compensation
             // (patch 21): OpenPBR, as Typhoon (not standard_surface).
             bool glassMultiScatter = false;
+            // standard_surface glass is MaterialX's layer(specular R over
+            // transmission T): T keeps its own 1 - F and also pays the top's
+            // 1 - w E_R(wo), as Typhoon (pbrt patch 17's hdpbrttopweight).
+            float glassTopWeight = 0;
             // Dispersion (OpenPBR): Abbe number of the glass, 0 for none.
             float dispAbbe = 0;
             // Thin film on the specular layer (patch 22; hdpbrtlayered only):
@@ -790,6 +794,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 filmNm = std::max(_Float(*surf, "thin_film_thickness", 0), 0.f);
                 filmW = filmNm > 0 ? 1.f : 0.f;
                 filmIor = std::max(_Float(*surf, "thin_film_IOR", 1.5f), 1.f);
+                glassTopWeight = std::min(std::max(specWeight, 0.f), 1.f);
                 layeredMetal = true;
                 metalBase = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base", 1);
                 metalEdge = _Color(*surf, "specular_color", GfVec3f(1)) * _Float(*surf, "specular", 1);
@@ -1005,6 +1010,8 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                 roughParam("roughness");
                 if (glassMultiScatter && rough > 0)
                     other << " \"bool hdpbrtmultiscatter\" true";
+                if (glassTopWeight > 0)
+                    other << " \"float hdpbrttopweight\" " << glassTopWeight;
                 // Interior medium, MaterialX's conversion: extinction
                 // -ln(color) / depth, scattering scatter / depth, absorption
                 // the difference shifted so that no channel is negative.

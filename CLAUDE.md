@@ -98,8 +98,8 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 17. `DielectricMaterial` `"float hdpbrttopweight"`: transmission also scaled by
    1 - w E_R(|cos theta_o|) (albedo table). For pbrlib layer(dielectric R over dielectric T):
    MaterialX/Typhoon apply the top's layer throughput on top of the T lobe's own (1 - F), so
-   transmission pays Fresnel twice per crossing. Real single-interface glass (OpenPBR,
-   standard_surface) doesn't use it.
+   transmission pays Fresnel twice per crossing. standard_surface glass uses it too (its
+   MaterialX graph is that layer; weight = specular); OpenPBR glass doesn't.
 
 ## Done in the 2026-11-22 session
 
@@ -394,8 +394,15 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   lossless stack reflects the same from both sides; TIR -> 1), transmission 1 - Fr, as Typhoon
   (R + T = 1). Sampling uses the spectra's averages. From OpenPBR / standard_surface glass and
   pbrlib dielectric_bsdf thinfilm_* (also on the R-over-T layer). Suite unchanged (no fixture
-  has a film on solid glass); `materials_extra/glass_film` match. Open: standard_surface solid
-  glass (base 0, transmission 1) reads 1.16x Typhoon with or without a film.
+  has a film on solid glass); `materials_extra/glass_film` match.
+  standard_surface glass (2026-11-25): its MaterialX graph is layer(specular R over
+  transmission T), so T pays Fresnel twice per crossing; Typhoon follows the graph (furnace,
+  smooth: 0.909, centre 0.927 = two crossings at (1-F)^2 + F). hdPbrt now writes patch 17's
+  `hdpbrttopweight` (= specular) on standard_surface glass: furnace 1.000 -> 0.904 (r 0.2:
+  0.982 -> 0.890 vs 0.905), shaderball ss_glass_nofilm 1.16 -> 1.08, ss_glass_film 1.16 -> 1.07.
+  Suite 33/9/0; input_transmission_extra_roughness 0.926 -> 0.901 (RMSE 0.130 -> 0.160, still
+  close): MaterialX keeps R at specular_roughness and only T gets the extra roughness, but pbrt's
+  dielectric has one roughness for both (open: a separate reflection roughness).
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Shadow/reflection terminator (done 2026-11-23, pbrt patch 26): on coarse smooth-shaded
   meshes, rays leaving near a facet's horizon were blocked by neighboring facets (whole dark
