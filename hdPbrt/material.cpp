@@ -726,9 +726,10 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             float sheenW = 0, sheenRough = 0.3f;
             GfVec3f sheenColor(1.f);
             bool sheenOnTop = false, thinWalled = false;
-            // Coat: a GGX dielectric layer on top; coatTint (coat color and
-            // OpenPBR darkening) multiplies everything below it.
-            float coatW = 0, coatRough = 0, coatIor = 1.5f;
+            // Coat: a GGX dielectric layer on top; coatTint (coat color)
+            // multiplies everything below it, and so does OpenPBR's darkening,
+            // which pbrt computes per shading point (coatDark = its weight).
+            float coatW = 0, coatRough = 0, coatIor = 1.5f, coatDark = 0;
             GfVec3f coatTint(1.f);
             // Metal inside hdpbrtlayered (patch 18), mixed by metalness:
             // OpenPBR F82-tint, standard_surface artistic IOR. Other shaders
@@ -891,18 +892,14 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                     rough = rough * (1 - coatW) + std::pow(std::min(1.f, 2 * c4 + r4), 0.25f) * coatW;
                     const float iorS = std::max(ior, 1.f);
                     ior = iorS * (1 - coatW) + std::max(iorS / coatIor, coatIor / iorS) * coatW;
-                    // Darkening from light trapped under the coat (internal
-                    // reflection K of the coat, base albedo E):
-                    // (1 - K) / (1 - E K), blended by weight * coat_darkening.
-                    const float f0 = std::pow((coatIor - 1) / (coatIor + 1), 2.f);
-                    const float K = 1 - (1 - f0) / (coatIor * coatIor);
-                    const float dk = coatW * std::min(std::max(_Float(*surf, "coat_darkening", 1), 0.f), 1.f);
+                    // Darkening from light trapped under the coat,
+                    // (1 - K) / (1 - E K) blended by weight * coat_darkening:
+                    // pbrt evaluates it per shading point from the (textured)
+                    // base, the metal F0 and the subsurface share.
+                    coatDark = coatW * std::min(std::max(_Float(*surf, "coat_darkening", 1), 0.f), 1.f);
                     const GfVec3f cc = _Clamp01(_Color(*surf, "coat_color", GfVec3f(1)));
-                    for (int i = 0; i < 3; ++i) {
-                        const float e = std::min(std::max(base[i], 0.f), 1.f);
-                        const float dark = std::min((1 - K) / std::max(1 - e * K, 1e-5f), 1.f);
-                        coatTint[i] = (1 - dk + dark * dk) * (1 - coatW + cc[i] * coatW);
-                    }
+                    for (int i = 0; i < 3; ++i)
+                        coatTint[i] = 1 - coatW + cc[i] * coatW;
                 }
                 noSpecular = specWeight <= 0.f && _Float(*surf, "coat_weight", 0) <= 0.f;
             } else {
@@ -925,6 +922,15 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                     if (sssW > 0.999f)
                         baseIn = nullptr;
                 }
+            }
+            // Coat darkening (OpenPBR): its weight, and the subsurface albedo
+            // the walk took out of the diffuse reflectance.
+            std::string coatDarkParams;
+            if (coatW > 0 && coatDark > 0) {
+                coatDarkParams = " \"float coatdarkening\" " + TfStringify(coatDark);
+                if (sssWalk)
+                    coatDarkParams += " \"rgb coatdarkeningadd\" " +
+                                      HdPbrt_Rgb(_Clamp01(sssColor * sssW));
             }
             bool fromPrimvar = false;
             std::string baseTex = baseIn ? b.Texture(*surf, baseIn, true, &fromPrimvar) : "";
@@ -1000,7 +1006,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                     other << " \"float coatweight\" " << coatW << " \"float coatroughness\" "
                           << std::pow(std::min(std::max(coatRough, 0.f), 1.f), 2.f)
                           << " \"float coateta\" " << coatIor
-                          << " \"rgb coattint\" " << HdPbrt_Rgb(_Clamp01(coatTint));
+                          << " \"rgb coattint\" " << HdPbrt_Rgb(_Clamp01(coatTint)) << coatDarkParams;
             } else if (metallic >= 0.5f) {
                 d.type = "conductor";
                 roughParam("roughness");
@@ -1072,7 +1078,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                     other << " \"float coatweight\" " << coatW << " \"float coatroughness\" "
                           << std::pow(std::min(std::max(coatRough, 0.f), 1.f), 2.f)
                           << " \"float coateta\" " << coatIor
-                          << " \"rgb coattint\" " << HdPbrt_Rgb(_Clamp01(coatTint));
+                          << " \"rgb coattint\" " << HdPbrt_Rgb(_Clamp01(coatTint)) << coatDarkParams;
                 if (sheenW > 0) {
                     other << " \"float sheenweight\" " << std::min(sheenW, 1.f)
                           << " \"rgb sheencolor\" " << HdPbrt_Rgb(_Clamp01(sheenColor))

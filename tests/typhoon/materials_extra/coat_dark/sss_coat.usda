@@ -1,0 +1,54 @@
+#usda 1.0
+(
+    defaultPrim = "standard_shader_ball_scene"
+    metersPerUnit = 0.01
+    renderSettingsPrimPath = "/Render/RenderSettings"
+    subLayers = [
+        @../_assets/shaderball/scene.usda@
+    ]
+    upAxis = "Y"
+)
+
+def Scope "Looks"
+{
+    def Material "sss_coat" (
+    )
+    {
+        token outputs:mtlx:surface.connect = </Looks/sss_coat/surface_shader1.outputs:out>
+        token outputs:surface.connect = </Looks/sss_coat/surface_shader1.outputs:out>
+
+        def Shader "surface_shader1"
+        {
+            uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+            float inputs:coat_weight = 1
+            color3f inputs:base_color = (0.8, 0.8, 0.8)
+            float inputs:subsurface_weight = 1
+            color3f inputs:subsurface_color = (0.9, 0.3, 0.2)
+            float inputs:subsurface_radius = 0.5
+            float inputs:specular_weight = 0
+            token outputs:out
+        }
+    }
+}
+
+over "standard_shader_ball_scene"
+{
+    over "shader_ball"
+    {
+        over "material_surface" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            rel material:binding = </Looks/sss_coat>
+        }
+
+    }
+}
+
+over "Render"
+{
+    over "Product"
+    {
+        token productName = "coat_dark/sss_coat.exr"
+    }
+}

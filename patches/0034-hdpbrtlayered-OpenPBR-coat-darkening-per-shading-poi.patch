@@ -1,0 +1,92 @@
+From 7831f176547dffa83c95c81a54c1a3b46e88030b Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Wed, 25 Nov 2026 21:14:02 +0100
+Subject: [PATCH] hdpbrtlayered: OpenPBR coat darkening per shading point,
+ "coatdarkening" / "coatdarkeningadd" (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/materials.cpp |  3 +++
+ src/pbrt/materials.h   | 31 ++++++++++++++++++++++++++++++-
+ 2 files changed, 33 insertions(+), 1 deletion(-)
+
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index 84aca4c..2a38a67 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -754,6 +754,9 @@ HdPbrtLayeredMaterial *HdPbrtLayeredMaterial::Create(
+                parameters.GetOneFloat("filmeta", 1.4f));
+     m->SetSubsurface(Clamp(parameters.GetOneFloat("subsurface", 0.f), 0, 1));
+     m->SetDiffuseBurley(parameters.GetOneBool("diffuseburley", false));
++    m->SetCoatDarkening(Clamp(parameters.GetOneFloat("coatdarkening", 0.f), 0, 1),
++                        parameters.GetSpectrumTextureOrNull("coatdarkeningadd",
++                                                            SpectrumType::Albedo, alloc));
+     return m;
+ }
+ 
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index 5458449..6f4423f 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -720,7 +720,7 @@ class HdPbrtLayeredMaterial {
+                                     sheenRoughness, coatWeight, coatRoughness, metalWeight,
+                                     diffuseRoughness},
+                                    {reflectance, transmittance, specTint, sheenColor,
+-                                    coatTint, metalA, metalB});
++                                    coatTint, metalA, metalB, coatDarkeningAdd});
+     }
+ 
+     template <typename TextureEvaluator>
+@@ -756,6 +756,26 @@ class HdPbrtLayeredMaterial {
+                 mb = Clamp(mb, 0, 1);
+             }
+         }
++        if (coatDarkening > 0 && coat.weight > 0) {
++            // OpenPBR coat darkening, per shading point: (1 - K) / (1 - E K),
++            // K the coat's internal reflection, E the base albedo (diffuse
++            // reflectance + "coatdarkeningadd", mixed by metalness with the
++            // metal's F0 * min(metalscale, 1)), blended by "coatdarkening".
++            const Float n = std::max<Float>(coatEta, 1);
++            const Float K = 1 - (1 - Sqr((n - 1) / (n + 1))) / Sqr(n);
++            SampledSpectrum eD = r;
++            if (coatDarkeningAdd)
++                eD += texEval(coatDarkeningAdd, ctx, lambda);
++            eD = Clamp(eD, 0, 1);
++            SampledSpectrum e = eD;
++            if (mw > 0 && metalMode == 0)
++                e = eD * (1 - mw) +
++                    Clamp(ma, 0, 1) * (mw * std::min<Float>(metalScale, 1));
++            for (int i = 0; i < NSpectrumSamples; ++i) {
++                const Float dark = std::min<Float>((1 - K) / std::max<Float>(1 - e[i] * K, 1e-5f), 1);
++                ct[i] *= 1 - coatDarkening + dark * coatDarkening;
++            }
++        }
+         HdPbrtLayeredBxDF bxdf(r, t, tint, spec, sc, sw, sa, sheenOnTop, coat, ct, mw,
+                                metalMode, ma, mb, metalScale,
+                                Clamp(texEval(diffuseRoughness, ctx), 0, 1));
+@@ -779,6 +799,13 @@ class HdPbrtLayeredMaterial {
+     void SetSubsurface(Float w) { sssWeight = w; }
+     // Burley base diffuse ("bool diffuseburley") instead of EON.
+     void SetDiffuseBurley(bool b) { diffuseBurley = b; }
++    // OpenPBR coat darkening ("coatdarkening" = coat weight * coat_darkening,
++    // "coatdarkeningadd": albedo the diffuse reflectance lacks, e.g. the
++    // subsurface share).
++    void SetCoatDarkening(Float w, SpectrumTexture add) {
++        coatDarkening = w;
++        coatDarkeningAdd = add;
++    }
+ 
+     // Thin film on the specular layer ("filmweight", "filmthickness" in nm,
+     // "filmeta"); for hdPbrt.
+@@ -820,6 +847,8 @@ class HdPbrtLayeredMaterial {
+     int metalMode;
+     bool sheenOnTop;
+     bool diffuseBurley = false;
++    Float coatDarkening = 0;
++    SpectrumTexture coatDarkeningAdd;
+     bool remapRoughness;
+ };
+ 
+-- 
+2.43.0
+

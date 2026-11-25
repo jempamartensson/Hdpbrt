@@ -4,7 +4,7 @@ them and point SUITE at a directory whose `materials/` holds both:
 
     mkdir -p $X/materials && ln -s $SUITE/materials/_assets $X/materials/_assets
     ln -s $PWD/tests/typhoon/materials_extra/* $X/materials/
-    SUITE=$X OUT=... tests/typhoon/run_materials.sh open_pbr_metal diffuse_rough rough_glass furnace thin_film dispersion metal_film film_check glass_film
+    SUITE=$X OUT=... tests/typhoon/run_materials.sh open_pbr_metal diffuse_rough rough_glass furnace thin_film dispersion metal_film film_check glass_film coat_dark
 
 - `open_pbr_metal`: OpenPBR metal with specular_weight 0.5 / tinted specular_color /
   half metalness (pbrt patch 19). All match Typhoon (2026-11-23).
@@ -60,3 +60,8 @@ them and point SUITE at a directory whose `materials/` holds both:
   both close at 1.16: a standard_surface glass gap that has nothing to do with the film. Fixed
   2026-11-25 (standard_surface glass gets `hdpbrttopweight`, see `furnace` f_ss_*): 1.077 / 1.066,
   RMSE 0.124 / 0.113, still close.
+- `coat_dark`: OpenPBR coat (weight 1) over a checker-textured base, the same fully metallic,
+  a metal at specular_weight 0.5, and a subsurface base (pbrt patch 34, darkening per shading
+  point from Typhoon's base albedo). 2026-11-25, all close -> match: tex_coat 0.996 / 0.107 ->
+  1.027 / 0.036, tex_coat_metal 1.007 / 0.109 -> 1.032 / 0.041, metal_coat 1.076 / 0.128 ->
+  1.027 / 0.040, sss_coat 1.059 / 0.158 -> 1.009 / 0.094 (mean ratio / rel RMSE).

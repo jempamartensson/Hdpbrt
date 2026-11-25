@@ -1,6 +1,6 @@
 open_pbr--displacement                                         mean ratio  1.057   rel RMSE  0.086   match
 open_pbr--feature_base_color                                   mean ratio  1.029   rel RMSE  0.039   match
-open_pbr--feature_coat                                         mean ratio  1.017   rel RMSE  0.034   match
+open_pbr--feature_coat                                         mean ratio  1.010   rel RMSE  0.037   match
 open_pbr--feature_emission                                     mean ratio  1.028   rel RMSE  0.034   match
 open_pbr--feature_fuzz                                         mean ratio  1.031   rel RMSE  0.036   match
 open_pbr--feature_geometry_normal                              mean ratio  1.034   rel RMSE  0.039   match

@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (33 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (34 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -120,6 +120,10 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    `"bool hdpbrtburley"` makes "roughness" Burley's instead of EON's; hdpbrtlayered
    `"bool diffuseburley"` does the same for "diffuseroughness". f = rho/pi F(mu_i) F(mu_o),
    F(c) = 1 + (F90 - 1)(1 - c)^5, F90 = 0.5 + 2 r cos^2(theta_d); cosine sampling.
+34. hdpbrtlayered OpenPBR coat darkening per shading point: `"float coatdarkening"` (coat
+   weight x coat_darkening) multiplies the coat tint by lerp(1, (1 - K) / (1 - E K), w), K =
+   1 - (1 - F0) / n^2 from `coateta`, E = lerp(diffuse reflectance + `"rgb coatdarkeningadd"`,
+   metal F0 x min(metalscale, 1), metal weight) (Typhoon's base albedo).
 
 ## Done in the 2026-11-22 session
 
@@ -334,7 +338,13 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   and darkens the base, (1 - K) / (1 - E K) with K = 1 - (1 - F0) / n^2 (spec; Typhoon does
   the same); coattint = darkening * lerp(1, coat_color, w). standard_surface: coat_color,
   coat_affect_color (base^(1 + w a)), coat_affect_roughness. feature_coat 1.14 -> 1.02
-  (match). Not done: coat over metal (conductor path), textured base color in darkening.
+  (match). Coat over metal works since patch 18. Darkening per shading point (patch 34,
+  2026-11-25): it used to be baked into coattint from the constant base color, so a textured
+  base used the untextured fallback, and metal (E = F0 x specular_weight) and subsurface
+  (E = lerp(base, subsurface_color, w)) were ignored. `materials_extra/coat_dark` (textured
+  base, textured metal, metal at specular_weight 0.5, subsurface): all close -> match
+  (tex_coat RMSE 0.107 -> 0.036, tex_coat_metal 0.109 -> 0.041, metal_coat 1.076 -> 1.027,
+  sss_coat 1.059 -> 1.009). Suite 33/9/0; feature_coat 1.017 -> 1.010.
   Absorption fixtures (patch 17): dielectric_layer_absorption/_anisotropic back to match
   (1.08 -> 1.04), dielectric_layer 1.15 -> 1.07. 32 match / 10 close / 0 differ.
   Metal (patch 18): standard_surface/OpenPBR metal is a lobe inside hdpbrtlayered, mixed
