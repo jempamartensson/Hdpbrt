@@ -1,0 +1,173 @@
+#usda 1.0
+(
+    doc = """DistantLight cone vs Typhoon (tests/typhoon/run_distant_cone.sh).
+    A plate 1 unit above the floor (penumbra width ~ 2 tan(angle/2) / sin(elevation)),
+    a mirror sphere (the sun disk itself) and a rough metal sphere (highlight spread).
+    Frames 1-8: normalize on, angle 0.53 2 5 10 20 45 90 180.
+    Frames 9-12: normalize off (intensity = radiance in the cone), angle 0.53 5 20 0."""
+    defaultPrim = "World"
+    endTimeCode = 12
+    framesPerSecond = 24
+    metersPerUnit = 1
+    renderSettingsPrimPath = "/Render/Settings"
+    startTimeCode = 1
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "camera"
+    {
+        float2 clippingRange = (0.1, 1000)
+        float focalLength = 35
+        float horizontalAperture = 36
+        float verticalAperture = 36
+        token projection = "perspective"
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 0.903278, -0.429057, 0), (0, 0.429057, 0.903278, 0), (0, 4.5, 8, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }
+
+    def DistantLight "sun"
+    {
+        float inputs:angle.timeSamples = {
+            1: 0.53, 2: 2, 3: 5, 4: 10, 5: 20, 6: 45, 7: 90, 8: 180,
+            9: 0.53, 10: 5, 11: 20, 12: 0,
+        }
+        color3f inputs:color = (1, 0.95, 0.9)
+        float inputs:intensity.timeSamples = {
+            1: 3, 2: 3, 3: 3, 4: 3, 5: 3, 6: 3, 7: 3, 8: 3,
+            9: 30000, 10: 300, 11: 20, 12: 3,
+        }
+        bool inputs:normalize.timeSamples = {
+            1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1,
+            9: 0, 10: 0, 11: 0, 12: 0,
+        }
+        float3 xformOp:rotateXYZ = (-50, 30, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Mesh "floor" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        float3[] extent = [(-10, 0, -10), (10, 0, 10)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-10, 0, 10), (10, 0, 10), (10, 0, -10), (-10, 0, -10)]
+        rel material:binding = </World/Looks/white>
+    }
+
+    def Mesh "plate" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        float3[] extent = [(-0.7, -0.02, -0.7), (0.7, 0.02, 0.7)]
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3, 4, 7, 6, 5, 0, 4, 5, 1, 1, 5, 6, 2, 2, 6, 7, 3, 3, 7, 4, 0]
+        point3f[] points = [(-0.7, -0.02, -0.7), (0.7, -0.02, -0.7), (0.7, -0.02, 0.7), (-0.7, -0.02, 0.7), (-0.7, 0.02, -0.7), (0.7, 0.02, -0.7), (0.7, 0.02, 0.7), (-0.7, 0.02, 0.7)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/Looks/white>
+        double3 xformOp:translate = (-1.4, 1, 0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "mirror" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.6
+        rel material:binding = </World/Looks/mirror>
+        double3 xformOp:translate = (1.3, 0.6, 1.2)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "glossy" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.6
+        rel material:binding = </World/Looks/glossy>
+        double3 xformOp:translate = (1.5, 0.6, -1.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Scope "Looks"
+    {
+        def Material "white"
+        {
+            token outputs:surface.connect = </World/Looks/white/s.outputs:surface>
+
+            def Shader "s"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.8, 0.8, 0.8)
+                float inputs:ior = 1
+                int inputs:useSpecularWorkflow = 1
+                color3f inputs:specularColor = (0, 0, 0)
+                token outputs:surface
+            }
+        }
+
+        def Material "mirror"
+        {
+            token outputs:surface.connect = </World/Looks/mirror/s.outputs:surface>
+
+            def Shader "s"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.9, 0.9, 0.9)
+                float inputs:metallic = 1
+                float inputs:roughness = 0
+                token outputs:surface
+            }
+        }
+
+        def Material "glossy"
+        {
+            token outputs:surface.connect = </World/Looks/glossy/s.outputs:surface>
+
+            def Shader "s"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.9, 0.9, 0.9)
+                float inputs:metallic = 1
+                float inputs:roughness = 0.3
+                token outputs:surface
+            }
+        }
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "Settings" (
+        prepend apiSchemas = ["TyphoonRenderSettingsAPI"]
+    )
+    {
+        rel camera = </World/camera>
+        rel products = [</Render/Product>]
+        uniform bool disableMotionBlur = 1
+        bool instantaneousShutter = 1
+        uniform int2 resolution = (200, 200)
+        int ty:convergedSamplesPerPixel = 256
+        int ty:maxBounces = 0
+        float ty:fireflyClampThreshold = 0.0
+        float ty:causticsClampThreshold = 0.0
+    }
+
+    def RenderProduct "Product"
+    {
+        rel camera = </World/camera>
+        rel orderedVars = [</Render/Product/Color>]
+        token productType = "raster"
+        token productName = "distant_cone.exr"
+
+        def RenderVar "Color"
+        {
+            token dataType = "color4f"
+            string sourceName = "color"
+            token sourceType = "raw"
+        }
+    }
+}

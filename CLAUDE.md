@@ -418,7 +418,20 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   copied. Tried and dropped: the inside (TIR) albedo for unsplit lobes too: dielectric_layer
   close -> match (1.068 -> 0.998) and ss_glass 1.077 -> 1.035, but furnace f_layer_r02 0.788
   -> 0.683 (Typhoon 0.863) and extra rough_glass layer_r02 match -> close.
-- Next after materials: Typhoon scenes for the distant-light cone and light linking.
+- DistantLight cone vs Typhoon (done 2026-11-25): `tests/typhoon/distant_cone.usda` (12 frames:
+  normalize on at 0.53/2/5/10/20/45/90/180 deg, off at 0.53/5/20/0), `run_distant_cone.sh`,
+  `cone_stats.py`, results in `DISTANT_CONE_RESULTS.txt`. A plate 1 unit up (penumbra), a mirror
+  sphere (the sun disk) and a rough metal sphere (highlight). Everything outside the mirror
+  agrees (mean within 0.2%, rel RMSE <= 0.083) up to 90 deg; the unshadowed floor matches the
+  analytic irradiance in both to 0.3%. Not ours: (1) at 180 deg (and +17% at 90) Typhoon
+  barely shadows: under the plate hdPbrt 0.370 vs analytic 0.385, Typhoon 0.598 (cause not
+  found in its NEE/visibility code). (2) angle 0: Typhoon shows a ~0.26 deg disk in a mirror
+  (its delta direction test uses cos >= 1 - 1e-5); hdPbrt, physically, nothing. (3) A 0.53 deg
+  sun in a mirror is ~1/30 px: both are very noisy even at 4096 spp. Residual: the sun in the
+  mirror reads 4-10% low in hdPbrt at 2-90 deg (mirror centre reflectance 0.776 vs 0.741, so
+  not the light; both tessellate spheres the same way). Typhoon draws `Cube` prims as
+  ellipsoids? (its shadow was an oval): the plate is a box mesh.
+- Next: a Typhoon scene for light linking.
 - Shadow/reflection terminator (done 2026-11-23, pbrt patch 26): on coarse smooth-shaded
   meshes, rays leaving near a facet's horizon were blocked by neighboring facets (whole dark
   polygons along the terminator; dark slivers in mirror reflections at silhouettes). Triangle
