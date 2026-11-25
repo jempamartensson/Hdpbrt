@@ -1,9 +1,12 @@
 #usda 1.0
 (
     doc = """Light and shadow linking vs Typhoon (tests/typhoon/run_linking.sh).
-    A: rect light, lightLink = sphereA + the native instance only.
-    B: sun, lightLink = all but sphereB (sphereB still casts its shadow).
-    C: sphere light, shadowLink = all but the wall (the wall is lit, casts no C shadow).
+    Point instancers "balls" and "cubes" (front row) are linked as a whole: USD
+    publishes a point instancer's membership on the instancer, for all its instances.
+    The cubes are meshes: Typhoon draws Cube prims as spheres.
+    A: rect light, lightLink = sphereA + the native instance + the balls only.
+    B: sun, lightLink = all but sphereB and the cubes (sphereB still casts its shadow).
+    C: sphere light, shadowLink = all but the wall and the balls (both lit, no C shadow).
     D: dome, lightLink = all but the floor.
     Frame 1: all lights; frames 2-5: A, B, C, D alone. Direct lighting only."""
     defaultPrim = "World"
@@ -49,7 +52,7 @@ def Xform "World"
         float inputs:width = 1
         float inputs:intensity.timeSamples = {1: 8, 2: 8, 3: 0, 4: 0, 5: 0}
         uniform bool collection:lightLink:includeRoot = 0
-        rel collection:lightLink:includes = [</World/sphereA>, </World/inst>]
+        rel collection:lightLink:includes = [</World/sphereA>, </World/inst>, </World/balls>]
         double3 xformOp:translate = (-1.5, 2.5, 1.5)
         float3 xformOp:rotateXYZ = (-60, 0, 0)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
@@ -64,7 +67,7 @@ def Xform "World"
         bool inputs:normalize = 1
         float inputs:intensity.timeSamples = {1: 2, 2: 0, 3: 2, 4: 0, 5: 0}
         uniform bool collection:lightLink:includeRoot = 1
-        rel collection:lightLink:excludes = </World/sphereB>
+        rel collection:lightLink:excludes = [</World/sphereB>, </World/cubes>]
         float3 xformOp:rotateXYZ = (-50, 30, 0)
         uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
     }
@@ -77,7 +80,7 @@ def Xform "World"
         float inputs:radius = 0.2
         float inputs:intensity.timeSamples = {1: 15, 2: 0, 3: 0, 4: 15, 5: 0}
         uniform bool collection:shadowLink:includeRoot = 1
-        rel collection:shadowLink:excludes = </World/wall>
+        rel collection:shadowLink:excludes = [</World/wall>, </World/balls>]
         double3 xformOp:translate = (3.2, 1.2, 0)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
@@ -154,6 +157,40 @@ def Xform "World"
     {
         double3 xformOp:translate = (-1.0, 0.5, -1.6)
         uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def PointInstancer "balls"
+    {
+        point3f[] positions = [(-2.6, 0.3, 2.2), (-0.6, 0.3, 2.4), (0.9, 0.3, 2.8)]
+        int[] protoIndices = [0, 0, 0]
+        rel prototypes = </World/balls/proto>
+
+        def Sphere "proto" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            double radius = 0.3
+            rel material:binding = </World/Looks/white>
+        }
+    }
+
+    def PointInstancer "cubes"
+    {
+        point3f[] positions = [(-1.6, 0.25, 2.6), (0.15, 0.25, 3.0), (1.9, 0.25, 2.3)]
+        int[] protoIndices = [0, 0, 0]
+        rel prototypes = </World/cubes/proto>
+
+        def Mesh "proto" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            float3[] extent = [(-0.25, -0.25, -0.25), (0.25, 0.25, 0.25)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 2, 3, 4, 7, 6, 5, 0, 4, 5, 1, 1, 5, 6, 2, 2, 6, 7, 3, 3, 7, 4, 0]
+            point3f[] points = [(-0.25, -0.25, -0.25), (0.25, -0.25, -0.25), (0.25, -0.25, 0.25), (-0.25, -0.25, 0.25), (-0.25, 0.25, -0.25), (0.25, 0.25, -0.25), (0.25, 0.25, 0.25), (-0.25, 0.25, 0.25)]
+            uniform token subdivisionScheme = "none"
+            rel material:binding = </World/Looks/white>
+        }
     }
 
     def Scope "Looks"

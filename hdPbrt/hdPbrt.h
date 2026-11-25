@@ -218,6 +218,7 @@ private:
     std::mutex _mutex;
     std::map<SdfPath, VtIntArray> _indices;
     std::vector<VtArray<TfToken>> _categories;  // by instance index
+    VtArray<TfToken> _ownCategories;  // the instancer's own: all its instances
     std::map<TfToken, HdTimeSampleArray<VtValue, 4>> _primvars;
     HdTimeSampleArray<GfMatrix4d, 4> _xform;
     bool _visible = true;

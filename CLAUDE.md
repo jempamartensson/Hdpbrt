@@ -16,7 +16,9 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
     the Blender flavor.
-  - `build/pbrt`, `build/hdpbrt-houdini`, `build/hdpbrt-blender`: build dirs.
+  - `build/pbrt`, `build/hdpbrt-houdini`, `build/hdpbrt-blender`: build dirs. Since
+    2026-11-25 they use `/opt/hfs22.0.508` (HFS, and the Blender flavor's PYTHON_INCLUDE):
+    the `/opt/hfs22.0` symlink still points at the removed 22.0.368.
   - `install/houdini`, `install/blender`: hdPbrt.so, plugInfo.json, and symlinks to pbrt and
     imgtool.
   - `houdini/dso/usd_plugins/`: what Houdini loads through `HOUDINI_PATH`.
@@ -109,7 +111,8 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 31. `ObjectInstance` light linking: Attribute "shape" "integer hdpbrtlinks" [...] before an
    ObjectInstance is the instance's own membership, OR'ed into its prototype shapes' masks
    on each hit (native instances share one prototype; categories come per instance from
-   `HdPbrtInstancer::ComputeInstanceCategories`, flattened over nested instancers).
+   `HdPbrtInstancer::ComputeInstanceCategories`, flattened over nested instancers; a
+   point instancer's own categories go on all its instances).
 32. volpath: escaped rays weight each infinite light by its own pdf (pbrt multiplied `r_l`
    in place, so a second infinite light lit in the same direction, e.g. a dome and a
    distant light's cone, got both pdfs: fireflies, depending on the lights' order).
@@ -223,8 +226,11 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   Hydra reports no collections. Lights get `lightLink`/`shadowLink` category tokens, rprims
   `GetCategories`; the delegate maps tokens to bits (`LinkBit`, max 64) and `HdPbrtGeom`
   writes `hdpbrtlinks` at scene-write time (nothing when no light links). Works in
-  Houdini's viewport too. Test: `tests/linking_scene.usda`. Volumes and point-instance
-  categories aren't linked. Area-light shapes cast shadows and show their black back
+  Houdini's viewport too. Test: `tests/linking_scene.usda`. Volumes aren't linked. Point
+  instancers (2026-11-25): USD publishes their membership as the instancer prim's own
+  `categories` (for all its instances; prototypes get none, and linking to a prototype
+  under a point instancer isn't supported by USD); `HdPbrtInstancer` adds them to every
+  instance. Before that, point instances were in no collection (unlit by any linked light). Area-light shapes cast shadows and show their black back
   (pre-existing).
 - Not translated yet: volume
   materials (Karma pyro shaders), in-memory Houdini volumes (`op:` paths).
@@ -447,8 +453,12 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   (USD's legacy delegate resolves categories). Found and fixed: native instances got no
   categories (unlit by every linked light: pbrt patch 31) and fireflies with a dome plus a
   distant cone (stock volpath MIS bug, patch 32). Now 3 match / 1 close / 1 "differs"; means
-  0.98-1.01; frames 2 (rect light alone, mostly black) and 5 (dome alone) are noise. usdlux
-  326/328, materials 33/9/0 unchanged.
+  0.98-1.01; frame 2 (rect light alone, mostly black) is noise, frame 5 see below. usdlux
+  326/328, materials 33/9/0 unchanged. Point instancers added the same day (balls linked to
+  the rect light and out of C's shadows, cubes out of the sun): still 3/1/1. Typhoon draws
+  `Cube` prims as spheres, so the cubes are meshes. Open: under the dome alone (frame 5)
+  Typhoon's contact shadows are brighter (front objects 0.75x; also without the link and
+  without instancers), cause not found.
 - Shadow/reflection terminator (done 2026-11-23, pbrt patch 26): on coarse smooth-shaded
   meshes, rays leaving near a facet's horizon were blocked by neighboring facets (whole dark
   polygons along the terminator; dark slivers in mirror reflections at silhouettes). Triangle

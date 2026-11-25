@@ -105,11 +105,16 @@ void HdPbrtInstancer::UpdateInstanceIndices(SdfPath const &prototypeId)
 {
     VtIntArray indices = GetDelegate()->GetInstanceIndices(GetId(), prototypeId);
     // Instancers have no categories dirty bit; refresh them with the indices.
+    // Native instancers get categories per instance; a point instancer's
+    // membership is published as the instancer prim's own categories and
+    // applies to all its instances (HdsiLightLinkingSceneIndex).
     std::vector<VtArray<TfToken>> categories = GetDelegate()->GetInstanceCategories(GetId());
+    VtArray<TfToken> own = GetDelegate()->GetCategories(GetId());
     {
         std::lock_guard<std::mutex> lock(_mutex);
         _indices[prototypeId] = indices;
         _categories = std::move(categories);
+        _ownCategories = std::move(own);
     }
     if (GetParentId().IsEmpty())
         return;
@@ -204,9 +209,12 @@ std::vector<VtArray<TfToken>> HdPbrtInstancer::ComputeInstanceCategories(
         auto it = _indices.find(prototypeId);
         if (it == _indices.end())
             return {};
-        for (int idx : it->second)
+        for (int idx : it->second) {
             cats.push_back(idx >= 0 && size_t(idx) < _categories.size() ? _categories[idx]
                                                                        : VtArray<TfToken>());
+            for (TfToken const &t : _ownCategories)
+                cats.back().push_back(t);
+        }
     }
     if (GetParentId().IsEmpty())
         return cats;
