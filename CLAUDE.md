@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (32 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (33 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -116,6 +116,10 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 32. volpath: escaped rays weight each infinite light by its own pdf (pbrt multiplied `r_l`
    in place, so a second infinite light lit in the same direction, e.g. a dome and a
    distant light's cone, got both pdfs: fireflies, depending on the lights' order).
+33. Burley diffuse (`HdPbrtBurley`, as MaterialX burley_diffuse_bsdf and Typhoon): `diffuse`
+   `"bool hdpbrtburley"` makes "roughness" Burley's instead of EON's; hdpbrtlayered
+   `"bool diffuseburley"` does the same for "diffuseroughness". f = rho/pi F(mu_i) F(mu_o),
+   F(c) = 1 + (F90 - 1)(1 - c)^5, F90 = 0.5 + 2 r cos^2(theta_d); cosine sampling.
 
 ## Done in the 2026-11-22 session
 
@@ -346,7 +350,16 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   ("diffuseroughness"); cosine sampling. From standard_surface diffuse_roughness, OpenPBR
   base_diffuse_roughness, pbrlib oren_nayar_diffuse_bsdf roughness (EON even when
   energy_compensation is false; Typhoon uses the classic qualitative ON there). Rough-1 fixtures
-  RMSE 0.059 -> 0.031; pbr oren_nayar 0.046 -> 0.033. Burley diffuse stays Lambert.
+  RMSE 0.059 -> 0.031; pbr oren_nayar 0.046 -> 0.033.
+  Burley diffuse (patch 33, 2026-11-25): pbrlib burley_diffuse_bsdf (also as a layer's base)
+  writes the flag even at roughness 0 (F90 = 0.5 there, not Lambert). Suite fixture 1.016 ->
+  1.024 (RMSE 0.035 both), now in line with the other diffuse-only fixtures (oren_nayar 1.025,
+  feature_base_color 1.029; the shader-ball scene reads ~1.02-1.03 bright). 33/9/0.
+  `tests/typhoon/burley.usda` (sphere, no floor; dome r 0/0.55/1, sun r 0/1): hdPbrt equals
+  the numerically integrated dome radiance in every view-angle bin (e.g. r 1, mu 0.3: 0.924
+  vs exact 0.921; r 0, mu 0.3: 0.712 vs 0.715); Typhoon agrees to 1% for mu > 0.4 and departs
+  toward grazing (r 0: +13% at mu < 0.2), Typhoon-side (its smaller mesh sphere and BSDL's
+  visible-normal adjustment).
   dielectric_layer (1.07, RMSE 0.101, close) left as a Typhoon-side difference (2026-11-23):
   it's the default roughness 0.05 (the absorption variants set 0 and match). White furnace
   (`tests/typhoon/materials_extra/furnace`, `furnace_stats.py`): Typhoon's plain rough

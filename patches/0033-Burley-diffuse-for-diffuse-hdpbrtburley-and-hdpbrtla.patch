@@ -1,0 +1,175 @@
+From 5ec6cfc711fb91d0a9f3b47f778c5a426eae339d Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Wed, 25 Nov 2026 20:49:24 +0100
+Subject: [PATCH] Burley diffuse for diffuse "hdpbrtburley" and hdpbrtlayered
+ "diffuseburley" (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/bxdfs.h       | 31 +++++++++++++++++++++++++++++--
+ src/pbrt/materials.cpp |  8 ++++++--
+ src/pbrt/materials.h   | 13 +++++++++++--
+ 3 files changed, 46 insertions(+), 6 deletions(-)
+
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index 7380b3a..4cdc1c7 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -61,18 +61,39 @@ PBRT_CPU_GPU inline SampledSpectrum HdPbrtEON(const SampledSpectrum &rho, Float
+     return fSS + rhoMS * fMS;
+ }
+ 
++// Burley's diffuse ("Physically Based Shading at Disney", 2012, 5.3), as
++// MaterialX's burley_diffuse_bsdf and Typhoon (for hdPbrt):
++// f = rho / pi * F(cos_i) * F(cos_o), F(c) = 1 + (F90 - 1) (1 - c)^5,
++// F90 = 0.5 + 2 r cos^2(theta_d), theta_d between wi and the half vector.
++// Not energy conserving (darker at low roughness, brighter at high).
++PBRT_CPU_GPU inline SampledSpectrum HdPbrtBurley(const SampledSpectrum &rho, Float r,
++                                                 Vector3f wo, Vector3f wi) {
++    const Float muI = AbsCosTheta(wi), muO = AbsCosTheta(wo);
++    Vector3f h = wi + wo;
++    if (LengthSquared(h) == 0)
++        return SampledSpectrum(0.f);
++    h = Normalize(h);
++    const Float cosD = Clamp(AbsDot(wi, h), 0, 1);
++    const Float f90 = 0.5f + 2 * Clamp(r, 0, 1) * cosD * cosD;
++    auto F = [f90](Float c) { return 1 + (f90 - 1) * Pow<5>(Clamp(1 - c, 0, 1)); };
++    return rho * (InvPi * F(muI) * F(muO));
++}
++
+ // DiffuseBxDF Definition
+ class DiffuseBxDF {
+   public:
+     // DiffuseBxDF Public Methods
+     DiffuseBxDF() = default;
+     PBRT_CPU_GPU
+-    DiffuseBxDF(SampledSpectrum R, Float roughness = 0) : R(R), roughness(roughness) {}
++    DiffuseBxDF(SampledSpectrum R, Float roughness = 0, bool burley = false)
++        : R(R), roughness(roughness), burley(burley) {}
+ 
+     PBRT_CPU_GPU
+     SampledSpectrum f(Vector3f wo, Vector3f wi, TransportMode mode) const {
+         if (!SameHemisphere(wo, wi))
+             return SampledSpectrum(0.f);
++        if (burley)
++            return HdPbrtBurley(R, roughness, wo, wi);
+         if (roughness > 0)
+             return HdPbrtEON(R, roughness, AbsCosTheta(wi), AbsCosTheta(wo), Dot(wo, wi));
+         return R * InvPi;
+@@ -117,6 +138,7 @@ class DiffuseBxDF {
+   private:
+     SampledSpectrum R;
+     Float roughness = 0;
++    bool burley = false;  // Burley diffuse instead of EON (for hdPbrt)
+ };
+ 
+ // DiffuseTransmissionBxDF Definition
+@@ -1409,6 +1431,8 @@ struct HdPbrtDielectricLobe {
+ class HdPbrtLayeredBxDF {
+   public:
+     HdPbrtLayeredBxDF() = default;
++    // Base diffuse: Burley with diffuseRoughness instead of EON.
++    PBRT_CPU_GPU void SetDiffuseBurley(bool b) { diffuseBurley = b; }
+     PBRT_CPU_GPU
+     HdPbrtLayeredBxDF(SampledSpectrum R, SampledSpectrum T, SampledSpectrum specTint,
+                       HdPbrtDielectricLobe spec, SampledSpectrum sheenColor,
+@@ -1767,7 +1791,9 @@ class HdPbrtLayeredBxDF {
+     PBRT_CPU_GPU
+     SampledSpectrum FUpper(Vector3f wo, Vector3f wi, const Weights &k) const {
+         SampledSpectrum result =
+-            HdPbrtEON(R, diffuseRoughness, AbsCosTheta(wi), AbsCosTheta(wo), Dot(wo, wi)) *
++            (diffuseBurley ? HdPbrtBurley(R, diffuseRoughness, wo, wi)
++                           : HdPbrtEON(R, diffuseRoughness, AbsCosTheta(wi), AbsCosTheta(wo),
++                                       Dot(wo, wi))) *
+             k.under * k.film * k.base;
+         if (AbsCosTheta(wo) == 0 || AbsCosTheta(wi) == 0)
+             return result;
+@@ -1844,6 +1870,7 @@ class HdPbrtLayeredBxDF {
+     SampledSpectrum filmLambda;
+     Float sssWeight = 0;
+     Vector3f sssNg = Vector3f(0, 0, 1);
++    bool diffuseBurley = false;
+     int metalMode;
+     bool sheenOnTop;
+ };
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index e7eccec..84aca4c 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -227,8 +227,11 @@ DiffuseMaterial *DiffuseMaterial::Create(const TextureParameterDictionary &param
+     // "roughness" (for hdPbrt): energy-preserving Oren-Nayar; 0 is Lambert.
+     FloatTexture roughness = parameters.GetFloatTextureOrNull("roughness", alloc);
+ 
+-    return alloc.new_object<DiffuseMaterial>(reflectance, displacement, normalMap,
+-                                             roughness);
++    DiffuseMaterial *m = alloc.new_object<DiffuseMaterial>(reflectance, displacement,
++                                                           normalMap, roughness);
++    // "bool hdpbrtburley": "roughness" is Burley's instead of EON's (for hdPbrt).
++    m->burley = parameters.GetOneBool("hdpbrtburley", false);
++    return m;
+ }
+ 
+ // ConductorMaterial Method Definitions
+@@ -750,6 +753,7 @@ HdPbrtLayeredMaterial *HdPbrtLayeredMaterial::Create(
+                parameters.GetOneFloat("filmthickness", 0.f),
+                parameters.GetOneFloat("filmeta", 1.4f));
+     m->SetSubsurface(Clamp(parameters.GetOneFloat("subsurface", 0.f), 0, 1));
++    m->SetDiffuseBurley(parameters.GetOneBool("diffuseburley", false));
+     return m;
+ }
+ 
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index 32ec095..5458449 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -513,8 +513,10 @@ class DiffuseMaterial {
+     PBRT_CPU_GPU DiffuseBxDF GetBxDF(TextureEvaluator texEval, MaterialEvalContext ctx,
+                                      SampledWavelengths &lambda) const {
+         SampledSpectrum r = Clamp(texEval(reflectance, ctx, lambda), 0, 1);
+-        // "roughness": energy-preserving Oren-Nayar (for hdPbrt).
+-        return DiffuseBxDF(r, roughness ? Clamp(texEval(roughness, ctx), 0, 1) : Float(0));
++        // "roughness": energy-preserving Oren-Nayar, or Burley's with
++        // "bool hdpbrtburley" (for hdPbrt).
++        return DiffuseBxDF(r, roughness ? Clamp(texEval(roughness, ctx), 0, 1) : Float(0),
++                           burley);
+     }
+ 
+   private:
+@@ -523,6 +525,9 @@ class DiffuseMaterial {
+     FloatTexture displacement;
+     SpectrumTexture reflectance;
+     FloatTexture roughness;
++
++  public:
++    bool burley = false;
+ };
+ 
+ // ConductorMaterial Definition
+@@ -760,6 +765,7 @@ class HdPbrtLayeredMaterial {
+                 lambdaNm[i] = lambda[i];
+             bxdf.SetFilm(filmWeight, filmThickness, filmEta, lambdaNm);
+         }
++        bxdf.SetDiffuseBurley(diffuseBurley);
+         if (sssWeight > 0) {
+             // The geometric normal in the BSDF's shading frame (as BSDF
+             // builds it from ns and dpdus).
+@@ -771,6 +777,8 @@ class HdPbrtLayeredMaterial {
+ 
+     // Subsurface weight ("subsurface"; the interior medium does the rest).
+     void SetSubsurface(Float w) { sssWeight = w; }
++    // Burley base diffuse ("bool diffuseburley") instead of EON.
++    void SetDiffuseBurley(bool b) { diffuseBurley = b; }
+ 
+     // Thin film on the specular layer ("filmweight", "filmthickness" in nm,
+     // "filmeta"); for hdPbrt.
+@@ -811,6 +819,7 @@ class HdPbrtLayeredMaterial {
+     Float sssWeight = 0;
+     int metalMode;
+     bool sheenOnTop;
++    bool diffuseBurley = false;
+     bool remapRoughness;
+ };
+ 
+-- 
+2.43.0
+

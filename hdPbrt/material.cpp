@@ -405,14 +405,21 @@ struct _MtlxMapper {
     // oren_nayar_diffuse_bsdf roughness, as the pbrt parameter `name`
     // (energy-preserving Oren-Nayar, pbrt patch 20; Typhoon uses EON whatever
     // energy_compensation says for the surface shaders, and here too).
+    // burley_diffuse_bsdf (pbrt patch 33): Burley's diffuse with that roughness,
+    // flagged by "bool hdpbrtburley" (diffuse) or "bool diffuseburley"
+    // (hdpbrtlayered). Written even at roughness 0, which isn't Lambert.
     static std::string DiffuseRough(const HdMaterialNode2 *n, const char *name) {
-        if (!_Is(n, "ND_oren_nayar_diffuse_bsdf"))
+        const bool burley = _Is(n, "ND_burley_diffuse_bsdf");
+        if (!burley && !_Is(n, "ND_oren_nayar_diffuse_bsdf"))
             return {};
         const float r = std::min(std::max(_Float(*n, "roughness", 0), 0.f), 1.f);
-        if (r <= 0)
+        if (r <= 0 && !burley)
             return {};
         std::ostringstream os;
         os << " \"float " << name << "\" " << r;
+        if (burley)
+            os << (std::string(name) == "roughness" ? " \"bool hdpbrtburley\" true"
+                                                    : " \"bool diffuseburley\" true");
         return os.str();
     }
 
