@@ -238,8 +238,9 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   instancers (2026-11-25): USD publishes their membership as the instancer prim's own
   `categories` (for all its instances; prototypes get none, and linking to a prototype
   under a point instancer isn't supported by USD); `HdPbrtInstancer` adds them to every
-  instance. Before that, point instances were in no collection (unlit by any linked light). Area-light shapes cast shadows and show their black back
-  (pre-existing).
+  instance. Before that, point instances were in no collection (unlit by any linked light). Area-light shapes don't block, shadow or show a
+  back (pbrt `interface` material, patch 10; rechecked 2026-11-25 with a rect light seen
+  from behind over a floor).
 - Not translated yet: volume
   materials (Karma pyro shaders), in-memory Houdini volumes (`op:` paths).
 - Volumes (done 2026-11-22): `volume.cpp` (`HdPbrtField` bprims, `HdPbrtVolume`), converter
@@ -321,6 +322,10 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   with its textures; shapes get `MediumInterface "<mat>_interior" ""` (only right when the
   camera is outside). Tint (patch 13): standard_surface always, OpenPBR only without a
   medium (Typhoon's rules); transmission_extra_roughness adds to the roughness.
+  Volume-only materials (2026-11-25): a material with no surface terminal but an ND_volume
+  (absorption_vdf / anisotropic_vdf) becomes pbrt `interface` (invisible boundary) around the
+  same homogeneous interior medium. pbr anisotropic_vdf_volume_only used to fall back to grey
+  diffuse: close -> match (0.944 / 0.237 -> 1.029 / 0.043); suite 34/8/0.
   Brightness (2026-11-23): fixed by patch 14. The rest (~1.7% on the shader ball) is a
   Typhoon quirk: it ends paths at geometry with no material bound (the backplanes), where
   we use displayColor diffuse; not copied. Bisect such gaps per bounce

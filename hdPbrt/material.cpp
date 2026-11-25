@@ -702,7 +702,35 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             _Net n{net2};
             surf = n.Upstream(*surf, TfToken("surfaceshader"));
         }
-        if (surf) {
+        // Volume-only material (no surface; MaterialX ND_volume with an
+        // absorption_vdf / anisotropic_vdf): an invisible boundary ("interface")
+        // around a homogeneous interior medium, coefficients per unit length.
+        const HdMaterialNode2 *vol = nullptr;
+        if (!surf) {
+            auto vt = net2.terminals.find(HdMaterialTerminalTokens->volume);
+            if (vt != net2.terminals.end()) {
+                auto it = net2.nodes.find(vt->second.upstreamNode);
+                if (it != net2.nodes.end() && _Is(&it->second, "ND_volume"))
+                    vol = _Net{net2}.Upstream(it->second, TfToken("vdf"));
+            }
+        }
+        if (vol && (_Is(vol, "ND_absorption_vdf") || _Is(vol, "ND_anisotropic_vdf"))) {
+            const bool aniso = _Is(vol, "ND_anisotropic_vdf");
+            const GfVec3f sigA = _Color(*vol, "absorption", GfVec3f(0));
+            const GfVec3f sigS = aniso ? _Color(*vol, "scattering", GfVec3f(0)) : GfVec3f(0);
+            const float g = aniso ? _Float(*vol, "anisotropy", 0) : 0;
+            HdPbrtMaterialDesc d;
+            d.type = "interface";
+            d.writeReflectance = false;
+            d.mediumName = TfMakeValidIdentifier(GetId().GetString()) + "_interior";
+            std::ostringstream m;
+            m << "MakeNamedMedium " << HdPbrt_Quote(d.mediumName)
+              << " \"string type\" \"homogeneous\"" << _MediumSpectrum("sigma_a", sigA)
+              << _MediumSpectrum("sigma_s", sigS) << " \"float scale\" 1 \"float g\" "
+              << std::min(std::max(g, -0.99f), 0.99f) << "\n";
+            d.textures = m.str();
+            result = d;
+        } else if (surf) {
             std::string pfx = TfMakeValidIdentifier(GetId().GetString());
             _Builder b{_Net{net2}, pfx, HdPbrtMaterialDesc{}, 0};
             const std::string type = surf->nodeTypeId.GetString();
