@@ -441,8 +441,10 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   found in its NEE/visibility code). (2) angle 0: Typhoon shows a ~0.26 deg disk in a mirror
   (its delta direction test uses cos >= 1 - 1e-5); hdPbrt, physically, nothing. (3) A 0.53 deg
   sun in a mirror is ~1/30 px: both are very noisy even at 4096 spp. Residual: the sun in the
-  mirror reads 4-10% low in hdPbrt at 2-90 deg (mirror centre reflectance 0.776 vs 0.741, so
-  not the light; both tessellate spheres the same way). Typhoon draws `Cube` prims as
+  mirror read 4-10% low in hdPbrt at 2-90 deg with subdivided sphere meshes; with exact
+  spheres (implicit prims, below) it reads ~10% high, and the comparison drops to 4/4/4 (was
+  3/6/3) from outline rings: Typhoon's spheres are ~10% small. Outside the mirror rel RMSE
+  0.083 -> 0.063. Typhoon draws `Cube` prims as
   ellipsoids? (its shadow was an oval): the plate is a box mesh.
 - Light linking vs Typhoon (done 2026-11-25): `tests/typhoon/linking.usda` (rect light linked to
   one sphere + a native instance, sun excluding a sphere, sphere light with a shadow link
@@ -456,9 +458,25 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   0.98-1.01; frame 2 (rect light alone, mostly black) is noise, frame 5 see below. usdlux
   326/328, materials 33/9/0 unchanged. Point instancers added the same day (balls linked to
   the rect light and out of C's shadows, cubes out of the sun): still 3/1/1. Typhoon draws
-  `Cube` prims as spheres, so the cubes are meshes. Open: under the dome alone (frame 5)
-  Typhoon's contact shadows are brighter (front objects 0.75x; also without the link and
-  without instancers), cause not found.
+  `Cube` prims as spheres, so the cubes are meshes. Frame 5 (dome alone) had brighter
+  contact shadows in Typhoon: both renderers' spheres hovered (subdivided implicit meshes,
+  see "Implicit prims" below).
+- Implicit prims (2026-11-25, `implicit.cpp`, `HdPbrtImplicit`): Sphere, Cylinder(_1), Cone and
+  Capsule(_1) are no longer converted to meshes. USD's meshes for them are ~10-segment
+  Catmull-Clark cages, and hdPbrt's default subdivision (level 2) shrank them: a radius-1
+  sphere had vertices at 0.925-0.988 (hovering 0.075 over a floor it should touch; dark
+  contact shadows came out 0.74x analytic) and cylinder/cone rims were rounded. Now: pbrt
+  `sphere`; `cylinder` + `disk` caps (bottom flipped to face -z); capsule = cylinder + half
+  spheres; cone and Cylinder_1 frustum = a 128-segment band with exact normals + disks;
+  tapered Capsule_1 = GeomUtil's capsule mesh (96 x 24). Axis X/Y rotates pbrt's +z.
+  Params via the emulated `Get(id, radius/height/axis/radiusTop/radiusBottom)`, re-read on
+  DirtyPrimvar. Cube and plane stay bilinear meshes. Tests: `tests/implicit_scene.usda`
+  (orthographic silhouettes match the authored sizes), `tests/typhoon/dome_contact.usda` +
+  `dome_contact_stats.py`: sphere on a floor under a uniform dome vs the analytic
+  0.8 (1 + n.y) / 2: hdPbrt 0.74-1.05x before, 1.001-1.003x after. Typhoon reads 1.1-4.2x
+  there (its spheres are shrunk too; cause of the rest not looked into).
+  Typhoon comparisons with Sphere prims lose agreement at outlines: linking 3/1/1 -> 2/2/1,
+  distant cone 3/6/3 -> 4/4/4; materials 33/9/0 and usdlux 326/328 unchanged.
 - Shadow/reflection terminator (done 2026-11-23, pbrt patch 26): on coarse smooth-shaded
   meshes, rays leaving near a facet's horizon were blocked by neighboring facets (whole dark
   polygons along the terminator; dark slivers in mirror reflections at silhouettes). Triangle

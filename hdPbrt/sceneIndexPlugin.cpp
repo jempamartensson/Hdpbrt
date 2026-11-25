@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// Converts implicit surfaces (sphere, cube, cone, ...) to meshes for hdPbrt,
-// following USD's hdEmbree.
+// Converts the implicit cube and plane to (bilinear) meshes for hdPbrt.
+// Spheres, cylinders, cones and capsules stay implicit: HdPbrtImplicit writes
+// them as exact pbrt shapes (USD's meshes for them are coarse Catmull-Clark
+// cages that subdivision shrinks).
 #include "pxr/pxr.h"
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/sceneIndexPlugin.h"
@@ -24,9 +26,7 @@ protected:
             HdRetainedTypedSampledDataSource<TfToken>::New(
                 HdsiImplicitSurfaceSceneIndexTokens->toMesh);
         HdContainerDataSourceHandle const args = HdRetainedContainerDataSource::New(
-            HdPrimTypeTokens->sphere, toMesh, HdPrimTypeTokens->cube, toMesh,
-            HdPrimTypeTokens->cone, toMesh, HdPrimTypeTokens->cylinder, toMesh,
-            HdPrimTypeTokens->capsule, toMesh, HdPrimTypeTokens->plane, toMesh);
+            HdPrimTypeTokens->cube, toMesh, HdPrimTypeTokens->plane, toMesh);
         return HdsiImplicitSurfaceSceneIndex::New(inputScene, args);
     }
 };

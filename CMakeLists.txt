@@ -28,6 +28,7 @@ add_library(hdPbrt SHARED
   hdPbrt/mesh.cpp
   hdPbrt/curves.cpp
   hdPbrt/points.cpp
+  hdPbrt/implicit.cpp
   hdPbrt/subdiv.cpp
   hdPbrt/volume.cpp
   hdPbrt/camera.cpp
@@ -47,7 +48,7 @@ if(HDPBRT_FLAVOR STREQUAL "houdini")
   target_compile_definitions(hdPbrt PRIVATE HDPBRT_HOUDINI=1)
   target_include_directories(hdPbrt SYSTEM PRIVATE
     ${HFS}/toolkit/include ${HFS}/python/include/python3.13)
-  set(_libs hdsi hd hf pxOsd cameraUtil sdf ar plug trace work vt gf tf arch js python)
+  set(_libs hdsi hd hf geomUtil pxOsd cameraUtil sdf ar plug trace work vt gf tf arch js python)
   foreach(l ${_libs})
     target_link_libraries(hdPbrt PRIVATE ${HFS}/dsolib/libpxr_${l}.so)
   endforeach()

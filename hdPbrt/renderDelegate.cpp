@@ -67,8 +67,9 @@ std::string HdPbrt_Rgb(const GfVec3f &c)
 // --- delegate ----------------------------------------------------------------
 
 static const TfTokenVector _supportedRprims = {
-    HdPrimTypeTokens->mesh, HdPrimTypeTokens->basisCurves, HdPrimTypeTokens->points,
-    HdPrimTypeTokens->volume};
+    HdPrimTypeTokens->mesh,   HdPrimTypeTokens->basisCurves, HdPrimTypeTokens->points,
+    HdPrimTypeTokens->volume, HdPrimTypeTokens->sphere,      HdPrimTypeTokens->cylinder,
+    HdPrimTypeTokens->cone,   HdPrimTypeTokens->capsule};
 static const TfTokenVector _supportedSprims = {
     HdPrimTypeTokens->camera,      HdPrimTypeTokens->material,
     HdPrimTypeTokens->distantLight, HdPrimTypeTokens->sphereLight,
@@ -274,6 +275,9 @@ HdRprim *HdPbrtRenderDelegate::CreateRprim(TfToken const &typeId, SdfPath const 
         return new HdPbrtPoints(rprimId, this);
     if (typeId == HdPrimTypeTokens->volume)
         return new HdPbrtVolume(rprimId, this);
+    if (typeId == HdPrimTypeTokens->sphere || typeId == HdPrimTypeTokens->cylinder ||
+        typeId == HdPrimTypeTokens->cone || typeId == HdPrimTypeTokens->capsule)
+        return new HdPbrtImplicit(typeId, rprimId, this);
     return nullptr;
 }
 

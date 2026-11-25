@@ -1,0 +1,105 @@
+#usda 1.0
+(
+    doc = """Dome contact shadow check: white diffuse sphere (albedo 0.8, radius 1) on a
+    1000 x 1000 floor, uniform dome radiance 1, direct lighting only. Exact sphere
+    radiance: 0.8 * (1 + n.y) / 2 (the floor hides the lower sky).
+    Frame 2: no floor, 0.8 everywhere."""
+    defaultPrim = "World"
+    endTimeCode = 2
+    metersPerUnit = 1
+    renderSettingsPrimPath = "/Render/Settings"
+    startTimeCode = 1
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "camera"
+    {
+        float2 clippingRange = (0.1, 1000)
+        float focalLength = 50
+        float horizontalAperture = 36
+        float verticalAperture = 36
+        token projection = "perspective"
+        double3 xformOp:translate = (0, 1, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "dome"
+    {
+        float inputs:intensity = 1
+    }
+
+    def Mesh "floor" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        float3[] extent = [(-500, 0, -500), (500, 0, 500)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-500, 0, 500), (500, 0, 500), (500, 0, -500), (-500, 0, -500)]
+        rel material:binding = </World/Looks/white>
+        token visibility.timeSamples = {1: "inherited", 2: "invisible"}
+    }
+
+    def Sphere "ball" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 1
+        rel material:binding = </World/Looks/white>
+        double3 xformOp:translate = (0, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Scope "Looks"
+    {
+        def Material "white"
+        {
+            token outputs:surface.connect = </World/Looks/white/s.outputs:surface>
+
+            def Shader "s"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.8, 0.8, 0.8)
+                float inputs:ior = 1
+                int inputs:useSpecularWorkflow = 1
+                color3f inputs:specularColor = (0, 0, 0)
+                token outputs:surface
+            }
+        }
+    }
+}
+
+def Scope "Render"
+{
+    def RenderSettings "Settings" (
+        prepend apiSchemas = ["TyphoonRenderSettingsAPI"]
+    )
+    {
+        rel camera = </World/camera>
+        rel products = [</Render/Product>]
+        uniform bool disableMotionBlur = 1
+        bool instantaneousShutter = 1
+        uniform int2 resolution = (200, 200)
+        int ty:convergedSamplesPerPixel = 1024
+        int ty:maxBounces = 0
+        float ty:fireflyClampThreshold = 0.0
+        float ty:causticsClampThreshold = 0.0
+    }
+
+    def RenderProduct "Product"
+    {
+        rel camera = </World/camera>
+        rel orderedVars = [</Render/Product/Color>]
+        token productType = "raster"
+        token productName = "dome_contact.exr"
+
+        def RenderVar "Color"
+        {
+            token dataType = "color4f"
+            string sourceName = "color"
+            token sourceType = "raw"
+        }
+    }
+}

@@ -1,3 +1,38 @@
+# run_distant_cone.sh, 2026-11-25, after exact implicit prims (implicit.cpp), 256 spp
+distant_cone.01                                                mean ratio  1.000   rel RMSE  0.344   differs
+distant_cone.02                                                mean ratio  0.995   rel RMSE  0.328   differs
+distant_cone.03                                                mean ratio  0.995   rel RMSE  0.159   close
+distant_cone.04                                                mean ratio  0.996   rel RMSE  0.125   close
+distant_cone.05                                                mean ratio  0.995   rel RMSE  0.093   match
+distant_cone.06                                                mean ratio  0.995   rel RMSE  0.079   match
+distant_cone.07                                                mean ratio  0.991   rel RMSE  0.070   match
+distant_cone.08                                                mean ratio  0.967   rel RMSE  0.111   close
+distant_cone.09                                                mean ratio  1.003   rel RMSE  0.583   differs
+distant_cone.10                                                mean ratio  0.996   rel RMSE  0.165   close
+distant_cone.11                                                mean ratio  0.995   rel RMSE  0.095   match
+distant_cone.12                                                mean ratio  0.974   rel RMSE  1.009   differs
+match 4  close 4  differs 4  missing 0
+# Was 3 / 6 / 3. Outside the mirror the rest agrees better (rel RMSE 0.083 -> 0.063);
+# the image-level changes are rings at the spheres' and their shadows' outlines (Typhoon's
+# spheres are ~10% small). The sun in the mirror now reads ~10% above Typhoon at 2-90 deg
+# (was 4-10% below): the old residual came from the sphere geometry.
+
+# cone_stats.py, 256 spp, after exact implicit prims
+frame                sun ty     sun hd   ratio   rest: mean ratio / rel RMSE
+distant_cone.01      283.61     538.79   1.900   0.997 / 0.063
+distant_cone.02      413.23     446.76   1.081   0.997 / 0.063
+distant_cone.03      447.81     455.89   1.018   0.997 / 0.062
+distant_cone.04      417.24     471.56   1.130   0.997 / 0.064
+distant_cone.05      430.93     475.17   1.103   0.997 / 0.061
+distant_cone.06      444.25     488.45   1.099   0.997 / 0.062
+distant_cone.07      496.72     547.31   1.102   0.994 / 0.056
+distant_cone.08      826.46     743.17   0.899   0.975 / 0.076
+distant_cone.09      102.39     362.09   3.536   0.997 / 0.063
+distant_cone.10      235.17     272.49   1.159   0.997 / 0.063
+distant_cone.11      271.77     300.08   1.104   0.997 / 0.061
+distant_cone.12      932.82       0.04   0.000   0.997 / 0.064
+
+# ---- Before (subdivided implicit meshes in hdPbrt) ----
 # run_distant_cone.sh, 2026-11-25, 256 spp (Typhoon adaptive), direct lighting only
 distant_cone.01                                                mean ratio  0.992   rel RMSE  0.308   differs
 distant_cone.02                                                mean ratio  0.999   rel RMSE  0.283   differs

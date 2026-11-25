@@ -1,0 +1,122 @@
+#usda 1.0
+(
+    doc = """Implicit prims as exact pbrt shapes (implicit.cpp), orthographic, 40 px per unit
+    at 640 x 160: sphere r 0.8; cylinder (Y) 1.6 x r 0.6; cone (Y) 1.6 x r 0.7, apex up;
+    capsule (Y) 0.8 + 2 x 0.4; cylinder (X) 1.8 x r 0.5; Cylinder_1 (Y) radiusTop 0.2,
+    radiusBottom 0.6. Silhouettes match these sizes to the pixel."""
+    defaultPrim = "World"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+def Xform "World"
+{
+    def Camera "camera"
+    {
+        token projection = "orthographic"
+        float horizontalAperture = 160
+        float verticalAperture = 40
+        float2 clippingRange = (0.1, 100)
+        double3 xformOp:translate = (0, 0, 10)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def DomeLight "dome"
+    {
+        float inputs:intensity = 1
+    }
+
+    def Sphere "sph" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.8
+        rel material:binding = </World/Looks/white>
+        double3 xformOp:translate = (-6.25, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cylinder "cylY" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double height = 1.6
+        double radius = 0.6
+        uniform token axis = "Y"
+        rel material:binding = </World/Looks/white>
+        double3 xformOp:translate = (-3.75, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cone "coneY" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double height = 1.6
+        double radius = 0.7
+        uniform token axis = "Y"
+        rel material:binding = </World/Looks/white>
+        double3 xformOp:translate = (-1.25, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Capsule "capY" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double height = 0.8
+        double radius = 0.4
+        uniform token axis = "Y"
+        rel material:binding = </World/Looks/white>
+        double3 xformOp:translate = (1.25, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cylinder "cylX" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double height = 1.8
+        double radius = 0.5
+        uniform token axis = "X"
+        rel material:binding = </World/Looks/white>
+        double3 xformOp:translate = (3.75, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cylinder_1 "frustY" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double height = 1.6
+        double radiusTop = 0.2
+        double radiusBottom = 0.6
+        uniform token axis = "Y"
+        rel material:binding = </World/Looks/white>
+        double3 xformOp:translate = (6.25, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Scope "Looks"
+    {
+        def Material "white"
+        {
+            token outputs:surface.connect = </World/Looks/white/s.outputs:surface>
+            def Shader "s"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.8, 0.8, 0.8)
+                float inputs:ior = 1
+                int inputs:useSpecularWorkflow = 1
+                color3f inputs:specularColor = (0, 0, 0)
+                token outputs:surface
+            }
+        }
+    }
+}
+def Scope "Render"
+{
+    def RenderSettings "Settings"
+    {
+        rel camera = </World/camera>
+        uniform int2 resolution = (640, 160)
+    }
+}

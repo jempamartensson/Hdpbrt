@@ -1,3 +1,17 @@
+# run_linking.sh, 2026-11-25, after exact implicit prims (implicit.cpp)
+linking.01                                                     mean ratio  0.987   rel RMSE  0.056   match
+linking.02                                                     mean ratio  1.153   rel RMSE  1.661   differs
+linking.03                                                     mean ratio  0.995   rel RMSE  0.041   match
+linking.04                                                     mean ratio  0.973   rel RMSE  0.157   close
+linking.05                                                     mean ratio  0.971   rel RMSE  0.145   close
+match 2  close 2  differs 1  missing 0
+# Was 3 / 1 / 1 with subdivided spheres. hdPbrt's spheres now have their authored size;
+# Typhoon's are ~10% small (dome_contact.usda: silhouette radius 42.25 px, exact 46.95,
+# hdPbrt 46.98), so the differences are rings at sphere outlines (frame 4 RMSE 0.061 ->
+# 0.157, frame 2 -- mostly black -- has half its squared error in 20 pixels). The links
+# themselves agree in every frame.
+
+# Before (subdivided implicit meshes in hdPbrt):
 # run_linking.sh, 2026-11-25, 256 spp, direct lighting only (Typhoon via USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX=0)
 # with point instancers (balls, cubes) linked as a whole
 linking.01                                                     mean ratio  0.985   rel RMSE  0.054   match

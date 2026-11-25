@@ -389,6 +389,32 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// UsdGeom Sphere / Cylinder / Cone / Capsule as exact pbrt shapes (implicit.cpp).
+class HdPbrtImplicit final : public HdRprim, public HdPbrtGeom {
+public:
+    HdPbrtImplicit(TfToken const &type, SdfPath const &id, HdPbrtRenderDelegate *delegate);
+    ~HdPbrtImplicit() override;
+    HdDirtyBits GetInitialDirtyBitsMask() const override;
+    void Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
+              HdDirtyBits *dirtyBits, TfToken const &reprToken) override;
+    void Finalize(HdRenderParam *renderParam) override;
+    TfTokenVector const &GetBuiltinPrimvarNames() const override;
+
+protected:
+    HdRprim const &_Prim() const override { return *this; }
+    std::string _Shapes(std::string const &extra) const override;
+    bool _CanEmit() const override { return true; }
+    HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override { return bits; }
+    void _InitRepr(TfToken const &reprToken, HdDirtyBits *dirtyBits) override {}
+
+private:
+    void _SyncShape(HdSceneDelegate *sd);
+    TfToken _type;
+    std::string _axis;                 // rotation from +z to the prim's axis
+    std::vector<std::string> _shapes;  // object-space pbrt shapes
+};
+
+// ---------------------------------------------------------------------------
 // Camera that keeps its transform samples (over HdPbrt_SampleWindow) for
 // camera motion blur.
 class HdPbrtCamera final : public HdCamera {
