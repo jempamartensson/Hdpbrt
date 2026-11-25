@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (17 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (30 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -100,6 +100,12 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    MaterialX/Typhoon apply the top's layer throughput on top of the T lobe's own (1 - F), so
    transmission pays Fresnel twice per crossing. standard_surface glass uses it too (its
    MaterialX graph is that layer; weight = specular); OpenPBR glass doesn't.
+30. `DielectricMaterial` `"float hdpbrtreflectionroughness"` (or `hdpbrtreflection{u,v}roughness`,
+   same remap rule as `roughness`): the reflection lobe gets its own GGX distribution, the
+   transmission keeps `roughness`. Split lobes are chosen by the macro Fresnel (clamped
+   0.05-0.95) and sample their own microfacets; patch 17's top weight then uses the
+   reflection roughness and, from inside, a reflection albedo with TIR (without it a wide
+   transmission lobe adds to a TIR'd sharp reflection: furnace rim 1.34).
 
 ## Done in the 2026-11-22 session
 
@@ -401,8 +407,17 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   `hdpbrttopweight` (= specular) on standard_surface glass: furnace 1.000 -> 0.904 (r 0.2:
   0.982 -> 0.890 vs 0.905), shaderball ss_glass_nofilm 1.16 -> 1.08, ss_glass_film 1.16 -> 1.07.
   Suite 33/9/0; input_transmission_extra_roughness 0.926 -> 0.901 (RMSE 0.130 -> 0.160, still
-  close): MaterialX keeps R at specular_roughness and only T gets the extra roughness, but pbrt's
-  dielectric has one roughness for both (open: a separate reflection roughness).
+  close): MaterialX keeps R at specular_roughness and only T gets the extra roughness.
+  Separate reflection roughness (patch 30, 2026-11-25): standard_surface glass with
+  transmission_extra_roughness and pbrlib layer(R over T) with different top/base roughness
+  write `hdpbrtreflectionroughness`. input_transmission_extra_roughness 0.901 -> 0.931 (RMSE
+  0.160 -> 0.136, close); 33/9/0, nothing else moved. Furnace f_ss_r02_x045 (0.2 + 0.45):
+  hdPbrt 0.572 vs Typhoon 0.817. Typhoon's gap is its own: when a rough transmission-only
+  sample fails (microfacet TIR, wrong side) it falls back to a delta transmission
+  (`closureTraversal.cpp`, SampleDeltaDielectricTransmission) instead of losing the path; not
+  copied. Tried and dropped: the inside (TIR) albedo for unsplit lobes too: dielectric_layer
+  close -> match (1.068 -> 0.998) and ss_glass 1.077 -> 1.035, but furnace f_layer_r02 0.788
+  -> 0.683 (Typhoon 0.863) and extra rough_glass layer_r02 match -> close.
 - Next after materials: Typhoon scenes for the distant-light cone and light linking.
 - Shadow/reflection terminator (done 2026-11-23, pbrt patch 26): on coarse smooth-shaded
   meshes, rays leaving near a facet's horizon were blocked by neighboring facets (whole dark

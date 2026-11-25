@@ -1,0 +1,424 @@
+From a7ff1b64a92cd34a1a115e47127e47ec2140e6fd Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Wed, 25 Nov 2026 07:28:39 +0100
+Subject: [PATCH] Dielectric: separate reflection roughness (for hdPbrt)
+
+"hdpbrtreflectionroughness" / "hdpbrtreflection{u,v}roughness": the
+reflection lobe gets its own GGX distribution, the transmission keeps
+"roughness" (MaterialX standard_surface transmission_extra_roughness and
+pbrlib layer(R over T) with different roughnesses). Split lobes are picked
+by the macro-surface Fresnel (clamped to [0.05, 0.95]) and sample their own
+microfacets. hdpbrttopweight uses the reflection's roughness, and for split
+lobes seen from inside a reflection albedo table that includes total
+internal reflection; otherwise the wide transmission adds to a TIR'd
+reflection and gains energy.
+---
+ src/pbrt/bxdfs.cpp     | 180 ++++++++++++++++++++++++++++++++++++++++-
+ src/pbrt/bxdfs.h       |  36 ++++++++-
+ src/pbrt/materials.cpp |  12 +++
+ src/pbrt/materials.h   |  20 ++++-
+ 4 files changed, 243 insertions(+), 5 deletions(-)
+
+diff --git a/src/pbrt/bxdfs.cpp b/src/pbrt/bxdfs.cpp
+index 35a587e..368a722 100644
+--- a/src/pbrt/bxdfs.cpp
++++ b/src/pbrt/bxdfs.cpp
+@@ -79,6 +79,8 @@ std::string LayeredBxDF<TopBxDF, BottomBxDF, twoSided>::ToString() const {
+ PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
+     Vector3f wo, Float uc, Point2f u, TransportMode mode,
+     BxDFReflTransFlags sampleFlags) const {
++    if (Split())
++        return SampleSplit(wo, uc, u, mode, sampleFlags);
+     if (eta == 1 || mfDistrib.EffectivelySmooth()) {
+         // Sample perfect specular dielectric BSDF
+         // hdPbrt: spectral with a thin film (Fr)
+@@ -175,6 +177,8 @@ PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::Sample_f(
+ }
+ 
+ PBRT_CPU_GPU SampledSpectrum DielectricBxDF::f(Vector3f wo, Vector3f wi, TransportMode mode) const {
++    if (Split())
++        return fSplit(wo, wi, mode);
+     if (eta == 1 || mfDistrib.EffectivelySmooth())
+         return SampledSpectrum(0.f);
+     // Evaluate rough dielectric BSDF
+@@ -216,6 +220,8 @@ PBRT_CPU_GPU SampledSpectrum DielectricBxDF::f(Vector3f wo, Vector3f wi, Transpo
+ 
+ PBRT_CPU_GPU Float DielectricBxDF::PDF(Vector3f wo, Vector3f wi, TransportMode mode,
+                           BxDFReflTransFlags sampleFlags) const {
++    if (Split())
++        return PDFSplit(wo, wi, sampleFlags);
+     if (eta == 1 || mfDistrib.EffectivelySmooth())
+         return 0;
+     // Evaluate sampling PDF of rough dielectric BSDF
+@@ -266,8 +272,16 @@ PBRT_CPU_GPU Float DielectricBxDF::PDF(Vector3f wo, Vector3f wi, TransportMode m
+ PBRT_CPU_GPU Float DielectricBxDF::TopThroughput(Vector3f wo) const {
+     if (topWeight <= 0)
+         return 1;
+-    return Clamp(1 - topWeight * HdPbrtDielectricAlbedo(AbsCosTheta(wo),
+-                                                        mfDistrib.MeanAlpha(), eta),
++    // The top layer is the reflection lobe: its own roughness when split.
++    const Float alpha = splitR ? rDistrib.MeanAlpha() : mfDistrib.MeanAlpha();
++    // Split lobes, from inside: the top's reflection includes total internal
++    // reflection (else the wide transmission lobe adds to a TIR'd reflection
++    // and gains energy). One shared roughness keeps the outside albedo, as
++    // Typhoon: its transmission's own 1 - F already vanishes under TIR.
++    const Float E = (!splitR || CosTheta(wo) >= 0)
++                        ? HdPbrtDielectricAlbedo(AbsCosTheta(wo), alpha, eta)
++                        : HdPbrtDielectricAlbedoInside(AbsCosTheta(wo), alpha, eta);
++    return Clamp(1 - topWeight * E,
+                  0, 1);
+ }
+ 
+@@ -279,6 +293,134 @@ PBRT_CPU_GPU Float DielectricBxDF::MultiScatterScale(Vector3f wo) const {
+     return 1 / std::max<Float>(E, 0.1f);
+ }
+ 
++// hdPbrt: split reflection/transmission lobes (separate roughness).
++PBRT_CPU_GPU void DielectricBxDF::SplitProbs(Vector3f wo, BxDFReflTransFlags sampleFlags,
++                                             Float *pr, Float *pt) const {
++    // Macro-surface Fresnel, kept away from 0 and 1: rough lobes reach
++    // microfacets whose Fresnel differs from the macro one (e.g. rough
++    // transmission past the macro critical angle).
++    const Float F = Clamp(Fr(CosTheta(wo)).Average(), 0.05f, 0.95f);
++    *pr = (sampleFlags & BxDFReflTransFlags::Reflection) ? F : 0;
++    *pt = (sampleFlags & BxDFReflTransFlags::Transmission) ? 1 - F : 0;
++}
++
++PBRT_CPU_GPU pstd::optional<BSDFSample> DielectricBxDF::SampleSplit(
++    Vector3f wo, Float uc, Point2f u, TransportMode mode,
++    BxDFReflTransFlags sampleFlags) const {
++    Float pr, pt;
++    SplitProbs(wo, sampleFlags, &pr, &pt);
++    if (pr == 0 && pt == 0)
++        return {};
++    const Float sr = pr / (pr + pt), st = pt / (pr + pt);
++    if (uc < sr) {
++        if (rDistrib.EffectivelySmooth()) {
++            Vector3f wi(-wo.x, -wo.y, wo.z);
++            SampledSpectrum fr = Fr(CosTheta(wo)) / AbsCosTheta(wi);
++            return BSDFSample(fr, wi, sr, BxDFFlags::SpecularReflection);
++        }
++        Vector3f wm = rDistrib.Sample_wm(wo, u);
++        Vector3f wi = Reflect(wo, wm);
++        if (!SameHemisphere(wo, wi) || wi.z == 0)
++            return {};
++        Float pdf = rDistrib.PDF(wo, wm) / (4 * AbsDot(wo, wm)) * sr;
++        SampledSpectrum f = Fr(Dot(wo, wm)) *
++                            (rDistrib.D(wm) * rDistrib.G(wo, wi) /
++                             std::abs(4 * CosTheta(wi) * CosTheta(wo)) * MultiScatterScale(wo));
++        return BSDFSample(f, wi, pdf, BxDFFlags::GlossyReflection);
++    }
++    if (mfDistrib.EffectivelySmooth()) {
++        Vector3f wi;
++        Float etap;
++        if (!Refract(wo, Normal3f(0, 0, 1), eta, &etap, &wi))
++            return {};
++        SampledSpectrum ft = (SampledSpectrum(1.f) - Fr(CosTheta(wo))) / AbsCosTheta(wi);
++        ft *= tint * TopThroughput(wo);
++        if (mode == TransportMode::Radiance)
++            ft /= Sqr(etap);
++        return BSDFSample(ft, wi, st, BxDFFlags::SpecularTransmission, etap);
++    }
++    Vector3f wm = mfDistrib.Sample_wm(wo, u);
++    Float etap;
++    Vector3f wi;
++    if (!Refract(wo, (Normal3f)wm, eta, &etap, &wi) || SameHemisphere(wo, wi) || wi.z == 0)
++        return {};
++    Float denom = Sqr(Dot(wi, wm) + Dot(wo, wm) / etap);
++    Float dwm_dwi = AbsDot(wi, wm) / denom;
++    Float pdf = mfDistrib.PDF(wo, wm) * dwm_dwi * st;
++    SampledSpectrum ft = (SampledSpectrum(1.f) - Fr(Dot(wo, wm))) *
++                         (mfDistrib.D(wm) * mfDistrib.G(wo, wi) *
++                          std::abs(Dot(wi, wm) * Dot(wo, wm) /
++                                   (CosTheta(wi) * CosTheta(wo) * denom)));
++    ft *= tint * (TopThroughput(wo) * MultiScatterScale(wo));
++    if (mode == TransportMode::Radiance)
++        ft /= Sqr(etap);
++    return BSDFSample(ft, wi, pdf, BxDFFlags::GlossyTransmission, etap);
++}
++
++// Generalized half vector for (wo, wi); false if degenerate or backfacing.
++PBRT_CPU_GPU static bool HdPbrtSplitHalf(Vector3f wo, Vector3f wi, Float eta, Vector3f *wm,
++                                         Float *etap) {
++    Float cosTheta_o = CosTheta(wo), cosTheta_i = CosTheta(wi);
++    if (cosTheta_i == 0 || cosTheta_o == 0)
++        return false;
++    bool reflect = cosTheta_i * cosTheta_o > 0;
++    *etap = reflect ? 1 : (cosTheta_o > 0 ? eta : 1 / eta);
++    Vector3f m = wi * *etap + wo;
++    if (LengthSquared(m) == 0)
++        return false;
++    m = FaceForward(Normalize(m), Normal3f(0, 0, 1));
++    if (Dot(m, wi) * cosTheta_i < 0 || Dot(m, wo) * cosTheta_o < 0)
++        return false;
++    *wm = m;
++    return true;
++}
++
++PBRT_CPU_GPU SampledSpectrum DielectricBxDF::fSplit(Vector3f wo, Vector3f wi,
++                                                    TransportMode mode) const {
++    Vector3f wm;
++    Float etap;
++    if (!HdPbrtSplitHalf(wo, wi, eta, &wm, &etap))
++        return SampledSpectrum(0.f);
++    Float cosTheta_o = CosTheta(wo), cosTheta_i = CosTheta(wi);
++    if (cosTheta_i * cosTheta_o > 0) {
++        if (rDistrib.EffectivelySmooth())
++            return SampledSpectrum(0.f);
++        return Fr(Dot(wo, wm)) * (rDistrib.D(wm) * rDistrib.G(wo, wi) /
++                                  std::abs(4 * cosTheta_i * cosTheta_o) *
++                                  MultiScatterScale(wo));
++    }
++    if (mfDistrib.EffectivelySmooth())
++        return SampledSpectrum(0.f);
++    Float denom = Sqr(Dot(wi, wm) + Dot(wo, wm) / etap) * cosTheta_i * cosTheta_o;
++    SampledSpectrum ft = (SampledSpectrum(1.f) - Fr(Dot(wo, wm))) *
++                         (mfDistrib.D(wm) * mfDistrib.G(wo, wi) *
++                          std::abs(Dot(wi, wm) * Dot(wo, wm) / denom));
++    if (mode == TransportMode::Radiance)
++        ft /= Sqr(etap);
++    return tint * ft * (TopThroughput(wo) * MultiScatterScale(wo));
++}
++
++PBRT_CPU_GPU Float DielectricBxDF::PDFSplit(Vector3f wo, Vector3f wi,
++                                            BxDFReflTransFlags sampleFlags) const {
++    Vector3f wm;
++    Float etap;
++    if (!HdPbrtSplitHalf(wo, wi, eta, &wm, &etap))
++        return 0;
++    Float pr, pt;
++    SplitProbs(wo, sampleFlags, &pr, &pt);
++    if (pr == 0 && pt == 0)
++        return 0;
++    if (CosTheta(wi) * CosTheta(wo) > 0) {
++        if (rDistrib.EffectivelySmooth())
++            return 0;
++        return rDistrib.PDF(wo, wm) / (4 * AbsDot(wo, wm)) * pr / (pr + pt);
++    }
++    if (mfDistrib.EffectivelySmooth())
++        return 0;
++    Float denom = Sqr(Dot(wi, wm) + Dot(wo, wm) / etap);
++    return mfDistrib.PDF(wo, wm) * AbsDot(wi, wm) / denom * pt / (pr + pt);
++}
++
+ std::string DielectricBxDF::ToString() const {
+     return StringPrintf("[ DielectricBxDF eta: %f mfDistrib: %s ]", eta,
+                         mfDistrib.ToString());
+@@ -1193,6 +1335,8 @@ namespace {
+ constexpr int kAlbedoCos = 33, kAlbedoRough = 33, kAlbedoEta = 25;
+ constexpr Float kAlbedoEtaMax = 4;
+ float hdpbrtAlbedo[kAlbedoEta][kAlbedoRough][kAlbedoCos];
++// Reflection albedo seen from inside (etaRel = 1 / eta, with TIR).
++float hdpbrtAlbedoIn[kAlbedoEta][kAlbedoRough][kAlbedoCos];
+ // [0]: etaRel >= 1 (outside), [1]: etaRel = 1 / eta (inside), same eta axis.
+ float hdpbrtRTAlbedo[2][kAlbedoEta][kAlbedoRough][kAlbedoCos];
+ constexpr int kSheenCos = 33, kSheenAlpha = 33;
+@@ -1220,11 +1364,12 @@ void HdPbrtInitDielectricAlbedo() {
+                     // eta 1 and smooth interfaces lose nothing.
+                     hdpbrtRTAlbedo[0][ie][ir][ic] = hdpbrtRTAlbedo[1][ie][ir][ic] = 1;
+                     if (eta == 1) {
+-                        hdpbrtAlbedo[ie][ir][ic] = 0;
++                        hdpbrtAlbedo[ie][ir][ic] = hdpbrtAlbedoIn[ie][ir][ic] = 0;
+                         continue;
+                     }
+                     if (distrib.EffectivelySmooth()) {
+                         hdpbrtAlbedo[ie][ir][ic] = FrDielectric(c, eta);
++                        hdpbrtAlbedoIn[ie][ir][ic] = FrDielectric(c, 1 / eta);
+                         continue;
+                     }
+                     Vector3f wo(SafeSqrt(1 - c * c), 0, c);
+@@ -1241,6 +1386,18 @@ void HdPbrtInitDielectricAlbedo() {
+                                    distrib.G(wo, wi) / distrib.G1(wo);
+                         }
+                     hdpbrtAlbedo[ie][ir][ic] = float(sum / (n * n));
++                    double sumIn = 0;
++                    for (int a = 0; a < n; ++a)
++                        for (int b = 0; b < n; ++b) {
++                            Point2f u((a + 0.5f) / n, (b + 0.5f) / n);
++                            Vector3f wm = distrib.Sample_wm(wo, u);
++                            Vector3f wi = Reflect(wo, wm);
++                            if (wi.z <= 0)
++                                continue;
++                            sumIn += FrDielectric(AbsDot(wo, wm), 1 / eta) *
++                                     distrib.G(wo, wi) / distrib.G1(wo);
++                        }
++                    hdpbrtAlbedoIn[ie][ir][ic] = float(std::min(sumIn / (n * n), 1.0));
+                     // R + T from both sides, VNDF sampled: per microfacet
+                     // normal, F G2 / G1 for reflection, (1 - F) G2 / G1 for
+                     // transmission (energy, no 1/eta^2).
+@@ -1290,6 +1447,23 @@ void HdPbrtInitDielectricAlbedo() {
+     });
+ }
+ 
++PBRT_CPU_GPU Float HdPbrtDielectricAlbedoInside(Float cosTheta, Float alpha, Float eta) {
++    if (eta < 1)
++        eta = 1 / eta;
++    eta = Clamp(eta, 1, kAlbedoEtaMax);
++    Float fe = std::sqrt((eta - 1) / (kAlbedoEtaMax - 1)) * (kAlbedoEta - 1);
++    Float fr = Clamp(std::sqrt(std::max<Float>(alpha, 0)), 0, 1) * (kAlbedoRough - 1);
++    Float fc = Clamp(cosTheta, 0, 1) * (kAlbedoCos - 1);
++    int e0 = std::min(int(fe), kAlbedoEta - 2), r0 = std::min(int(fr), kAlbedoRough - 2),
++        c0 = std::min(int(fc), kAlbedoCos - 2);
++    Float te = fe - e0, tr = fr - r0, tc = fc - c0;
++    auto at = [&](int e, int r) {
++        return Lerp(tc, Float(hdpbrtAlbedoIn[e][r][c0]), Float(hdpbrtAlbedoIn[e][r][c0 + 1]));
++    };
++    return Lerp(te, Lerp(tr, at(e0, r0), at(e0, r0 + 1)),
++                Lerp(tr, at(e0 + 1, r0), at(e0 + 1, r0 + 1)));
++}
++
+ PBRT_CPU_GPU Float HdPbrtDielectricAlbedo(Float cosTheta, Float alpha, Float eta) {
+     if (eta < 1)
+         eta = 1 / eta;
+diff --git a/src/pbrt/bxdfs.h b/src/pbrt/bxdfs.h
+index 19cbc46..7380b3a 100644
+--- a/src/pbrt/bxdfs.h
++++ b/src/pbrt/bxdfs.h
+@@ -247,12 +247,27 @@ class DielectricBxDF {
+ 
+     PBRT_CPU_GPU
+     BxDFFlags Flags() const {
++        if (Split())
++            return (rDistrib.EffectivelySmooth() ? BxDFFlags::SpecularReflection
++                                                 : BxDFFlags::GlossyReflection) |
++                   (mfDistrib.EffectivelySmooth() ? BxDFFlags::SpecularTransmission
++                                                  : BxDFFlags::GlossyTransmission);
+         BxDFFlags flags = (eta == 1) ? BxDFFlags::Transmission
+                                      : (BxDFFlags::Reflection | BxDFFlags::Transmission);
+         return flags |
+                (mfDistrib.EffectivelySmooth() ? BxDFFlags::Specular : BxDFFlags::Glossy);
+     }
+ 
++    // hdPbrt: a reflection lobe with its own microfacet distribution
++    // (MaterialX standard_surface: reflection at specular_roughness,
++    // transmission also gets transmission_extra_roughness). mfDistrib then
++    // only shapes the transmission.
++    PBRT_CPU_GPU
++    void SetReflectionDistrib(TrowbridgeReitzDistribution d) {
++        rDistrib = d;
++        splitR = true;
++    }
++
+     PBRT_CPU_GPU
+     pstd::optional<BSDFSample> Sample_f(
+         Vector3f wo, Float uc, Point2f u, TransportMode mode,
+@@ -281,7 +296,10 @@ class DielectricBxDF {
+     std::string ToString() const;
+ 
+     PBRT_CPU_GPU
+-    void Regularize() { mfDistrib.Regularize(); }
++    void Regularize() {
++        mfDistrib.Regularize();
++        rDistrib.Regularize();
++    }
+ 
+   private:
+     // DielectricBxDF Private Members
+@@ -293,6 +311,20 @@ class DielectricBxDF {
+     // layer on top also scales transmission by 1 - w E_R(|cos theta_o|).
+     Float topWeight = 0;
+     PBRT_CPU_GPU Float TopThroughput(Vector3f wo) const;
++    // hdPbrt: separate reflection distribution (SetReflectionDistrib). Split
++    // lobes pick reflection vs transmission by the macro-surface Fresnel and
++    // sample each lobe's own microfacets.
++    TrowbridgeReitzDistribution rDistrib;
++    bool splitR = false;
++    PBRT_CPU_GPU bool Split() const { return splitR && eta != 1; }
++    PBRT_CPU_GPU void SplitProbs(Vector3f wo, BxDFReflTransFlags sampleFlags, Float *pr,
++                                 Float *pt) const;
++    PBRT_CPU_GPU pstd::optional<BSDFSample> SampleSplit(Vector3f wo, Float uc, Point2f u,
++                                                        TransportMode mode,
++                                                        BxDFReflTransFlags sampleFlags) const;
++    PBRT_CPU_GPU SampledSpectrum fSplit(Vector3f wo, Vector3f wi, TransportMode mode) const;
++    PBRT_CPU_GPU Float PDFSplit(Vector3f wo, Vector3f wi,
++                                BxDFReflTransFlags sampleFlags) const;
+     // hdPbrt: energy compensation for microfacet multiple scattering. Both
+     // lobes scale by 1 / E(wo), E the single-scattering albedo for wo's side
+     // (as Typhoon's coupled dielectric interface does).
+@@ -1258,6 +1290,8 @@ class NormalizedFresnelBxDF {
+ // HdPbrtInitDielectricAlbedo() must run (on the CPU) before lookups.
+ void HdPbrtInitDielectricAlbedo();
+ PBRT_CPU_GPU Float HdPbrtDielectricAlbedo(Float cosTheta, Float alpha, Float eta);
++// The same seen from inside the eta side (Fresnel at 1 / eta, TIR included).
++PBRT_CPU_GPU Float HdPbrtDielectricAlbedoInside(Float cosTheta, Float alpha, Float eta);
+ // Single-scattering albedo (reflection + transmission, energy, i.e. without the
+ // 1/eta^2 radiance scale) of the rough DielectricBxDF for relative IOR etaRel
+ // on wo's side (< 1 from inside, total internal reflection included).
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index 554a5a6..e7eccec 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -82,6 +82,18 @@ DielectricMaterial *DielectricMaterial::Create(
+     m->SetFilm(Clamp(parameters.GetOneFloat("filmweight", 0.f), 0, 1),
+                parameters.GetOneFloat("filmthickness", 0.f),
+                parameters.GetOneFloat("filmeta", 1.4f));
++    // hdPbrt: reflection roughness of its own (transmission keeps "roughness").
++    FloatTexture uRefl =
++        parameters.GetFloatTextureOrNull("hdpbrtreflectionuroughness", alloc);
++    FloatTexture vRefl =
++        parameters.GetFloatTextureOrNull("hdpbrtreflectionvroughness", alloc);
++    FloatTexture refl = parameters.GetFloatTextureOrNull("hdpbrtreflectionroughness", alloc);
++    if (!uRefl)
++        uRefl = refl;
++    if (!vRefl)
++        vRefl = refl;
++    if (uRefl || vRefl)
++        m->SetReflectionRoughness(uRefl ? uRefl : vRefl, vRefl ? vRefl : uRefl);
+     return m;
+ }
+ 
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index dad2ff2..32ec095 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -163,7 +163,8 @@ class DielectricMaterial {
+ 
+     template <typename TextureEvaluator>
+     PBRT_CPU_GPU bool CanEvaluateTextures(TextureEvaluator texEval) const {
+-        return texEval.CanEvaluate({uRoughness, vRoughness}, {tint});
++        return texEval.CanEvaluate({uRoughness, vRoughness, uReflRoughness, vReflRoughness},
++                                   {tint});
+     }
+ 
+     PBRT_CPU_GPU
+@@ -208,6 +209,16 @@ class DielectricMaterial {
+         if (tint)
+             t = Clamp(texEval(tint, ctx, lambda), 0, 1);
+         DielectricBxDF bxdf(sampledEta, distrib, t, topWeight, multiScatter);
++        if (uReflRoughness) {
++            // hdPbrt: reflection with its own roughness (same remap rule).
++            Float ur = texEval(uReflRoughness, ctx), vr = texEval(vReflRoughness, ctx);
++            if (remapRoughness) {
++                ur = TrowbridgeReitzDistribution::RoughnessToAlpha(ur);
++                vr = TrowbridgeReitzDistribution::RoughnessToAlpha(vr);
++            }
++            if (ur != urough || vr != vrough)
++                bxdf.SetReflectionDistrib(TrowbridgeReitzDistribution(ur, vr));
++        }
+         if (filmWeight > 0 && filmThickness > 0) {
+             SampledSpectrum lambdaNm;
+             for (int i = 0; i < NSpectrumSamples; ++i)
+@@ -217,6 +228,12 @@ class DielectricMaterial {
+         return bxdf;
+     }
+ 
++    // hdPbrt: "hdpbrtreflectionroughness" / "hdpbrtreflection{u,v}roughness".
++    void SetReflectionRoughness(FloatTexture u, FloatTexture v) {
++        uReflRoughness = u;
++        vReflRoughness = v;
++    }
++
+     // hdPbrt: thin film on the outside ("filmweight", "filmthickness" in nm,
+     // "filmeta").
+     void SetFilm(Float weight, Float thicknessNm, Float eta) {
+@@ -231,6 +248,7 @@ class DielectricMaterial {
+     Float topWeight;       // hdPbrt: "hdpbrttopweight"
+     bool multiScatter;     // hdPbrt: "hdpbrtmultiscatter"
+     Float filmWeight = 0, filmThickness = 0, filmEta = 1.4f;
++    FloatTexture uReflRoughness = nullptr, vReflRoughness = nullptr;
+     Image *normalMap;
+     FloatTexture displacement;
+     FloatTexture uRoughness, vRoughness;
+-- 
+2.43.0
+

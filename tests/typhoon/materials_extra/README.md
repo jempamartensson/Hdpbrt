@@ -28,6 +28,10 @@ them and point SUITE at a directory whose `materials/` holds both:
   transmission 1) at 0 / 0.2. Typhoon 1.000 / 0.909 / 0.905: standard_surface is MaterialX's
   layer(R over T), so T pays Fresnel twice per crossing. hdPbrt with `hdpbrttopweight` on
   standard_surface glass (2026-11-25): 1.000 / 0.904 / 0.890 (was 1.000 / 1.000 / 0.982).
+  f_ss_r02_x045: standard_surface glass at 0.2 with transmission_extra_roughness 0.45 (pbrt
+  patch 30, separate reflection roughness): hdPbrt 0.572, Typhoon 0.817 (Typhoon falls back to
+  a delta transmission when a rough transmission sample fails, which keeps energy pbrt's
+  microfacet model loses).
 - `thin_film`: standard_surface thin_film_thickness 400 nm / IOR 1.33 and OpenPBR
   thin_film_weight 0.5 / 0.3 um (pbrt patch 22). RMSE 0.061 -> 0.039 and 0.042 -> 0.036.
   f_sss_white / f_sss_08: OpenPBR subsurface (weight 1, radius 0.3, no specular) with walk

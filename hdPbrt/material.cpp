@@ -494,7 +494,16 @@ struct _MtlxMapper {
                     // top's 1 - w E_R(wo), on top of the T lobe's own
                     // Fresnel (as Typhoon does): pbrt patch 17.
                     d.type = "dielectric";
-                    Rough(os, *top);
+                    // Transmission at the base's roughness, reflection at the
+                    // top's when they differ.
+                    Rough(os, *base);
+                    {
+                        const GfVec2f ta = _Vec2(*top, "roughness", GfVec2f(0.05f));
+                        const GfVec2f ba = _Vec2(*base, "roughness", GfVec2f(0.05f));
+                        if (ta != ba)
+                            os << " \"float hdpbrtreflectionuroughness\" " << std::max(ta[0], 0.f)
+                               << " \"float hdpbrtreflectionvroughness\" " << std::max(ta[1], 0.f);
+                    }
                     os << " \"float eta\" " << _Float(*top, "ior", 1.5f) << " \"float hdpbrttopweight\" "
                        << std::min(std::max(_Float(*top, "weight", 1), 0.f), 1.f);
                     DielectricFilm(os, Film(*top) > 0 ? *top : *base);
@@ -1006,8 +1015,14 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                     other << " ]";
                 } else
                     other << " \"float eta\" " << ior;
+                // MaterialX: the reflection stays at specular_roughness, only
+                // the transmission gets the extra roughness (pbrt dielectric
+                // "hdpbrtreflectionroughness", alpha like "roughness").
+                const float reflRough = std::min(std::max(rough, 0.f), 1.f);
                 rough = std::min(std::max(rough + transExtraRough, 0.f), 1.f);
                 roughParam("roughness");
+                if (roughTex.empty() && rough != reflRough)
+                    other << " \"float hdpbrtreflectionroughness\" " << reflRough * reflRough;
                 if (glassMultiScatter && rough > 0)
                     other << " \"bool hdpbrtmultiscatter\" true";
                 if (glassTopWeight > 0)
