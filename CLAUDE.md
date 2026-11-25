@@ -338,6 +338,19 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   sigma_a/sigma_s as 3-band steps (490/590 nm, fitted to RGB-exact transmittance). honey
   differ -> close (0.86 -> 0.90), scatter_anisotropy close -> match, dielectric_layer_absorption
   and _anisotropic match -> close (RMSE 0.09 -> 0.105, 1.07 -> 1.08 bright).
+  (That band version did ship, 5c82058.) Honey's remaining gap (0.898, red 0.83, inside the
+  ball) taken apart 2026-11-25 by editing the medium in hdPbrt's .pbrt and re-running pbrt:
+  (1) Typhoon's medium NEE passes straight through the medium's own smooth dielectric
+  boundary (visibility.cpp: exitsCurrentMedium -> visibility = transmission weight, no
+  refraction or Fresnel, even with caustics on), so every interior scatter gets the dome
+  directly. An env-var experiment doing the same in pbrt: 0.900 -> 0.952 (red 0.83 -> 0.92).
+  Not physical (a smooth refracting boundary can't be crossed by a shadow ray); not copied.
+  (2) RGB vs spectral: Typhoon's red channel has exactly 0 absorption (honey's red is pure
+  scattering after the absorption shift), pbrt's red pixel also sees < 590 nm light from the
+  absorbing 490-590 band over hundreds of scatters. Moving that edge to 560 nm takes red to
+  1.005 but green to 1.075 (other media fixtures would move). Path length: pbrt maxdepth 16
+  -> 64 adds red 0.83 -> 0.90 here, but Typhoon also stops at 16 bounces and counts medium
+  scatters, so that isn't a mismatch. Left as is.
   Coat (2026-11-23, patch 16): OpenPBR coat roughens the specular below
   (r' = (r^4 + 2 c^4)^(1/4)), makes its IOR relative to the coat (both blended by weight),
   and darkens the base, (1 - K) / (1 - E K) with K = 1 - (1 - F0) / n^2 (spec; Typhoon does
