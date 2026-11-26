@@ -1,7 +1,7 @@
 # hdPbrt: Hydra render delegate for pbrt-v4.
 #
 # Two USD flavors (choose with -DHDPBRT_FLAVOR=houdini|blender):
-#   houdini: headers and libs from a Houdini install (-DHFS=/opt/hfs22.0)
+#   houdini: headers and libs from a Houdini install (-DHFS=/opt/hfs22.0.508)
 #   blender: Blender's monolithic libusd_ms.so (-DBLENDER_LIB=<blender>/lib),
 #            with headers from the matching OpenUSD source tree
 #            (-DUSD_SOURCE=..., -DUSD_GENERATED=<dir with pxr/pxr.h>),
@@ -43,7 +43,7 @@ target_compile_definitions(hdPbrt PRIVATE TBB_SUPPRESS_DEPRECATED_MESSAGES=1 NDE
 target_compile_options(hdPbrt PRIVATE -Wno-deprecated -Wno-deprecated-declarations)
 
 if(HDPBRT_FLAVOR STREQUAL "houdini")
-  set(HFS "/opt/hfs22.0" CACHE PATH "Houdini install")
+  set(HFS "/opt/hfs22.0.508" CACHE PATH "Houdini install")
   target_link_options(hdPbrt PRIVATE -Wl,--no-undefined)
   target_compile_definitions(hdPbrt PRIVATE HDPBRT_HOUDINI=1)
   target_include_directories(hdPbrt SYSTEM PRIVATE

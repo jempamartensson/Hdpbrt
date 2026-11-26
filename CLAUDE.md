@@ -272,7 +272,7 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
 - Volumes (done 2026-11-22): `volume.cpp` (`HdPbrtField` bprims, `HdPbrtVolume`), converter
   `tools/vdb2nvdb.cpp` -> `hdpbrt_vdb2nvdb` next to pbrt (Houdini flavor, needs
   `-DPBRT_SOURCE`; Blender's install links to it). The interface box must face outward.
-  Test: `tests/volume_scene.usda` (uses Houdini's sample cloud.vdb from /opt/hfs22.0).
+  Test: `tests/volume_scene.usda` (uses Houdini's sample cloud.vdb from /opt/hfs22.0.508).
 - Curves, points and subdivision (done 2026-11-22): `curves.cpp`, `points.cpp`,
   `subdiv.cpp`. All geometry rprims share `HdPbrtGeom` (`geom.cpp`: transform samples,
   visibility, display color, instancing, and `Write()` with material, motion keys and
@@ -313,8 +313,12 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
 - pbrt's coateddiffuse looks darker and more saturated than Karma's or Cycles' diffuse.
 - Jens's own test scene (a 1×1 rect light about 8 units away, no dome) renders almost black.
   That is the scene, not a bug.
-- `scripts/build.sh` has never run from a clean clone (pbrt clone plus submodules is a large
-  download; cap downloads with `curl --limit-rate` style limits).
+- `scripts/build.sh` from a clean clone (done 2026-11-26): all 35 patches apply at 20e41fd, the
+  patched tree equals `../src/pbrt-v4` (same tree hash), and `tests/volume_scene.usda` renders
+  pixel-identical to the local install. Tested without the big download: `GIT_CONFIG_COUNT`
+  `url.<local>.insteadOf` entries map pbrt and each submodule URL to the local checkouts (plus
+  `protocol.file.allow=always`). Fixed then: HFS default -> /opt/hfs22.0.508, and
+  `checkout -B hdpbrt` (a clone of the local repo already has that branch).
 - Camera exposure (done 2026-11-22): `GetLinearExposureScale()` (when the pass enables
   exposure compensation and the `enableExposureCompensation` setting is on) goes into the
   film `iso` with the shutter compensation. `tests/typhoon/exposure_scene.usda` matches

@@ -38,7 +38,7 @@ scripts/build.sh                 # pbrt + Houdini flavor, into ./install/houdini
 BLENDER=1 USD_SOURCE=... TBB_INCLUDE=... scripts/build.sh   # also the Blender flavor
 ```
 
-The Houdini flavor builds against `$HFS` (default `/opt/hfs22.0`). The Blender flavor builds
+The Houdini flavor builds against `$HFS` (default `/opt/hfs22.0.508`). The Blender flavor builds
 against Blender's `libusd_ms.so` with OpenUSD v26.08 source headers and the generated
 `pxr.h` in `third_party/usd-blender-generated`. Details and gotchas are in
 [docs/BUILD_NOTES.md](docs/BUILD_NOTES.md).

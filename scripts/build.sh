@@ -5,7 +5,7 @@
 #   BLENDER=1 scripts/build.sh       # also the Blender 5.3 flavor (see docs/BUILD_NOTES.md)
 #
 # Variables: WORK (default ./_work: pbrt source + build dirs), PREFIX (default ./install),
-# HFS (default /opt/hfs22.0), J (parallel jobs, default 8).
+# HFS (default /opt/hfs22.0.508), J (parallel jobs, default 8).
 # For the Blender flavor: BLENDER_LIB, USD_SOURCE (OpenUSD v26.08 source tree), TBB_INCLUDE
 # (oneTBB 2022.3 include dir), PYTHON_INCLUDE (Python 3.13 headers, e.g. Houdini's),
 # OSD_INCLUDE (a dir containing OpenSubdiv 3.7's opensubdiv/; default: a link to Houdini's).
@@ -16,7 +16,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK=${WORK:-$ROOT/_work}
 PREFIX=${PREFIX:-$ROOT/install}
-HFS=${HFS:-/opt/hfs22.0}
+HFS=${HFS:-/opt/hfs22.0.508}
 J=${J:-8}
 PBRT_COMMIT=20e41fd
 mkdir -p "$WORK"
@@ -24,7 +24,7 @@ mkdir -p "$WORK"
 # 1. pbrt-v4 at a known commit + patches (parent-PID watchdog, depth, id and alpha channels, deformation and N-key motion blur)
 if [ ! -d "$WORK/pbrt-v4/.git" ]; then
   git clone --recursive https://github.com/mmp/pbrt-v4.git "$WORK/pbrt-v4"
-  git -C "$WORK/pbrt-v4" checkout -b hdpbrt $PBRT_COMMIT
+  git -C "$WORK/pbrt-v4" checkout -B hdpbrt $PBRT_COMMIT
   git -C "$WORK/pbrt-v4" submodule update --init --recursive
   git -C "$WORK/pbrt-v4" am "$ROOT"/patches/*.patch
 fi
