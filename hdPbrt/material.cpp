@@ -30,7 +30,8 @@ HdPbrtMaterialDesc HdPbrt_DefaultMaterial()
     return d;
 }
 
-std::string HdPbrt_MaterialLine(const HdPbrtMaterialDesc &m, const GfVec3f *displayColor)
+std::string HdPbrt_MaterialLine(const HdPbrtMaterialDesc &m, const GfVec3f *displayColor,
+                                float irReflectance)
 {
     std::ostringstream os;
     os << "Material " << HdPbrt_Quote(m.type);
@@ -44,7 +45,13 @@ std::string HdPbrt_MaterialLine(const HdPbrtMaterialDesc &m, const GfVec3f *disp
             os << " \"rgb reflectance\" " << HdPbrt_Rgb(c);
         }
     }
-    os << m.otherParams << "\n";
+    os << m.otherParams;
+    // Infrared reflectance (pbrt patch 38) on the diffuse base.
+    const float ir = irReflectance >= 0 ? irReflectance : m.irReflectance;
+    if (ir >= 0 && m.writeReflectance && (m.type == "diffuse" || m.type == "hdpbrtlayered"))
+        os << " \"float hdpbrtir\" " << std::min(ir, 1.f) << " \"float hdpbrtiredge\" "
+           << m.irEdge;
+    os << "\n";
     return os.str();
 }
 
@@ -1397,6 +1404,22 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
         }
     }
 
+    // Infrared reflectance: inputs pbrt:irReflectance / pbrt:irEdge on the
+    // surface shader (or the Material's terminal node).
+    if (res.IsHolding<HdMaterialNetworkMap>()) {
+        for (auto const &kv : res.UncheckedGet<HdMaterialNetworkMap>().map)
+            for (auto const &node : kv.second.nodes)
+                for (auto const &p : node.parameters) {
+                    float f;
+                    if (p.second.IsHolding<float>()) f = p.second.UncheckedGet<float>();
+                    else if (p.second.IsHolding<double>()) f = (float)p.second.UncheckedGet<double>();
+                    else continue;
+                    if (p.first == "pbrt:irReflectance")
+                        result.irReflectance = f;
+                    else if (p.first == "pbrt:irEdge")
+                        result.irEdge = std::min(std::max(f, 400.f), 1100.f);
+                }
+    }
     result.volumeParams = volume.volumeParams;
     result.densityField = volume.densityField;
     result.fireField = volume.fireField;

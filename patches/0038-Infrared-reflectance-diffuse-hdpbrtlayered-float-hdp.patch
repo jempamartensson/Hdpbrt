@@ -1,0 +1,103 @@
+From cb235229914c03e1c6f37b2e024a938a091ea33f Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Thu, 26 Nov 2026 19:47:16 +0100
+Subject: [PATCH 38/38] Infrared reflectance: diffuse/hdpbrtlayered "float
+ hdpbrtir" above a red edge, per-wavelength mix texture (for hdPbrt)
+
+---
+ src/pbrt/materials.cpp | 21 +++++++++++++++++++++
+ src/pbrt/textures.h    | 18 ++++++++++++++++++
+ 2 files changed, 39 insertions(+)
+
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index 2a38a67..427c9db 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -215,6 +215,25 @@ std::string DiffuseMaterial::ToString() const {
+         reflectance);
+ }
+ 
++// "float hdpbrtir" (for hdPbrt): the reflectance above the red edge
++// ("hdpbrtiredge" nm, "hdpbrtirwidth" nm wide), for infrared renders. RGB
++// reflectances otherwise just continue their red end into the infrared.
++static SpectrumTexture HdPbrtInfraredReflectance(SpectrumTexture reflectance,
++                                                 const TextureParameterDictionary &parameters,
++                                                 Allocator alloc) {
++    Float ir = parameters.GetOneFloat("hdpbrtir", -1.f);
++    Float edge = parameters.GetOneFloat("hdpbrtiredge", 720.f);
++    Float width = std::max<Float>(parameters.GetOneFloat("hdpbrtirwidth", 60.f), 1.f);
++    if (ir < 0)
++        return reflectance;
++    SpectrumTexture irTex = alloc.new_object<SpectrumConstantTexture>(
++        alloc.new_object<ConstantSpectrum>(std::min<Float>(ir, 1.f)));
++    SpectrumMixTexture *mix = alloc.new_object<SpectrumMixTexture>(
++        reflectance, irTex, alloc.new_object<FloatConstantTexture>(0.f));
++    mix->SetHdPbrtInfrared(edge - width / 2, edge + width / 2);
++    return mix;
++}
++
+ DiffuseMaterial *DiffuseMaterial::Create(const TextureParameterDictionary &parameters,
+                                          Image *normalMap, const FileLoc *loc,
+                                          Allocator alloc) {
+@@ -223,6 +242,7 @@ DiffuseMaterial *DiffuseMaterial::Create(const TextureParameterDictionary &param
+     if (!reflectance)
+         reflectance = alloc.new_object<SpectrumConstantTexture>(
+             alloc.new_object<ConstantSpectrum>(0.5f));
++    reflectance = HdPbrtInfraredReflectance(reflectance, parameters, alloc);
+     FloatTexture displacement = parameters.GetFloatTextureOrNull("displacement", alloc);
+     // "roughness" (for hdPbrt): energy-preserving Oren-Nayar; 0 is Lambert.
+     FloatTexture roughness = parameters.GetFloatTextureOrNull("roughness", alloc);
+@@ -676,6 +696,7 @@ HdPbrtLayeredMaterial *HdPbrtLayeredMaterial::Create(
+     if (!reflectance)
+         reflectance = alloc.new_object<SpectrumConstantTexture>(
+             alloc.new_object<ConstantSpectrum>(0.5f));
++    reflectance = HdPbrtInfraredReflectance(reflectance, parameters, alloc);
+     SpectrumTexture specTint = parameters.GetSpectrumTexture(
+         "speculartint", nullptr, SpectrumType::Albedo, alloc);
+     if (!specTint)
+diff --git a/src/pbrt/textures.h b/src/pbrt/textures.h
+index 458777e..8d0554e 100644
+--- a/src/pbrt/textures.h
++++ b/src/pbrt/textures.h
+@@ -874,6 +874,17 @@ class SpectrumMixTexture {
+ 
+     PBRT_CPU_GPU
+     SampledSpectrum Evaluate(TextureEvalContext ctx, SampledWavelengths lambda) const {
++        if (hdpbrtIrEnd > hdpbrtIrStart) {
++            // Infrared (for hdPbrt): tex1 below the edge, tex2 above it,
++            // blended per wavelength with a smoothstep across the edge.
++            SampledSpectrum t1 = tex1.Evaluate(ctx, lambda);
++            SampledSpectrum t2 = tex2.Evaluate(ctx, lambda);
++            for (int i = 0; i < NSpectrumSamples; ++i) {
++                Float a = SmoothStep(lambda[i], hdpbrtIrStart, hdpbrtIrEnd);
++                t1[i] = (1 - a) * t1[i] + a * t2[i];
++            }
++            return t1;
++        }
+         Float amt = amount.Evaluate(ctx);
+         SampledSpectrum t1, t2;
+         if (amt != 1)
+@@ -883,6 +894,12 @@ class SpectrumMixTexture {
+         return (1 - amt) * t1 + amt * t2;
+     }
+ 
++    // Mix by wavelength instead of "amount" (for hdPbrt infrared reflectance).
++    void SetHdPbrtInfrared(Float start, Float end) {
++        hdpbrtIrStart = start;
++        hdpbrtIrEnd = end;
++    }
++
+     static SpectrumMixTexture *Create(const Transform &renderFromTexture,
+                                       const TextureParameterDictionary &parameters,
+                                       SpectrumType spectrumType, const FileLoc *loc,
+@@ -893,6 +910,7 @@ class SpectrumMixTexture {
+   private:
+     SpectrumTexture tex1, tex2;
+     FloatTexture amount;
++    Float hdpbrtIrStart = 0, hdpbrtIrEnd = 0;
+ };
+ 
+ // SpectrumDirectionMixTexture Definition
+-- 
+2.43.0
+

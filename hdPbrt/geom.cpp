@@ -15,7 +15,9 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-TF_DEFINE_PRIVATE_TOKENS(_tokens, (displayColor)(displayOpacity));
+TF_DEFINE_PRIVATE_TOKENS(_tokens, (displayColor)(displayOpacity)
+                         ((pbrtIrReflectance, "pbrt:irReflectance"))
+                         ((pbrtIrReflectanceSop, "pbrt_irReflectance")));
 
 namespace {
 
@@ -162,7 +164,24 @@ void HdPbrtGeom::_SyncDisplayColor(HdSceneDelegate *sd)
         else if (o.value.IsHolding<float>())
             op = o.value.UncheckedGet<float>();
     }
+    // Infrared reflectance per object (pbrt_irReflectance: SOP attributes
+    // and Blender can't have a colon in the name).
+    HdPbrtPrimvar ir = HdPbrt_FindPrimvar(
+        sd, id, {_tokens->pbrtIrReflectance, _tokens->pbrtIrReflectanceSop});
+    float irRefl = -1.f;
+    if (ir.valid) {
+        const VtValue &v = ir.value;
+        if (v.IsHolding<VtFloatArray>() && !v.UncheckedGet<VtFloatArray>().empty())
+            irRefl = v.UncheckedGet<VtFloatArray>()[0];
+        else if (v.IsHolding<float>())
+            irRefl = v.UncheckedGet<float>();
+        else if (v.IsHolding<double>())
+            irRefl = (float)v.UncheckedGet<double>();
+        else if (v.IsHolding<VtDoubleArray>() && !v.UncheckedGet<VtDoubleArray>().empty())
+            irRefl = (float)v.UncheckedGet<VtDoubleArray>()[0];
+    }
     std::lock_guard<std::mutex> lock(_mutex);
+    _irReflectance = irRefl;
     _displayColor = col;
     _hasDisplayColor = ok;
     _displayOpacity = op;
@@ -292,7 +311,7 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
         }
     }
     std::string matLine =
-        HdPbrt_MaterialLine(mat, _hasDisplayColor ? &_displayColor : nullptr);
+        HdPbrt_MaterialLine(mat, _hasDisplayColor ? &_displayColor : nullptr, _irReflectance);
     // Transmissive materials with an interior medium (pbrt's volpath).
     if (!mat.mediumName.empty())
         matLine += "  MediumInterface " + HdPbrt_Quote(mat.mediumName) + " \"\"\n";

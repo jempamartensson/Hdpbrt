@@ -4,7 +4,11 @@
     doc = """Spectral lights and camera (pbrt:spectrum / pbrt:sensor). The sun is a
     spectral black body (infrared included), the lamp on the right a band light at 850 nm
     (invisible to the color camera). ir_scene_infrared.usda switches the camera to infrared
-    false color: red = 850 nm, green = 650 nm, blue = 550 nm."""
+    false color: red = 850 nm, green = 650 nm, blue = 550 nm.
+    The "leaf" sphere has the green sphere's color plus an infrared reflectance of 0.6
+    (input pbrt:irReflectance on its shader), as foliage: it glows in infrared (the Wood
+    effect) while the plain green sphere stays dark. The ground's primvar
+    pbrt_irReflectance = 0.4 does the same per object."""
 )
 def Xform "World"
 {
@@ -40,7 +44,7 @@ def Xform "World"
         token pbrt:spectrum = "band"
         float pbrt:wavelength = 850
         float pbrt:bandwidth = 40
-        double3 xformOp:translate = (3.2, 1.2, 1.5)
+        double3 xformOp:translate = (4.1, 1.5, 1.6)
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
     def Mesh "ground"
@@ -50,26 +54,51 @@ def Xform "World"
         point3f[] points = [(-20, 0, -20), (20, 0, -20), (20, 0, 20), (-20, 0, 20)]
         uniform token subdivisionScheme = "none"
         color3f[] primvars:displayColor = [(0.35, 0.3, 0.25)]
+        float primvars:pbrt_irReflectance = 0.4 (interpolation = "constant")
     }
     def Sphere "white"
     {
-        double radius = 0.9
-        double3 xformOp:translate = (-2.2, 0.9, 0)
+        double radius = 0.8
+        double3 xformOp:translate = (-3, 0.8, 0)
         uniform token[] xformOpOrder = ["xformOp:translate"]
         color3f[] primvars:displayColor = [(0.8, 0.8, 0.8)]
     }
     def Sphere "green"
     {
-        double radius = 0.9
-        double3 xformOp:translate = (0, 0.9, 0)
+        double radius = 0.8
+        double3 xformOp:translate = (-1, 0.8, 0)
         uniform token[] xformOpOrder = ["xformOp:translate"]
         color3f[] primvars:displayColor = [(0.08, 0.45, 0.06)]
     }
+    def Sphere "leaf" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.8
+        double3 xformOp:translate = (1, 0.8, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        rel material:binding = </World/mtl/foliage>
+    }
     def Sphere "red"
     {
-        double radius = 0.9
-        double3 xformOp:translate = (2.2, 0.9, 0)
+        double radius = 0.8
+        double3 xformOp:translate = (3, 0.8, 0)
         uniform token[] xformOpOrder = ["xformOp:translate"]
         color3f[] primvars:displayColor = [(0.7, 0.05, 0.03)]
+    }
+    def Scope "mtl"
+    {
+        def Material "foliage"
+        {
+            token outputs:surface.connect = </World/mtl/foliage/surf.outputs:surface>
+            def Shader "surf"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.08, 0.45, 0.06)
+                float inputs:roughness = 0.6
+                float inputs:pbrt:irReflectance = 0.6
+                token outputs:surface
+            }
+        }
     }
 }

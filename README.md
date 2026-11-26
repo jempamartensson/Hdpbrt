@@ -90,7 +90,10 @@ to ACEScg. Textures are read in their own color space (file metadata or the shad
 sRGB/Rec.709 primaries) and converted, as Karma does.
 Lights and cameras can also work in nanometers: `pbrt:spectrum` band / blackbody on lights,
 `pbrt:sensor` bands on cameras (e.g. infrared false color, 360-1100 nm); in Houdini they are
-on the pbrt tab of Light and Camera LOPs. See `docs/images/infrared.png`.
+on the pbrt tab of Light and Camera LOPs. For infrared, a material's diffuse reflectance above
+the red edge can be set with a float shader input `pbrt:irReflectance` (or per object with a
+constant primvar `pbrt_irReflectance`, e.g. a detail attribute in SOPs): foliage at about 0.6
+glows as on infrared film. See `docs/images/infrared.png`.
 Not yet: volume materials other than the Karma pyro shader,
 in-memory Houdini volumes (write VDBs to disk).
 

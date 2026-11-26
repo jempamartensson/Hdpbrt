@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (37 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (38 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -150,6 +150,10 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    written raw (XYZFromSensorRGB = the output space's XYZFromRGB), each normalized so an
    equal-energy spectrum with white's visible power reads 1, and wavelengths sampled uniformly
    over the bands' +-3 sigma (PixelSensor::HdPbrtSamplesRange, FilmBase::SampleWavelengths).
+38. Infrared reflectance: `diffuse` and `hdpbrtlayered` take `"float hdpbrtir"` (reflectance above
+   the red edge), `"float hdpbrtiredge"` (nm, default 720) and `"float hdpbrtirwidth"` (60). The
+   reflectance texture is wrapped in a SpectrumMixTexture that blends per wavelength (smoothstep
+   across the edge; `SetHdPbrtInfrared`) instead of by `amount`.
 
 ## Done in the 2026-11-22 session
 
@@ -341,10 +345,15 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   mode is on). Checks: an 850 nm light is black to the color camera, red (4.1) to the bands
   camera; white light through the bands reads (0.77, 1.03, 1.21) (ACES D60's real spectrum,
   with infrared). Test scene: `tests/spectral/ir_scene.usda` (+ `_infrared` override);
-  `docs/images/infrared.png`. Limit: RGB reflectances have no infrared character (pbrt's
-  sigmoid upsampling just extends the RGB curve), so foliage doesn't glow in IR (no Wood
-  effect); next step would be per-material infrared reflectance. IR renders are noisier
-  (uniform wavelength sampling).
+  `docs/images/infrared.png`. IR renders are noisier (uniform wavelength sampling).
+- Infrared reflectance (2026-11-26, pbrt patch 38): RGB reflectances just extend their red end
+  into the infrared (pbrt's sigmoid fit), so foliage stayed dark. A float shader input
+  `pbrt:irReflectance` (any node of the material's network; `pbrt:irEdge` nm, default 720) or a
+  constant geometry primvar `pbrt:irReflectance` / `pbrt_irReflectance` (SOP attribute name;
+  overrides the material, per object) sets the diffuse reflectance above the red edge; only
+  `diffuse` and `hdpbrtlayered` take it (`HdPbrt_MaterialLine`). The visible image is unchanged.
+  The "leaf" sphere and the ground in `tests/spectral/ir_scene.usda` use both routes. Blender's
+  Hydra export doesn't pass custom mesh attributes (checked), so Blender can't set it yet.
 - Not translated yet: in-memory Houdini volumes (`op:` paths). Volume materials other than
   the Karma pyro shader (e.g. MaterialX volumes on Volume prims) use the renderer settings.
 - Karma pyro shader (2026-11-25, pbrt patch 35): Houdini exports kma_pyroshader as a MaterialX

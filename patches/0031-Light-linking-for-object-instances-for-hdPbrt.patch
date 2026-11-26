@@ -1,7 +1,7 @@
 From 899a3778457d59ee497ec05dcb7febebc16310a9 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Wed, 25 Nov 2026 07:54:29 +0100
-Subject: [PATCH 31/32] Light linking for object instances (for hdPbrt)
+Subject: [PATCH 31/38] Light linking for object instances (for hdPbrt)
 
 ObjectInstance takes Attribute "shape" "integer hdpbrtlinks" [...]: the
 instance's own light-linking membership, OR'ed into the prototype shapes'

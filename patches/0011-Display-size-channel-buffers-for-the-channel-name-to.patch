@@ -1,7 +1,7 @@
 From a48c6bfdddb8c6fcc48f04641a75fa275a90df94 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sun, 22 Nov 2026 20:40:50 +0100
-Subject: [PATCH 11/11] Display: size channel buffers for the channel name too
+Subject: [PATCH 11/38] Display: size channel buffers for the channel name too
  (for hdPbrt)
 
 The update-image header holds the title and the channel name, but the buffer only

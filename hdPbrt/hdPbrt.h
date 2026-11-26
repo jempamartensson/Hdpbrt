@@ -198,6 +198,10 @@ struct HdPbrtMaterialDesc {
     // medium (pbrt patch 35) and the fields it reads. Empty: not a pyro material.
     std::string volumeParams;
     TfToken densityField, fireField;
+    // Infrared reflectance (pbrt patch 38): the diffuse reflectance above the
+    // red edge (nm), for infrared renders; < 0: the RGB fit continues.
+    float irReflectance = -1.f;
+    float irEdge = 720.f;
 };
 
 class HdPbrtMaterial final : public HdMaterial {
@@ -223,8 +227,9 @@ bool HdPbrt_PyroVolume(const HdMaterialNetwork2 &net, const HdMaterialNode2 &n,
                        SdfPath const &id, HdPbrtMaterialDesc *d);
 
 // Writes the pbrt "Material" line for a material (or the default material).
+// irReflectance >= 0 overrides the material's (a geometry primvar).
 std::string HdPbrt_MaterialLine(const HdPbrtMaterialDesc &m,
-                                const GfVec3f *displayColor);
+                                const GfVec3f *displayColor, float irReflectance = -1.f);
 HdPbrtMaterialDesc HdPbrt_DefaultMaterial();
 
 // ---------------------------------------------------------------------------
@@ -329,6 +334,7 @@ protected:
     GfVec3f _displayColor{0.18f, 0.18f, 0.18f};
     bool _hasDisplayColor = false;
     float _displayOpacity = 1.f;
+    float _irReflectance = -1.f;  // primvar pbrt:irReflectance, < 0: none
     bool _instanced = false;
     VtArray<TfToken> _categories;
 };
