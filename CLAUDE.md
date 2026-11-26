@@ -304,6 +304,21 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   COPs saved by Houdini's rop_image: pixel-identical; text upright), `tests/viewport/vp_cop.py`
   (live edit of a texture COP and a dome COP), `tests/viewport/vp_cop_frames.py` (animated COP
   through a Dome Light LOP at frames 3, 7, 3: exact in the viewport).
+- Houdini .ds files (done 2026-11-26, Jens's request): `tools/make_houdini_ds.py` (hython)
+  writes `houdini/soho/parameters/HdPbrtRendererPlugin_{Viewport,Global}.ds` from one settings
+  list (keep it in step with `_Init`); CMake installs them with `houdini/UsdRenderers.json`
+  into the install dir, which goes on HOUDINI_PATH (locally `~/dev/pbrt_hydra/houdini/soho` and
+  `UsdRenderers.json` link to install/houdini). OpenMoonRay (hdMoonray `plugin/houdini/`) only
+  ships a hand-written `_Viewport.ds` (parm names = the SetRenderSetting tokens) and a
+  UsdRenderers.json entry; the Render Settings LOP needs Karma's pattern: `_Global.ds` with
+  parm names `hou.text.encodeParm("pbrt:...")`, a `_control` parm each
+  (`loputils.createEditPropertiesControlMenu`) and `usdvaluetype` tags. Checked: the LOP gets a
+  **pbrt** tab, authors typed `pbrt:*` attributes on the RenderSettings prim, and the live
+  viewport passes them to the delegate (an exported scene had pixelsamples 8 / path). The
+  UsdRenderers.json entry is only `valid` + `menulabel` (flipbook pixel-identical without it;
+  other fields such as depthstyle left at Houdini's defaults, which work).
+- Requested 2026-11-26 (Jens, for tonight): (2) a switch on lights and the camera to work in nanometers
+  instead of RGB (spectral lights / a spectral camera response, e.g. infrared photography).
 - Not translated yet: in-memory Houdini volumes (`op:` paths). Volume materials other than
   the Karma pyro shader (e.g. MaterialX volumes on Volume prims) use the renderer settings.
 - Karma pyro shader (2026-11-25, pbrt patch 35): Houdini exports kma_pyroshader as a MaterialX

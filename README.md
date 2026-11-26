@@ -47,7 +47,11 @@ against Blender's `libusd_ms.so` with OpenUSD v26.08 source headers and the gene
 
 - **Houdini:** put a `dso/usd_plugins/plugInfo.json` that includes the install dir on
   `HOUDINI_PATH` (Houdini ignores `PXR_PLUGINPATH_NAME` set from a package), then pick
-  **pbrt** in the LOP viewport's renderer menu.
+  **pbrt** in the LOP viewport's renderer menu. Put the install dir itself on `HOUDINI_PATH`
+  too: its `soho/parameters/HdPbrtRendererPlugin_*.ds` add a **pbrt** tab to the Render
+  Settings LOP (`pbrt:*` attributes on the RenderSettings prim, used by the viewport and husk)
+  and pbrt settings to the viewport's display options; `UsdRenderers.json` names it in the
+  renderer menu.
 - **Blender 5.3:** install `blender/hydra_pbrt` as an add-on (its `plugin` folder points at
   the Blender build) and choose **Hydra pbrt** as the render engine.
 

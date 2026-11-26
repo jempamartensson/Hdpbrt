@@ -1,0 +1,127 @@
+# hython tools/make_houdini_ds.py
+# Writes houdini/soho/parameters/HdPbrtRendererPlugin_{Viewport,Global}.ds from
+# SETTINGS below (keep it in step with HdPbrtRenderDelegate::_Init). Houdini
+# finds the files by the Hydra plugin's name on HOUDINI_PATH:
+#   _Viewport.ds: the viewport's display options (renderer settings, sent to
+#                 the delegate with SetRenderSetting under the decoded name);
+#   _Global.ds:   the Render Settings LOP and Edit Properties: each setting is
+#                 a "pbrt:..." attribute on the RenderSettings prim, which
+#                 Houdini (viewport and husk) hands to the delegate.
+# Parm names are the setting names encoded with hou.text.encodeParm.
+import os
+import hou
+
+here = os.path.dirname(os.path.abspath(__file__))
+outdir = os.path.join(here, '..', 'houdini', 'soho', 'parameters')
+
+# name, label, type (int/float/bool/string/menu), default, range or menu, category, help
+SETTINGS = [
+    ('pbrt:pixelSamples', 'Pixel Samples', 'int', 256, (1, 4096), 'Sampling',
+     'Samples per pixel; the render stops there (the viewport refines progressively).'),
+    ('pbrt:sampler', 'Sampler', 'menu', 'zsobol',
+     ['zsobol', 'sobol', 'paddedsobol', 'halton', 'pmj02bn', 'stratified', 'independent'],
+     'Sampling', "pbrt's sampler."),
+    ('pbrt:maxDepth', 'Max Depth', 'int', 5, (1, 64), 'Integrator',
+     'Maximum path length (1 = direct lighting only).'),
+    ('pbrt:integrator', 'Integrator', 'menu', 'volpath',
+     ['volpath', 'path', 'bdpt', 'mlt', 'sppm', 'simplepath', 'simplevolpath', 'lightpath',
+      'ambientocclusion', 'randomwalk'],
+     'Integrator', "pbrt's integrator. volpath handles media, light linking and all hdPbrt features."),
+    ('pbrt:regularize', 'Regularize BSDFs', 'bool', False, None, 'Integrator',
+     'Roughen near-specular BSDFs after the first diffuse bounce (fewer caustic fireflies, biased).'),
+    ('pbrt:depthOfField', 'Depth of Field', 'bool', True, None, 'Camera',
+     "Thin-lens depth of field from the camera's fStop and focusDistance."),
+    ('pbrt:motionBlur', 'Motion Blur', 'bool', True, None, 'Motion Blur',
+     "Transform and deformation blur over the camera's shutter."),
+    ('pbrt:xformSamples', 'Transform Motion Samples', 'int', 2, (2, 16), 'Motion Blur',
+     'Transform keys over the shutter (more than 2 follow curved motion).'),
+    ('pbrt:geoSamples', 'Deformation Motion Samples', 'int', 2, (2, 16), 'Motion Blur',
+     'Point-position keys over the shutter for deforming meshes.'),
+    ('pbrt:subdivLevel', 'Subdivision Level', 'int', 2, (0, 6), 'Geometry',
+     'Refinement level for catmullClark/loop meshes (0 = the cage).'),
+    ('pbrt:volumeDensity', 'Volume Density Scale', 'float', 1.0, (0, 10), 'Volumes',
+     'Density scale for volumes without a pyro shader.'),
+    ('pbrt:volumeAlbedo', 'Volume Albedo', 'float', 0.9, (0, 1), 'Volumes',
+     'Single-scattering albedo for volumes without a pyro shader.'),
+    ('pbrt:volumeTemperatureScale', 'Volume Temperature Scale', 'float', 0.0, (0, 5000), 'Volumes',
+     'Kelvin per unit of a temperature field (0 = no emission) for volumes without a pyro shader.'),
+    ('pbrt:threads', 'Threads', 'int', 0, (0, 256), 'System',
+     'Render threads (0 = all but two cores).'),
+    ('pbrt:exportPath', 'Export .pbrt Scene To', 'file', '', None, 'System',
+     'Also write the pbrt scene (with its PLY meshes) here.'),
+]
+
+VALUE_TYPE = {'int': 'int', 'float': 'float', 'bool': 'bool', 'string': 'string', 'menu': 'token',
+              'file': 'string'}
+PARM_TYPE = {'int': 'integer', 'float': 'float', 'bool': 'toggle', 'string': 'string',
+             'menu': 'string', 'file': 'file'}
+
+
+def q(s):
+    return '"%s"' % str(s).replace('\\', '\\\\').replace('"', '\\"')
+
+
+def value_parm(name, label, kind, default, extra, category, help, scope, usd):
+    enc = hou.text.encodeParm(name)
+    lines = ['    parm {', '        name    %s' % q(enc), '        label   %s' % q(label),
+             '        type    %s' % PARM_TYPE[kind], '        size    1']
+    if kind == 'bool':
+        lines.append('        default { %d }' % int(default))
+    elif kind in ('int', 'float'):
+        lines.append('        default { %s }' % default)
+        if extra:
+            lines.append('        range   { %s %s }' % extra)
+    else:
+        lines.append('        default { %s }' % q(default))
+    if kind == 'menu':
+        lines.append('        menu {')
+        for m in extra:
+            lines.append('            %s %s' % (q(m), q(m)))
+        lines.append('        }')
+    lines.append('        help    %s' % q(help))
+    lines.append('        parmtag { "spare_category" %s }' % q(category))
+    lines.append('        parmtag { "uiscope" %s }' % q(scope))
+    lines.append('        parmtag { "usdvaluetype" %s }' % q(VALUE_TYPE[kind]))
+    if usd:
+        c = hou.text.encodeParm(name + '_control')
+        lines.append('        disablewhen "{ %s == block } { %s == none }"' % (c, c))
+    lines.append('    }')
+    return lines
+
+
+def control_parm(name, label, kind):
+    vt = {'int': 'int', 'float': 'float', 'bool': 'bool'}.get(kind, 'string')
+    return ['    parm {', '        name    %s' % q(hou.text.encodeParm(name + '_control')),
+            '        label   %s' % q(label), '        type    string',
+            '        default { "none" }', '        menujoin {',
+            '            [ "import loputils" ]',
+            '            [ "return loputils.createEditPropertiesControlMenu(kwargs, %s)" ]' % q(vt).replace('"', "'"),
+            '            language python', '        }', '        parmtag { "sidefx::look" "icon" }',
+            '    }']
+
+
+def write(fname, header, usd):
+    out = ['/// Generated by tools/make_houdini_ds.py; edit that, not this file.', header,
+           '#include "$HFS/houdini/soho/parameters/CommonMacros.ds"', '{',
+           '    name    "pbrt"', '    label   "pbrt"',
+           '    parmtag { spare_opfilter "!!SHOP/PROPERTIES!!" }',
+           '    parmtag { spare_classtags "render" }', '']
+    for name, label, kind, default, extra, category, help in SETTINGS:
+        if usd:
+            out += control_parm(name, label, kind)
+        out += value_parm(name, label, kind, default, extra, category, help,
+                          'viewport', usd)
+        out.append('')
+    out.append('}')
+    path = os.path.join(outdir, fname)
+    with open(path, 'w') as f:
+        f.write('\n'.join(out) + '\n')
+    print('wrote', os.path.normpath(path))
+
+
+os.makedirs(outdir, exist_ok=True)
+write('HdPbrtRendererPlugin_Viewport.ds',
+      '/// hdPbrt renderer settings in the viewport display options (SetRenderSetting).', False)
+write('HdPbrtRendererPlugin_Global.ds',
+      '/// hdPbrt render settings for the Render Settings LOP ("pbrt:*" attributes on the\n'
+      '/// RenderSettings prim).', True)

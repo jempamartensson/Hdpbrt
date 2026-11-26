@@ -1,0 +1,6 @@
+{
+    "HdPbrtRendererPlugin": {
+        "valid": true,
+        "menulabel": "pbrt"
+    }
+}
