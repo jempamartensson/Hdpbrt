@@ -63,6 +63,7 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((volumeAlbedo, "pbrt:volumeAlbedo"))       \
     ((volumeTemperatureScale, "pbrt:volumeTemperatureScale")) \
     ((exportPath, "pbrt:exportPath"))           \
+    ((materialPreview, "pbrt:materialPreview")) \
     ((pbrtExecutable, "pbrt:executable"))       \
     ((workingSpace, "pbrt:workingSpace"))
 
@@ -211,16 +212,20 @@ public:
               HdDirtyBits *dirtyBits) override;
     HdDirtyBits GetInitialDirtyBitsMask() const override { return AllDirty; }
 
-    HdPbrtMaterialDesc GetDesc() const {
-        std::lock_guard<std::mutex> l(_mutex);
-        return _desc;
-    }
+    // The description to render: the preview one under pbrt:materialPreview.
+    HdPbrtMaterialDesc GetDesc() const;
 
 private:
+    HdPbrtMaterialDesc _Build(VtValue const &materialResource) const;
+
     HdPbrtRenderDelegate *_delegate;
     mutable std::mutex _mutex;
     HdPbrtMaterialDesc _desc;
+    HdPbrtMaterialDesc _previewDesc;  // from the universal context (UsdPreviewSurface)
 };
+
+// True while HdPbrtMaterial fetches its preview network (material.cpp).
+bool HdPbrt_PreviewContexts();
 
 // Karma pyro shader node -> HdPbrtMaterialDesc volume fields (material.cpp).
 bool HdPbrt_PyroVolume(const HdMaterialNetwork2 &net, const HdMaterialNode2 &n,

@@ -193,6 +193,18 @@
     }
 
     parm {
+        name    "xn__pbrtmaterialPreview_y6a"
+        label   "Material Preview"
+        type    toggle
+        size    1
+        default { 0 }
+        help    "Render materials' UsdPreviewSurface (e.g. the preview a Karma Material Builder writes) instead of their MaterialX / Karma graph, to compare."
+        parmtag { "spare_category" "Materials" }
+        parmtag { "uiscope" "viewport" }
+        parmtag { "usdvaluetype" "bool" }
+    }
+
+    parm {
         name    "xn__pbrtthreads_xta"
         label   "Threads"
         type    integer

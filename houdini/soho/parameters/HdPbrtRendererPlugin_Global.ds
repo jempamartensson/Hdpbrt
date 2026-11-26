@@ -363,6 +363,31 @@
     }
 
     parm {
+        name    "xn__pbrtmaterialPreview_control_zkb"
+        label   "Material Preview"
+        type    string
+        default { "none" }
+        menujoin {
+            [ "import loputils" ]
+            [ "return loputils.createEditPropertiesControlMenu(kwargs, 'bool')" ]
+            language python
+        }
+        parmtag { "sidefx::look" "icon" }
+    }
+    parm {
+        name    "xn__pbrtmaterialPreview_y6a"
+        label   "Material Preview"
+        type    toggle
+        size    1
+        default { 0 }
+        help    "Render materials' UsdPreviewSurface (e.g. the preview a Karma Material Builder writes) instead of their MaterialX / Karma graph, to compare."
+        parmtag { "spare_category" "Materials" }
+        parmtag { "uiscope" "viewport" }
+        parmtag { "usdvaluetype" "bool" }
+        disablewhen "{ xn__pbrtmaterialPreview_control_zkb == block } { xn__pbrtmaterialPreview_control_zkb == none }"
+    }
+
+    parm {
         name    "xn__pbrtthreads_control_y6a"
         label   "Threads"
         type    string

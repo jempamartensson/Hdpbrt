@@ -908,15 +908,57 @@ bool HdPbrt_PyroVolume(const HdMaterialNetwork2 &net, const HdMaterialNode2 &n,
 HdPbrtMaterial::HdPbrtMaterial(SdfPath const &id, HdPbrtRenderDelegate *delegate)
     : HdMaterial(id), _delegate(delegate) {}
 
+// GetMaterialRenderContexts() order for the material being fetched on this
+// thread: the normal one, or the universal context (UsdPreviewSurface) first.
+static thread_local bool t_previewContexts = false;
+
+bool HdPbrt_PreviewContexts() { return t_previewContexts; }
+
 void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
                           HdDirtyBits *dirtyBits)
 {
     static_cast<HdPbrtRenderParam *>(renderParam)->Edit();
     t_workingSpace = _delegate ? _delegate->GetWorkingSpace() : HdPbrtWorkingSpace();
-    HdPbrtMaterialDesc result = HdPbrt_DefaultMaterial();
-
-    HdPbrtMaterialDesc volume;  // volume shading (pyro), merged into result
+    // Both versions of the material, so pbrt:materialPreview can switch
+    // without fetching materials again (Hydra resolves the render context
+    // when the material is fetched; GetMaterialRenderContexts reads the flag).
     VtValue res = sceneDelegate->GetMaterialResource(GetId());
+    t_previewContexts = true;
+    VtValue previewRes = sceneDelegate->GetMaterialResource(GetId());
+    t_previewContexts = false;
+    HdPbrtMaterialDesc result = _Build(res);
+    HdPbrtMaterialDesc preview = previewRes == res ? result : _Build(previewRes);
+    // The Karma pyro shader is recognized as the one node it is in the
+    // universal network; its kma network arrives flattened into plain
+    // MaterialX nodes. Both versions take the pyro volume from either.
+    for (auto *d : {&result, &preview}) {
+        const HdPbrtMaterialDesc &o = d == &result ? preview : result;
+        if (d->volumeParams.empty() && !o.volumeParams.empty()) {
+            d->volumeParams = o.volumeParams;
+            d->densityField = o.densityField;
+            d->fireField = o.fireField;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> l(_mutex);
+        _desc = result;
+        _previewDesc = preview;
+    }
+    *dirtyBits = HdMaterial::Clean;
+}
+
+HdPbrtMaterialDesc HdPbrtMaterial::GetDesc() const
+{
+    const bool preview =
+        _delegate && _delegate->GetSetting<bool>(HdPbrtSettingsTokens->materialPreview, false);
+    std::lock_guard<std::mutex> l(_mutex);
+    return preview ? _previewDesc : _desc;
+}
+
+HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
+{
+    HdPbrtMaterialDesc result = HdPbrt_DefaultMaterial();
+    HdPbrtMaterialDesc volume;  // volume shading (pyro), merged into result
     if (res.IsHolding<HdMaterialNetworkMap>()) {
         bool isVolume = false;
         HdMaterialNetwork2 net2 =
@@ -1423,11 +1465,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
     result.volumeParams = volume.volumeParams;
     result.densityField = volume.densityField;
     result.fireField = volume.fireField;
-    {
-        std::lock_guard<std::mutex> l(_mutex);
-        _desc = result;
-    }
-    *dirtyBits = HdMaterial::Clean;
+    return result;
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

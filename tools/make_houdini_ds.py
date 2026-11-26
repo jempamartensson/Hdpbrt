@@ -49,6 +49,9 @@ SETTINGS = [
      'Single-scattering albedo for volumes without a pyro shader.'),
     ('pbrt:volumeTemperatureScale', 'Volume Temperature Scale', 'float', 0.0, (0, 5000), 'Volumes',
      'Kelvin per unit of a temperature field (0 = no emission) for volumes without a pyro shader.'),
+    ('pbrt:materialPreview', 'Material Preview', 'bool', False, None, 'Materials',
+     "Render materials' UsdPreviewSurface (e.g. the preview a Karma Material Builder writes) "
+     'instead of their MaterialX / Karma graph, to compare.'),
     ('pbrt:threads', 'Threads', 'int', 0, (0, 256), 'System',
      'Render threads (0 = all but two cores).'),
     ('pbrt:exportPath', 'Export .pbrt Scene To', 'file', '', None, 'System',

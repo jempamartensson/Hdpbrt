@@ -129,6 +129,8 @@ void HdPbrtRenderDelegate::_Init()
     add("Volume Temperature Scale (Kelvin per unit, 0 = no emission)",
         HdPbrtSettingsTokens->volumeTemperatureScale, VtValue(0.f));
     add("Export .pbrt Scene To", HdPbrtSettingsTokens->exportPath, VtValue(std::string()));
+    add("Material Preview (UsdPreviewSurface instead of MaterialX / Karma graphs)",
+        HdPbrtSettingsTokens->materialPreview, VtValue(false));
     _PopulateDefaultSettings(_settingDescriptors);
 
     std::string base = TfGetenv("HDPBRT_TMPDIR");
@@ -188,7 +190,12 @@ void HdPbrtRenderDelegate::SetRenderSetting(TfToken const &key, VtValue const &v
             if (d.key == ns)
                 k = ns;
     }
+    const bool preview = k == HdPbrtSettingsTokens->materialPreview;
+    const bool before = preview && GetSetting<bool>(k, false);
     HdRenderDelegate::SetRenderSetting(k, value);
+    // Materials hold both versions (HdPbrtMaterial::GetDesc): write the scene again.
+    if (preview && before != GetSetting<bool>(k, false))
+        _renderParam->Edit();
 }
 
 template <typename T>
@@ -257,9 +264,15 @@ HdAovDescriptor HdPbrtRenderDelegate::GetDefaultAovDescriptor(TfToken const &nam
 
 TfTokenVector HdPbrtRenderDelegate::GetMaterialRenderContexts() const
 {
-    // "kma" last: only Karma-specific terminals no other context provides,
-    // such as the Karma pyro shader's kma:volume.
-    return {TfToken("mtlx"), TfToken(), TfToken("kma")};
+    // Hydra takes the first context a material has. MaterialX ("mtlx"), then
+    // Karma's ("kma": a Karma Material Builder's MaterialX graph, the pyro
+    // shader's kma:volume), then the universal one (UsdPreviewSurface, which
+    // a Karma Material Builder also writes as a simplified preview).
+    // HdPbrtMaterial also fetches each material with the universal context
+    // first, for pbrt:materialPreview.
+    if (HdPbrt_PreviewContexts())
+        return {TfToken(), TfToken("mtlx"), TfToken("kma")};
+    return {TfToken("mtlx"), TfToken("kma"), TfToken()};
 }
 
 HdRenderPassSharedPtr HdPbrtRenderDelegate::CreateRenderPass(HdRenderIndex *index,

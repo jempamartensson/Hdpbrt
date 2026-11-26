@@ -62,7 +62,8 @@ Render settings: `pbrt:pixelSamples`, `pbrt:maxDepth`, `pbrt:integrator`, `pbrt:
 `pbrt:subdivLevel` (uniform subdivision of catmullClark/loop meshes, default 2, 0 = off),
 `enableExposureCompensation` (apply the camera's exposure, default on),
 `pbrt:volumeDensity` (1), `pbrt:volumeAlbedo` (0.9), `pbrt:volumeTemperatureScale` (0: no emission),
-`pbrt:exportPath`.
+`pbrt:materialPreview` (render materials' UsdPreviewSurface instead of their MaterialX or Karma
+Material Builder graph, to compare; default off), `pbrt:exportPath`.
 
 Environment: `HDPBRT_PBRT_EXECUTABLE`, `HDPBRT_TMPDIR`, `HDPBRT_KEEP_TMP=1`,
 `HDPBRT_DEBUG=1` (prints AOV bindings and mesh primvars), `HDPBRT_REVERSED_DEPTH=0/1`

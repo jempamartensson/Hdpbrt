@@ -366,15 +366,26 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   callback that sets the value to 0.6 (on) or back to the -1 default (off). Existing nodes:
   `hdpbrt_houdini.add_material_parms(hou.selectedNodes())`. `_Geometry.ds` gives the Render
   Geometry Settings LOP `primvars:pbrt:irReflectance` (constant). Checked in hython: plain
-  Material Library MaterialX shader -> `"float hdpbrtir" 0.6` in the pbrt scene. Not through a
-  Karma Material Builder: its MaterialX graph is on `outputs:kma:surface` and hdPbrt asks for
-  "kma" after the universal context, so it gets the builder's UsdPreviewSurface (an older issue:
-  such materials render as their preview in hdPbrt).
+  Material Library MaterialX shader -> `"float hdpbrtir" 0.6` in the pbrt scene.
+- Material render contexts (2026-11-26, Jens: "try and switch, maybe add a toggle"): a Karma
+  Material Builder writes its MaterialX graph on `outputs:kma:surface` plus a UsdPreviewSurface
+  on `outputs:surface`. hdPbrt asked for mtlx, universal, kma, so such materials rendered as their
+  preview. Now mtlx, kma, universal. `pbrt:materialPreview` (render setting, Materials) renders
+  the universal context (UsdPreviewSurface) first, to compare. The delegate can't mark sprims
+  dirty under scene indices ("requires emulation"), so `HdPbrtMaterial::Sync` fetches each
+  material twice (a thread_local flag flips `GetMaterialRenderContexts`, which Hydra reads per
+  fetch; `HdPbrt_PreviewContexts`) and keeps both descriptions; `GetDesc` picks by the setting
+  and changing it only rewrites the scene. Checked in one session: builder material default ->
+  its graph (with `hdpbrtir`), preview -> the UsdPreviewSurface, back -> the graph.
+  The Karma pyro shader's kma network arrives flattened (100+ MaterialX nodes); `HdPbrt_PyroVolume`
+  only recognizes the single pyro node of the universal network, so both descriptions take the
+  pyro volume from whichever version has it (kma-first alone made every pyro frame plain smoke;
+  run_pyro.sh caught it, now identical to PYRO_RESULTS.txt).
 - Not translated yet: in-memory Houdini volumes (`op:` paths). Volume materials other than
   the Karma pyro shader (e.g. MaterialX volumes on Volume prims) use the renderer settings.
 - Karma pyro shader (2026-11-25, pbrt patch 35): Houdini exports kma_pyroshader as a MaterialX
-  graph behind `outputs:kma:volume`; hdPbrt now asks for the "kma" render context (last, after
-  mtlx and universal). Hydra delivers the pyro nodegraph as one node with the shader's own
+  graph behind `outputs:kma:volume`; hdPbrt now asks for the "kma" render context (after
+  mtlx; before universal since 2026-11-26). Hydra delivers the pyro nodegraph as one node with the shader's own
   parameters (`HDPBRT_DUMP_MATERIALS=1` prints networks), recognized by `enablesmoke` /
   `densityscale` / `firetempscale` (`HdPbrt_PyroVolume`, material.cpp): extinction = density x
   densityscale x complement(absorpcolor) (Karma's hmtlxcomplementcolor: same luminance,
