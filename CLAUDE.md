@@ -172,6 +172,9 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
   `systemd-run --user --scope -p MemoryMax=64G -p MemorySwapMax=0 ...`. No sudo.
 - **Never `ninja install` over `install/houdini/hdPbrt.so` while Houdini runs**, because it
   overwrites the mapped file. Build, then `cp` to a temp name and `mv` it over the old one.
+  `ninja install` rewrites hdPbrt.so in place even right after such a `mv` (CMake compares
+  timestamps): to install the Houdini UI files (soho/, UsdRenderers.json) while Houdini runs,
+  copy them by hand instead.
   Jens has to restart Houdini to load a new build.
 - Never use `pkill -f` with a pattern that also appears in your own command line, because it
   kills your shell. Kill by PID.
