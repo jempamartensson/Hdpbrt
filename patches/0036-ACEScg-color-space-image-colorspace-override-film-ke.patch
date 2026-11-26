@@ -1,0 +1,516 @@
+From 79478dab269e0c12e3c1f4c97b46f961389da8a9 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Thu, 26 Nov 2026 07:50:47 +0100
+Subject: [PATCH] ACEScg color space; image "colorspace" override; film keeps
+ its color space in PFMs (for hdPbrt)
+
+- RGBColorSpace::ACEScg ("acescg": AP1 primaries, ACES white, its own
+  RGB-to-spectrum table from rgb2spec_opt, which learns the ACEScg gamut),
+  also found by Lookup from EXR chromaticities.
+- imagemap textures, diffuse area lights and infinite lights take
+  "string colorspace": the image's RGB primaries, overriding the file's
+  metadata (which defaults to sRGB primaries).
+- RGBFilm "bool hdpbrtkeepcolorspace": a PFM is written in the film's color
+  space (Image::Write converts formats without color metadata to sRGB; the
+  display stream never did).
+---
+ CMakeLists.txt                |  5 +++++
+ src/pbrt/cmd/imgtool.cpp      |  2 ++
+ src/pbrt/cmd/rgb2spec_opt.cpp | 20 +++++++++++++++++++-
+ src/pbrt/film.cpp             |  7 ++++++-
+ src/pbrt/film.h               |  4 ++++
+ src/pbrt/lights.cpp           | 15 +++++++++++++++
+ src/pbrt/textures.cpp         | 11 ++++++++++-
+ src/pbrt/textures.h           | 26 +++++++++++++++++---------
+ src/pbrt/util/color.cpp       | 24 ++++++++++++++++++++++++
+ src/pbrt/util/color.h         |  1 +
+ src/pbrt/util/colorspace.cpp  | 12 +++++++++++-
+ src/pbrt/util/colorspace.h    |  3 ++-
+ src/pbrt/util/image.h         |  5 +++++
+ src/pbrt/util/mipmap.cpp      |  9 +++++++--
+ src/pbrt/util/mipmap.h        |  3 ++-
+ 15 files changed, 130 insertions(+), 17 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e3594a0..702a9f9 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -852,6 +852,7 @@ add_library (pbrt_lib STATIC
+   ${CMAKE_CURRENT_BINARY_DIR}/rgbspectrum_dci_p3.cpp
+   ${CMAKE_CURRENT_BINARY_DIR}/rgbspectrum_rec2020.cpp
+   ${CMAKE_CURRENT_BINARY_DIR}/rgbspectrum_aces.cpp
++  ${CMAKE_CURRENT_BINARY_DIR}/rgbspectrum_acescg.cpp
+   ${PBRT_SOA_GENERATED}
+   ${PBRT_SOURCE}
+   ${PBRT_SOURCE_HEADERS}
+@@ -959,6 +960,10 @@ if (NOT PBRT_USE_PREGENERATED_RGB_TO_SPECTRUM_TABLES)
+       COMMAND rgb2spec_opt 64 ${CMAKE_CURRENT_BINARY_DIR}/rgbspectrum_aces.cpp ACES2065_1 
+       DEPENDS rgb2spec_opt)
+ 
++  add_custom_command (OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/rgbspectrum_acescg.cpp
++      COMMAND rgb2spec_opt 64 ${CMAKE_CURRENT_BINARY_DIR}/rgbspectrum_acescg.cpp ACEScg
++      DEPENDS rgb2spec_opt)
++
+   add_custom_command (OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/rgbspectrum_dci_p3.cpp
+       COMMAND rgb2spec_opt 64 ${CMAKE_CURRENT_BINARY_DIR}/rgbspectrum_dci_p3.cpp DCI_P3
+       DEPENDS rgb2spec_opt)
+diff --git a/src/pbrt/cmd/imgtool.cpp b/src/pbrt/cmd/imgtool.cpp
+index feae4b0..9291484 100644
+--- a/src/pbrt/cmd/imgtool.cpp
++++ b/src/pbrt/cmd/imgtool.cpp
+@@ -1248,6 +1248,8 @@ static void printImageStats(const char *name, const Image &image,
+             printf("rec2020");
+         else if (**metadata.colorSpace == *RGBColorSpace::ACES2065_1)
+             printf("ACES");
++        else if (**metadata.colorSpace == *RGBColorSpace::ACEScg)
++            printf("ACEScg");
+         else {
+             const RGBColorSpace &cs = **metadata.colorSpace;
+             printf(" r: %f %f g: %f %f b: %f %f w: %f %f", cs.r.x, cs.r.y, cs.g.x, cs.g.y,
+diff --git a/src/pbrt/cmd/rgb2spec_opt.cpp b/src/pbrt/cmd/rgb2spec_opt.cpp
+index 52e703b..0f7277f 100644
+--- a/src/pbrt/cmd/rgb2spec_opt.cpp
++++ b/src/pbrt/cmd/rgb2spec_opt.cpp
+@@ -230,6 +230,15 @@ const double aces2065_1_to_xyz[3][3] = {{0.9525523959, 0.0000000000, 0.000093678
+                                         {0.3439664498, 0.7281660966, -0.0721325464},
+                                         {0.0000000000, 0.0000000000, 1.0088251844}};
+ 
++// ACEScg (AP1 primaries, ACES white point)
++const double xyz_to_acescg[3][3] = {{1.6410233797, -0.3248032942, -0.2364246952},
++                                    {-0.6636628587, 1.6153315917, 0.0167563477},
++                                    {0.0117218943, -0.0082844420, 0.9883948585}};
++
++const double acescg_to_xyz[3][3] = {{0.6624541811, 0.1340042065, 0.1561876870},
++                                    {0.2722287168, 0.6740817658, 0.0536895174},
++                                    {-0.0055746495, 0.0040607335, 1.0103391003}};
++
+ const double xyz_to_rec2020[3][3] = {{1.7166511880, -0.3556707838, -0.2533662814},
+                                      {-0.6666843518, 1.6164812366, 0.0157685458},
+                                      {0.0176398574, -0.0427706133, 0.9421031212}};
+@@ -352,6 +361,7 @@ enum Gamut {
+     SRGB,
+     ProPhotoRGB,
+     ACES2065_1,
++    ACESCG,
+     REC2020,
+     ERGB,
+     XYZ,
+@@ -444,6 +454,12 @@ void init_tables(Gamut gamut) {
+         memcpy(rgb_to_xyz, aces2065_1_to_xyz, sizeof(double) * 9);
+         break;
+ 
++    case ACESCG:
++        illuminant = cie_d60;
++        memcpy(xyz_to_rgb, xyz_to_acescg, sizeof(double) * 9);
++        memcpy(rgb_to_xyz, acescg_to_xyz, sizeof(double) * 9);
++        break;
++
+     case REC2020:
+         illuminant = cie_d65;
+         memcpy(xyz_to_rgb, xyz_to_rec2020, sizeof(double) * 9);
+@@ -580,6 +596,8 @@ static Gamut parse_gamut(const char *str) {
+         return ProPhotoRGB;
+     if (!strcasecmp(str, "ACES2065_1"))
+         return ACES2065_1;
++    if (!strcasecmp(str, "ACEScg"))
++        return ACESCG;
+     if (!strcasecmp(str, "REC2020"))
+         return REC2020;
+     if (!strcasecmp(str, "DCI_P3"))
+@@ -791,7 +809,7 @@ int main(int argc, char **argv) {
+     if (argc < 3) {
+         printf("Syntax: rgb2spec_opt <resolution> <output> [<gamut>]\n"
+                "where <gamut> is one of "
+-               "sRGB,eRGB,XYZ,ProPhotoRGB,ACES2065_1,REC2020,DCI_P3\n");
++               "sRGB,eRGB,XYZ,ProPhotoRGB,ACES2065_1,ACEScg,REC2020,DCI_P3\n");
+         exit(-1);
+     }
+     Gamut gamut = SRGB;
+diff --git a/src/pbrt/film.cpp b/src/pbrt/film.cpp
+index cb6a560..42ccedb 100644
+--- a/src/pbrt/film.cpp
++++ b/src/pbrt/film.cpp
+@@ -529,7 +529,10 @@ PBRT_CPU_GPU void RGBFilm::AddSplat(Point2f p, SampledSpectrum L, const SampledW
+ void RGBFilm::WriteImage(ImageMetadata metadata, Float splatScale) {
+     Image image = GetImage(&metadata, splatScale);
+     LOG_VERBOSE("Writing image %s with bounds %s", filename, pixelBounds);
+-    image.Write(filename, metadata);
++    if (keepColorSpace && HasExtension(filename, "pfm"))
++        image.WritePFMKeepColorSpace(filename, metadata);
++    else
++        image.Write(filename, metadata);
+ }
+ 
+ Image RGBFilm::GetImage(ImageMetadata *metadata, Float splatScale) {
+@@ -1087,6 +1090,8 @@ Film Film::Create(const std::string &name, const ParameterDictionary &parameters
+             rgbFilm->EnableIds(cameraFromRender);
+         if (writeAlpha)
+             rgbFilm->EnableAlpha();
++        if (parameters.GetOneBool("hdpbrtkeepcolorspace", false))
++            rgbFilm->KeepColorSpace();
+         film = rgbFilm;
+     }
+     else if (name == "gbuffer")
+diff --git a/src/pbrt/film.h b/src/pbrt/film.h
+index 1f7f5b7..3ea12bc 100644
+--- a/src/pbrt/film.h
++++ b/src/pbrt/film.h
+@@ -289,6 +289,9 @@ class RGBFilm : public FilmBase {
+     bool WritesDepth() const { return writeDepth; }
+     bool WritesAlpha() const { return writeAlpha; }
+     void EnableAlpha() { writeAlpha = true; }
++    // hdPbrt: write a PFM in the film's color space (pbrt converts formats
++    // without color metadata to sRGB; the display stream is never converted).
++    void KeepColorSpace() { keepColorSpace = true; }
+     bool WritesIds() const { return writeIds; }
+     void EnableDepth(const Transform &camFromRender) {
+         writeDepth = true;
+@@ -366,6 +369,7 @@ class RGBFilm : public FilmBase {
+     SquareMatrix<3> outputRGBFromSensorRGB;
+     Array2D<Pixel> pixels;
+     bool writeDepth = false, writeIds = false, writeAlpha = false;
++    bool keepColorSpace = false;
+     Transform cameraFromRender;
+ };
+ 
+diff --git a/src/pbrt/lights.cpp b/src/pbrt/lights.cpp
+index e5262ae..7a2163f 100644
+--- a/src/pbrt/lights.cpp
++++ b/src/pbrt/lights.cpp
+@@ -911,6 +911,19 @@ std::string DiffuseAreaLight::ToString() const {
+                         twoSided ? "true" : "false", area, image);
+ }
+ 
++// hdPbrt: "string colorspace" names the RGB primaries of a light's image,
++// overriding the file's metadata (which defaults to sRGB primaries).
++static void HdPbrtImageColorSpace(const ParameterDictionary &parameters,
++                                  const FileLoc *loc, ImageMetadata *metadata) {
++    std::string cs = parameters.GetOneString("colorspace", "");
++    if (cs.empty())
++        return;
++    const RGBColorSpace *colorSpace = RGBColorSpace::GetNamed(cs);
++    if (!colorSpace)
++        ErrorExit(loc, "%s: color space unknown", cs);
++    metadata->colorSpace = colorSpace;
++}
++
+ DiffuseAreaLight *DiffuseAreaLight::Create(const Transform &renderFromLight,
+                                            Medium medium,
+                                            const ParameterDictionary &parameters,
+@@ -928,6 +941,7 @@ DiffuseAreaLight *DiffuseAreaLight::Create(const Transform &renderFromLight,
+         if (L)
+             ErrorExit(loc, "Both \"L\" and \"filename\" specified for DiffuseAreaLight.");
+         ImageAndMetadata im = Image::Read(filename, alloc);
++        HdPbrtImageColorSpace(parameters, loc, &im.metadata);
+ 
+         if (im.image.HasAnyInfinitePixels())
+             ErrorExit(
+@@ -1656,6 +1670,7 @@ Light Light::Create(const std::string &name, const ParameterDictionary &paramete
+                             imageAndMetadata.image.SetChannel({x, y}, c, rgb[c]);
+             } else {
+                 imageAndMetadata = Image::Read(filename, alloc);
++                HdPbrtImageColorSpace(parameters, loc, &imageAndMetadata.metadata);
+ 
+                 if (imageAndMetadata.image.HasAnyInfinitePixels())
+                     ErrorExit(loc,
+diff --git a/src/pbrt/textures.cpp b/src/pbrt/textures.cpp
+index 0c96e88..e75c82c 100644
+--- a/src/pbrt/textures.cpp
++++ b/src/pbrt/textures.cpp
+@@ -471,9 +471,18 @@ SpectrumImageTexture *SpectrumImageTexture::Create(
+     std::string encodingString = parameters.GetOneString("encoding", defaultEncoding);
+     ColorEncoding encoding = ColorEncoding::Get(encodingString, alloc);
+ 
++    // "colorspace": the RGB primaries of the image's values (hdPbrt), else the
++    // file's metadata (sRGB when it has none).
++    const RGBColorSpace *colorSpace = nullptr;
++    if (std::string cs = parameters.GetOneString("colorspace", ""); !cs.empty()) {
++        colorSpace = RGBColorSpace::GetNamed(cs);
++        if (!colorSpace)
++            ErrorExit(loc, "%s: color space unknown", cs);
++    }
++
+     return alloc.new_object<SpectrumImageTexture>(map, filename, filterOptions, *wrapMode,
+                                                   scale, invert, encoding, spectrumType,
+-                                                  alloc);
++                                                  alloc, colorSpace);
+ }
+ 
+ // MarbleTexture Method Definitions
+diff --git a/src/pbrt/textures.h b/src/pbrt/textures.h
+index 4a074e9..458777e 100644
+--- a/src/pbrt/textures.h
++++ b/src/pbrt/textures.h
+@@ -505,12 +505,16 @@ class FBmTexture {
+ struct TexInfo {
+     // TexInfo Public Methods
+     TexInfo(const std::string &f, MIPMapFilterOptions filterOptions, WrapMode wm,
+-            ColorEncoding encoding)
+-        : filename(f), filterOptions(filterOptions), wrapMode(wm), encoding(encoding) {}
++            ColorEncoding encoding, const RGBColorSpace *colorSpace = nullptr)
++        : filename(f),
++          filterOptions(filterOptions),
++          wrapMode(wm),
++          encoding(encoding),
++          colorSpace(colorSpace) {}
+ 
+     bool operator<(const TexInfo &t) const {
+-        return std::tie(filename, filterOptions, encoding, wrapMode) <
+-               std::tie(t.filename, t.filterOptions, t.encoding, t.wrapMode);
++        return std::tie(filename, filterOptions, encoding, wrapMode, colorSpace) <
++               std::tie(t.filename, t.filterOptions, t.encoding, t.wrapMode, t.colorSpace);
+     }
+ 
+     std::string ToString() const;
+@@ -519,6 +523,7 @@ struct TexInfo {
+     MIPMapFilterOptions filterOptions;
+     WrapMode wrapMode;
+     ColorEncoding encoding;
++    const RGBColorSpace *colorSpace;  // nullptr: the file's
+ };
+ 
+ // ImageTextureBase Definition
+@@ -527,10 +532,11 @@ class ImageTextureBase {
+     // ImageTextureBase Public Methods
+     ImageTextureBase(TextureMapping2D mapping, std::string filename,
+                      MIPMapFilterOptions filterOptions, WrapMode wrapMode, Float scale,
+-                     bool invert, ColorEncoding encoding, Allocator alloc)
++                     bool invert, ColorEncoding encoding, Allocator alloc,
++                     const RGBColorSpace *colorSpace = nullptr)
+         : mapping(mapping), filename(filename), scale(scale), invert(invert) {
+         // Get _MIPMap_ from texture cache if present
+-        TexInfo texInfo(filename, filterOptions, wrapMode, encoding);
++        TexInfo texInfo(filename, filterOptions, wrapMode, encoding, colorSpace);
+         std::unique_lock<std::mutex> lock(textureCacheMutex);
+         if (auto iter = textureCache.find(texInfo); iter != textureCache.end()) {
+             mipmap = iter->second;
+@@ -540,7 +546,8 @@ class ImageTextureBase {
+ 
+         // Create _MIPMap_ for _filename_ and add to texture cache
+         mipmap =
+-            MIPMap::CreateFromFile(filename, filterOptions, wrapMode, encoding, alloc);
++            MIPMap::CreateFromFile(filename, filterOptions, wrapMode, encoding, alloc,
++                                   colorSpace);
+         lock.lock();
+         // This is actually ok, but if it hits, it means we've wastefully
+         // loaded this texture. (Note that in that case, should just return
+@@ -604,9 +611,10 @@ class SpectrumImageTexture : public ImageTextureBase {
+     SpectrumImageTexture(TextureMapping2D mapping, std::string filename,
+                          MIPMapFilterOptions filterOptions, WrapMode wrapMode,
+                          Float scale, bool invert, ColorEncoding encoding,
+-                         SpectrumType spectrumType, Allocator alloc)
++                         SpectrumType spectrumType, Allocator alloc,
++                         const RGBColorSpace *colorSpace = nullptr)
+         : ImageTextureBase(mapping, filename, filterOptions, wrapMode, scale, invert,
+-                           encoding, alloc),
++                           encoding, alloc, colorSpace),
+           spectrumType(spectrumType) {}
+ 
+     PBRT_CPU_GPU
+diff --git a/src/pbrt/util/color.cpp b/src/pbrt/util/color.cpp
+index 3183e6f..d8c4862 100644
+--- a/src/pbrt/util/color.cpp
++++ b/src/pbrt/util/color.cpp
+@@ -91,6 +91,12 @@ extern const RGBToSpectrumTable::CoefficientArray ACES2065_1ToSpectrumTable_Data
+ 
+ const RGBToSpectrumTable *RGBToSpectrumTable::ACES2065_1;
+ 
++extern const int ACEScgToSpectrumTable_Res;
++extern const float ACEScgToSpectrumTable_Scale[64];
++extern const RGBToSpectrumTable::CoefficientArray ACEScgToSpectrumTable_Data;
++
++const RGBToSpectrumTable *RGBToSpectrumTable::ACEScg;
++
+ void RGBToSpectrumTable::Init(Allocator alloc) {
+ #if defined(PBRT_BUILD_GPU_RENDERER)
+     if (Options->useGPU) {
+@@ -149,6 +155,20 @@ void RGBToSpectrumTable::Init(Allocator alloc) {
+ 
+         ACES2065_1 = alloc.new_object<RGBToSpectrumTable>(
+             ACES2065_1ToSpectrumTableScalePtr, ACES2065_1ToSpectrumTableDataPtr);
++
++        // ACEScg
++        float *ACEScgToSpectrumTableScalePtr =
++            (float *)alloc.allocate_bytes(sizeof(ACEScgToSpectrumTable_Scale));
++        memcpy(ACEScgToSpectrumTableScalePtr, ACEScgToSpectrumTable_Scale,
++               sizeof(ACEScgToSpectrumTable_Scale));
++        RGBToSpectrumTable::CoefficientArray *ACEScgToSpectrumTableDataPtr =
++            (RGBToSpectrumTable::CoefficientArray *)alloc.allocate_bytes(
++                sizeof(ACEScgToSpectrumTable_Data));
++        memcpy(ACEScgToSpectrumTableDataPtr, ACEScgToSpectrumTable_Data,
++               sizeof(ACEScgToSpectrumTable_Data));
++
++        ACEScg = alloc.new_object<RGBToSpectrumTable>(ACEScgToSpectrumTableScalePtr,
++                                                      ACEScgToSpectrumTableDataPtr);
+         return;
+     }
+ #endif
+@@ -160,6 +180,8 @@ void RGBToSpectrumTable::Init(Allocator alloc) {
+                                                    &REC2020ToSpectrumTable_Data);
+     ACES2065_1 = alloc.new_object<RGBToSpectrumTable>(ACES2065_1ToSpectrumTable_Scale,
+                                                       &ACES2065_1ToSpectrumTable_Data);
++    ACEScg = alloc.new_object<RGBToSpectrumTable>(ACEScgToSpectrumTable_Scale,
++                                                  &ACEScgToSpectrumTable_Data);
+ }
+ 
+ std::string RGBToSpectrumTable::ToString() const {
+@@ -172,6 +194,8 @@ std::string RGBToSpectrumTable::ToString() const {
+         id = "(Rec2020) ";
+     else if (this == RGBToSpectrumTable::ACES2065_1)
+         id = "(ACES2065_1) ";
++    else if (this == RGBToSpectrumTable::ACEScg)
++        id = "(ACEScg) ";
+     CHECK(!id.empty());
+ 
+     return StringPrintf("[ RGBToSpectrumTable res: %d %s]", res, id);
+diff --git a/src/pbrt/util/color.h b/src/pbrt/util/color.h
+index bf51abc..ff48d5e 100644
+--- a/src/pbrt/util/color.h
++++ b/src/pbrt/util/color.h
+@@ -390,6 +390,7 @@ class RGBToSpectrumTable {
+     static const RGBToSpectrumTable *DCI_P3;
+     static const RGBToSpectrumTable *Rec2020;
+     static const RGBToSpectrumTable *ACES2065_1;
++    static const RGBToSpectrumTable *ACEScg;
+ 
+     std::string ToString() const;
+ 
+diff --git a/src/pbrt/util/colorspace.cpp b/src/pbrt/util/colorspace.cpp
+index aa6d5e5..df37c53 100644
+--- a/src/pbrt/util/colorspace.cpp
++++ b/src/pbrt/util/colorspace.cpp
+@@ -16,6 +16,7 @@ PBRT_CONST RGBColorSpace *RGBColorSpace_sRGB;
+ PBRT_CONST RGBColorSpace *RGBColorSpace_DCI_P3;
+ PBRT_CONST RGBColorSpace *RGBColorSpace_Rec2020;
+ PBRT_CONST RGBColorSpace *RGBColorSpace_ACES2065_1;
++PBRT_CONST RGBColorSpace *RGBColorSpace_ACEScg;
+ #endif
+ 
+ // RGBColorSpace Method Definitions
+@@ -50,6 +51,8 @@ const RGBColorSpace *RGBColorSpace::GetNamed(std::string n) {
+     std::transform(n.begin(), n.end(), std::back_inserter(name), ::tolower);
+     if (name == "aces2065-1")
+         return ACES2065_1;
++    else if (name == "acescg")
++        return ACEScg;
+     else if (name == "rec2020")
+         return Rec2020;
+     else if (name == "dci-p3")
+@@ -65,7 +68,7 @@ const RGBColorSpace *RGBColorSpace::Lookup(Point2f r, Point2f g, Point2f b, Poin
+         return ((a.x == b.x || std::abs((a.x - b.x) / b.x) < 1e-3) &&
+                 (a.y == b.y || std::abs((a.y - b.y) / b.y) < 1e-3));
+     };
+-    for (const RGBColorSpace *cs : {ACES2065_1, DCI_P3, Rec2020, sRGB}) {
++    for (const RGBColorSpace *cs : {ACES2065_1, ACEScg, DCI_P3, Rec2020, sRGB}) {
+         if (closeEnough(r, cs->r) && closeEnough(g, cs->g) && closeEnough(b, cs->b) &&
+             closeEnough(w, cs->w))
+             return cs;
+@@ -77,6 +80,7 @@ const RGBColorSpace *RGBColorSpace::sRGB;
+ const RGBColorSpace *RGBColorSpace::DCI_P3;
+ const RGBColorSpace *RGBColorSpace::Rec2020;
+ const RGBColorSpace *RGBColorSpace::ACES2065_1;
++const RGBColorSpace *RGBColorSpace::ACEScg;
+ 
+ void RGBColorSpace::Init(Allocator alloc) {
+     // Rec. ITU-R BT.709.3
+@@ -94,6 +98,10 @@ void RGBColorSpace::Init(Allocator alloc) {
+     ACES2065_1 = alloc.new_object<RGBColorSpace>(
+         Point2f(.7347, .2653), Point2f(0., 1.), Point2f(.0001, -.077),
+         GetNamedSpectrum("illum-acesD60"), RGBToSpectrumTable::ACES2065_1, alloc);
++    // ACEScg: AP1 primaries, ACES white point (S-2014-004)
++    ACEScg = alloc.new_object<RGBColorSpace>(
++        Point2f(.713, .293), Point2f(.165, .830), Point2f(.128, .044),
++        GetNamedSpectrum("illum-acesD60"), RGBToSpectrumTable::ACEScg, alloc);
+ #ifdef PBRT_BUILD_GPU_RENDERER
+     if (Options->useGPU) {
+         CUDA_CHECK(cudaMemcpyToSymbol(RGBColorSpace_sRGB, &RGBColorSpace::sRGB,
+@@ -105,6 +113,8 @@ void RGBColorSpace::Init(Allocator alloc) {
+         CUDA_CHECK(cudaMemcpyToSymbol(RGBColorSpace_ACES2065_1,
+                                       &RGBColorSpace::ACES2065_1,
+                                       sizeof(RGBColorSpace_ACES2065_1)));
++        CUDA_CHECK(cudaMemcpyToSymbol(RGBColorSpace_ACEScg, &RGBColorSpace::ACEScg,
++                                      sizeof(RGBColorSpace_ACEScg)));
+     }
+ #endif
+ }
+diff --git a/src/pbrt/util/colorspace.h b/src/pbrt/util/colorspace.h
+index 4fc026a..3b53f55 100644
+--- a/src/pbrt/util/colorspace.h
++++ b/src/pbrt/util/colorspace.h
+@@ -32,7 +32,7 @@ class RGBColorSpace {
+     Point2f r, g, b, w;
+     DenselySampledSpectrum illuminant;
+     SquareMatrix<3> XYZFromRGB, RGBFromXYZ;
+-    static const RGBColorSpace *sRGB, *DCI_P3, *Rec2020, *ACES2065_1;
++    static const RGBColorSpace *sRGB, *DCI_P3, *Rec2020, *ACES2065_1, *ACEScg;
+ 
+     PBRT_CPU_GPU
+     bool operator==(const RGBColorSpace &cs) const {
+@@ -70,6 +70,7 @@ extern PBRT_CONST RGBColorSpace *RGBColorSpace_sRGB;
+ extern PBRT_CONST RGBColorSpace *RGBColorSpace_DCI_P3;
+ extern PBRT_CONST RGBColorSpace *RGBColorSpace_Rec2020;
+ extern PBRT_CONST RGBColorSpace *RGBColorSpace_ACES2065_1;
++extern PBRT_CONST RGBColorSpace *RGBColorSpace_ACEScg;
+ #endif
+ 
+ SquareMatrix<3> ConvertRGBColorSpace(const RGBColorSpace &from, const RGBColorSpace &to);
+diff --git a/src/pbrt/util/image.h b/src/pbrt/util/image.h
+index 6771eeb..6258edb 100644
+--- a/src/pbrt/util/image.h
++++ b/src/pbrt/util/image.h
+@@ -343,6 +343,11 @@ class Image {
+                                  ColorEncoding encoding = nullptr);
+ 
+     bool Write(std::string name, const ImageMetadata &metadata = {}) const;
++    // hdPbrt: a PFM in the metadata's color space (Write converts to sRGB).
++    bool WritePFMKeepColorSpace(const std::string &name,
++                                const ImageMetadata &metadata) const {
++        return WritePFM(name, metadata);
++    }
+ 
+     Image ConvertToFormat(PixelFormat format, ColorEncoding encoding = nullptr) const;
+ 
+diff --git a/src/pbrt/util/mipmap.cpp b/src/pbrt/util/mipmap.cpp
+index 1bff6a6..65cd891 100644
+--- a/src/pbrt/util/mipmap.cpp
++++ b/src/pbrt/util/mipmap.cpp
+@@ -350,7 +350,8 @@ T MIPMap::EWA(int level, Point2f st, Vector2f dst0, Vector2f dst1) const {
+ 
+ MIPMap *MIPMap::CreateFromFile(const std::string &filename,
+                                const MIPMapFilterOptions &options, WrapMode wrapMode,
+-                               ColorEncoding encoding, Allocator alloc) {
++                               ColorEncoding encoding, Allocator alloc,
++                               const RGBColorSpace *colorSpaceOverride) {
+     ImageAndMetadata imageAndMetadata = Image::Read(filename, alloc, encoding);
+ 
+     Image &image = imageAndMetadata.image;
+@@ -377,7 +378,11 @@ MIPMap *MIPMap::CreateFromFile(const std::string &filename,
+         }
+     }
+ 
+-    const RGBColorSpace *colorSpace = imageAndMetadata.metadata.GetColorSpace();
++    // An explicit color space (hdPbrt: "colorspace" parameter) wins over the
++    // file's metadata (which defaults to sRGB primaries).
++    const RGBColorSpace *colorSpace = colorSpaceOverride
++                                          ? colorSpaceOverride
++                                          : imageAndMetadata.metadata.GetColorSpace();
+     return alloc.new_object<MIPMap>(std::move(image), colorSpace, wrapMode, alloc,
+                                     options);
+ }
+diff --git a/src/pbrt/util/mipmap.h b/src/pbrt/util/mipmap.h
+index 41544e9..b24d802 100644
+--- a/src/pbrt/util/mipmap.h
++++ b/src/pbrt/util/mipmap.h
+@@ -53,7 +53,8 @@ class MIPMap {
+            Allocator alloc, const MIPMapFilterOptions &options);
+     static MIPMap *CreateFromFile(const std::string &filename,
+                                   const MIPMapFilterOptions &options, WrapMode wrapMode,
+-                                  ColorEncoding encoding, Allocator alloc);
++                                  ColorEncoding encoding, Allocator alloc,
++                                  const RGBColorSpace *colorSpaceOverride = nullptr);
+ 
+     template <typename T>
+     T Filter(Point2f st, Vector2f dstdx, Vector2f dstdy) const;
+-- 
+2.43.0
+

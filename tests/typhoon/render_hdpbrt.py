@@ -6,7 +6,8 @@
 #
 # Writes outdir/<scene stem>-hdpbrt.NNNN.pfm (pbrt's own float RGB image) per
 # frame. Renderer settings are given as key=value (ints, floats, true/false or
-# strings), e.g. pbrt:maxDepth=1 pbrt:pixelSamples=64.
+# strings), e.g. pbrt:maxDepth=1 pbrt:pixelSamples=64. The working space is
+# lin_rec709 unless pbrt:workingSpace=acescg is given.
 import sys, os, time, glob, shutil
 from PySide6.QtGui import QGuiApplication, QOpenGLContext, QOffscreenSurface, QSurfaceFormat
 app = QGuiApplication(sys.argv)
@@ -48,6 +49,9 @@ def parse(v):
             pass
     return v
 
+# The references (Typhoon, Karma under Houdini's default OCIO config) are
+# linear Rec.709; hdPbrt's default working space is ACEScg.
+eng.SetRendererSetting('pbrt:workingSpace', 'lin_rec709')
 for kv in sys.argv[4:]:
     k, v = kv.split('=', 1)
     eng.SetRendererSetting(k, parse(v))

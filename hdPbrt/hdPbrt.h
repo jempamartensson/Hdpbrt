@@ -63,9 +63,28 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((volumeAlbedo, "pbrt:volumeAlbedo"))       \
     ((volumeTemperatureScale, "pbrt:volumeTemperatureScale")) \
     ((exportPath, "pbrt:exportPath"))           \
-    ((pbrtExecutable, "pbrt:executable"))
+    ((pbrtExecutable, "pbrt:executable"))       \
+    ((workingSpace, "pbrt:workingSpace"))
 
 TF_DECLARE_PUBLIC_TOKENS(HdPbrtSettingsTokens, HDPBRT_SETTINGS_TOKENS);
+
+// The rendering (working) color space: what RGB numbers in the scene mean
+// (material and light colors, displayColor, COP images, raw textures) and what
+// the color AOV holds. ACEScg by default, as Houdini/Karma and Blender with an
+// ACES setup; "lin_rec709" (pbrt:workingSpace) for the Typhoon comparisons.
+// Images are read in their own color space (file metadata, the shader's color
+// space, else sRGB primaries, as Karma and Blender assume) and pbrt converts.
+struct HdPbrtWorkingSpace {
+    std::string pbrtName = "acescg";  // pbrt ColorSpace / "colorspace" name
+    bool aces = true;
+    // Linear Rec.709 -> working space (Bradford D65 -> ACES white for ACEScg,
+    // as OCIO's and Karma's conversion); identity for lin_rec709.
+    GfVec3f FromRec709(GfVec3f const &c) const;
+    // Relative luminance weights of the working space's primaries.
+    GfVec3f Luminance() const;
+    float Luminance(GfVec3f const &c) const;
+    static HdPbrtWorkingSpace FromSetting(std::string const &name);
+};
 
 // Instancer primvars and transforms are sampled over this window (frames
 // relative to the current time) and resampled at the shutter times.
@@ -579,6 +598,8 @@ public:
 
     const std::string &GetTempDir() const { return _tempDir; }
     std::string NewTempPath(const std::string &stem, const std::string &ext);
+    // pbrt:workingSpace (default ACEScg); read when prims sync.
+    HdPbrtWorkingSpace GetWorkingSpace() const;
 
     // Convert a lat-long environment image to pbrt's equal-area square
     // layout (cached). Returns an empty string on failure.

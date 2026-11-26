@@ -79,6 +79,11 @@ over the camera shutter (meshes and point instances) and deformation blur for me
 points are time-sampled, with N keys for curved motion, and camera motion (two keys);
 color, depth, primId and instanceId AOVs (viewport selection, including point instances).
 Without a dome light the background is transparent, so the host's viewport background shows.
+The working color space is ACEScg: material and light colors are read as ACEScg and the image
+is ACEScg, so use an ACEScg OCIO config in Houdini (Houdini 22's default config is linear
+Rec.709; `$HFS/packages/ocio/cg-config-*.ocio` is ACEScg) and set Blender files' working space
+to ACEScg. Textures are read in their own color space (file metadata or the shader's, else
+sRGB/Rec.709 primaries) and converted, as Karma does.
 Not yet: volume materials other than the Karma pyro shader,
 in-memory Houdini volumes (write VDBs to disk).
 

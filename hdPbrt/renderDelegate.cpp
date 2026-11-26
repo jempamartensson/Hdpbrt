@@ -601,6 +601,45 @@ void HdPbrtRenderDelegate::PollHoudiniImages()
 #endif
 }
 
+HdPbrtWorkingSpace HdPbrtWorkingSpace::FromSetting(std::string const &name)
+{
+    HdPbrtWorkingSpace ws;
+    const std::string n = TfStringToLower(name);
+    if (n == "lin_rec709" || n == "lin_srgb" || n == "srgb" || n == "rec709") {
+        ws.pbrtName = "srgb";
+        ws.aces = false;
+    } else if (!n.empty() && n != "acescg" && n != "lin_ap1") {
+        TF_WARN("hdPbrt: pbrt:workingSpace \"%s\" unknown (acescg or lin_rec709); using "
+                "ACEScg", name.c_str());
+    }
+    return ws;
+}
+
+GfVec3f HdPbrtWorkingSpace::FromRec709(GfVec3f const &c) const
+{
+    if (!aces)
+        return c;
+    // Linear Rec.709 -> ACEScg with Bradford adaptation D65 -> ACES white
+    // (OCIO's conversion; Karma's color temperature under an ACES config).
+    return GfVec3f(0.6130974f * c[0] + 0.3395231f * c[1] + 0.0473795f * c[2],
+                   0.0701937f * c[0] + 0.9163539f * c[1] + 0.0134524f * c[2],
+                   0.0206156f * c[0] + 0.1095698f * c[1] + 0.8698146f * c[2]);
+}
+
+GfVec3f HdPbrtWorkingSpace::Luminance() const
+{
+    return aces ? GfVec3f(0.2722287f, 0.6740818f, 0.0536895f)
+                : GfVec3f(0.2126390f, 0.7151687f, 0.0721923f);
+}
+
+float HdPbrtWorkingSpace::Luminance(GfVec3f const &c) const { return GfDot(Luminance(), c); }
+
+HdPbrtWorkingSpace HdPbrtRenderDelegate::GetWorkingSpace() const
+{
+    return HdPbrtWorkingSpace::FromSetting(
+        GetSetting<std::string>(HdPbrtSettingsTokens->workingSpace, "acescg"));
+}
+
 bool HdPbrtRenderDelegate::GetNanoVDB(const std::string &vdb, const std::string &densityGrid,
                                       const std::string &temperatureGrid, std::string *nvdb,
                                       GfRange3d *bbox)
@@ -700,9 +739,13 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
     std::ostringstream os;
     os.imbue(std::locale::classic());
     os << "# pbrt-v4 scene written by hdPbrt\n";
+    // RGB numbers in the scene and the film's pixels are in the working space;
+    // the PFM keeps it (pbrt would convert it to sRGB).
+    os << "ColorSpace " << HdPbrt_Quote(GetWorkingSpace().pbrtName) << "\n";
     os << "Film \"rgb\" \"string filename\" " << HdPbrt_Quote(pfm)
        << " \"integer xresolution\" " << width << " \"integer yresolution\" " << height
-       << " \"bool hdpbrtdepth\" true \"bool hdpbrtids\" true";
+       << " \"bool hdpbrtdepth\" true \"bool hdpbrtids\" true"
+       << " \"bool hdpbrtkeepcolorspace\" true";
     // pbrt scales the image by (shutterclose - shutteropen) * iso / 100. The
     // motion-blur shutter must not change the brightness, so cancel it, and
     // apply the camera's exposure scale instead.

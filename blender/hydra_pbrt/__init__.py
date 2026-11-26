@@ -21,6 +21,27 @@ PLUGIN_DIR = os.environ.get(
     os.path.join(os.path.dirname(os.path.realpath(__file__)), "plugin"))
 
 
+_warned_working_space = set()
+
+
+def _check_working_space(engine):
+    """hdPbrt renders in ACEScg: material and light colors are read as ACEScg
+    and the image is ACEScg. Blender reads the render as the file's working
+    space, so anything other than ACEScg shows shifted colors."""
+    cs = getattr(bpy.data, "colorspace", None)
+    ws = getattr(cs, "working_space", "ACEScg") if cs else "ACEScg"
+    key = (bpy.data.filepath, ws)
+    if ws != "ACEScg" and key not in _warned_working_space:
+        _warned_working_space.add(key)
+        msg = ("Hydra pbrt renders in ACEScg, but this file's working color space is "
+               "%s: set Color Management > Working Space to ACEScg" % ws)
+        print("hdPbrt:", msg)
+        try:
+            engine.report({'WARNING'}, msg)
+        except Exception:
+            pass
+
+
 class PbrtHydraRenderEngine(bpy.types.HydraRenderEngine):
     bl_idname = 'HYDRA_PBRT'
     bl_label = "Hydra pbrt"
@@ -38,6 +59,7 @@ class PbrtHydraRenderEngine(bpy.types.HydraRenderEngine):
         pxr.Plug.Registry().RegisterPlugins([PLUGIN_DIR])
 
     def get_render_settings(self, engine_type):
+        _check_working_space(self)
         s = bpy.context.scene.hydra_pbrt
         viewport = engine_type == 'VIEWPORT'
         result = {

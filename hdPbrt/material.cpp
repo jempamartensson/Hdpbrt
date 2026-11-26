@@ -182,7 +182,14 @@ struct _Builder {
         // MaterialX image nodes: a file is in the document's (linear) color
         // space unless its colorspace says otherwise (Hydra passes it as
         // "colorSpace:file"), as USD's reference renderer reads them.
-        std::string encoding = "sRGB";
+        //
+        // Primaries ("colorspace"; color textures only): raw data and COP images
+        // hold working-space numbers; a named color space (MaterialX or OCIO
+        // names) is used as such; otherwise the file's metadata, else sRGB
+        // primaries (pbrt's default; Karma and Blender also read unlabeled
+        // textures as Rec.709 / sRGB and convert them to the working space).
+        std::string encoding = "sRGB", primaries;
+        const std::string working = delegate ? delegate->GetWorkingSpace().pbrtName : "srgb";
         if (TfStringStartsWith(up->nodeTypeId.GetString(), "ND_")) {
             VtValue mcs = _Param(*up, "colorSpace:file");
             std::string name = mcs.IsHolding<TfToken>() ? mcs.UncheckedGet<TfToken>().GetString()
@@ -191,18 +198,38 @@ struct _Builder {
             name = TfStringToLower(name);
             encoding = (name.find("srgb") != std::string::npos && name.find("lin") != 0)
                            ? "sRGB" : "linear";
+            if (name.find("raw") != std::string::npos || name.find("data") != std::string::npos ||
+                name.find("non-color") != std::string::npos)
+                primaries = working;
+            else if (name.find("acescg") != std::string::npos ||
+                     name.find("ap1") != std::string::npos)
+                primaries = "acescg";
+            else if (name.find("2020") != std::string::npos)
+                primaries = "rec2020";
+            else if (name.find("srgb") != std::string::npos ||
+                     name.find("709") != std::string::npos)
+                primaries = "srgb";
         } else {
             VtValue cs = _Param(*up, "sourceColorSpace");
-            if (cs.IsHolding<TfToken>() && cs.UncheckedGet<TfToken>() == "raw")
+            const TfToken t = cs.IsHolding<TfToken>() ? cs.UncheckedGet<TfToken>() : TfToken();
+            if (t == "raw") {
                 encoding = "linear";
+                primaries = working;
+            } else if (t == "sRGB") {
+                primaries = "srgb";
+            }
         }
         if (!isColor || houdiniImage)
             encoding = "linear";
+        if (houdiniImage)
+            primaries = working;  // COPs work in the scene-linear space
         std::string name = prefix + "_" + input + std::to_string(texCount++);
         std::ostringstream os;
         os << "Texture " << HdPbrt_Quote(name) << (isColor ? " \"spectrum\"" : " \"float\"")
            << " \"imagemap\" \"string filename\" " << HdPbrt_Quote(file)
            << " \"string encoding\" " << HdPbrt_Quote(encoding);
+        if (isColor && !primaries.empty())
+            os << " \"string colorspace\" " << HdPbrt_Quote(primaries);
         // MaterialX tiledimage: uvtiling (often fed by a convert node from a
         // float) scales the texture coordinates, as pbrt's uscale/vscale.
         if (TfStringStartsWith(up->nodeTypeId.GetString(), "ND_tiledimage_")) {
@@ -274,9 +301,19 @@ bool _Is(const HdMaterialNode2 *n, const char *nodePrefix)
 // 0 (honey's red: 0.39 instead of 1.0 transmittance through 10 units). The
 // band edges were fitted to RGB-exact transmittance exp(-sigma d) over a set
 // of colors and depths: mean error 0.019 vs 0.041, worst 0.06 vs 0.38.
+// The working space of the material being synced (HdPbrtMaterial::Sync sets
+// it; materials may sync in parallel).
+thread_local HdPbrtWorkingSpace t_workingSpace;
+
 std::string _MediumSpectrum(const char *name, const GfVec3f &c)
 {
     std::ostringstream os;
+    // The bands below were fitted to Rec.709 channels; other working spaces
+    // use pbrt's own RGB upsampling in that space.
+    if (t_workingSpace.aces) {
+        os << " \"rgb " << name << "\" " << HdPbrt_Rgb(c);
+        return os.str();
+    }
     os << " \"spectrum " << name << "\" [360 " << c[2] << " 489.9 " << c[2] << " 490 " << c[1]
        << " 589.9 " << c[1] << " 590 " << c[0] << " 830 " << c[0] << "]";
     return os.str();
@@ -847,8 +884,11 @@ bool HdPbrt_PyroVolume(const HdMaterialNetwork2 &net, const HdMaterialNode2 &n,
            << " \"float hdpbrtfiretempscale\" " << num("firetempscale", 2500);
         if (int(num("firecolormode", 0)) == 1) {
             os << " \"float hdpbrtfirebbtable\" [";
-            for (const float(&e)[4] : _karmaBlackbody)
-                os << " " << e[0] << " " << e[1] << " " << e[2] << " " << e[3];
+            // Measured in Rec.709; converted like a light's color temperature.
+            for (const float(&e)[4] : _karmaBlackbody) {
+                const GfVec3f c = t_workingSpace.FromRec709(GfVec3f(e[1], e[2], e[3]));
+                os << " " << e[0] << " " << c[0] << " " << c[1] << " " << c[2];
+            }
             os << " ]";
         }
     }
@@ -865,6 +905,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
                           HdDirtyBits *dirtyBits)
 {
     static_cast<HdPbrtRenderParam *>(renderParam)->Edit();
+    t_workingSpace = _delegate ? _delegate->GetWorkingSpace() : HdPbrtWorkingSpace();
     HdPbrtMaterialDesc result = HdPbrt_DefaultMaterial();
 
     HdPbrtMaterialDesc volume;  // volume shading (pyro), merged into result

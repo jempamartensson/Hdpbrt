@@ -33,8 +33,8 @@ T _Get(HdSceneDelegate *sd, SdfPath const &id, TfToken const &name, T def)
     return def;
 }
 
-// Color of a black body in linear Rec.709 (the rendering color space),
-// normalized to luminance 1, as USD's UsdLuxBlackbodyTemperatureAsRgb and its
+// Color of a black body in linear Rec.709 (converted to the working space by
+// the caller), normalized to luminance 1, as USD's UsdLuxBlackbodyTemperatureAsRgb and its
 // reference renderer (Typhoon) compute it.
 GfVec3f _Blackbody(float kelvin)
 {
@@ -102,12 +102,15 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
     }
 
     const GfMatrix4d xf = sd->GetTransform(id);
+    const HdPbrtWorkingSpace ws = _delegate->GetWorkingSpace();
     float intensity = _Get<float>(sd, id, HdLightTokens->intensity, 1.f);
     float exposure = _Get<float>(sd, id, HdLightTokens->exposure, 0.f);
     GfVec3f color = _Get<GfVec3f>(sd, id, HdLightTokens->color, GfVec3f(1));
+    // The color is in the working space; a color temperature is computed in
+    // Rec.709 and converted (Karma does the same under an ACES config).
     if (_Get<bool>(sd, id, HdLightTokens->enableColorTemperature, false))
-        color = GfCompMult(color, _Blackbody(_Get<float>(sd, id, HdLightTokens->colorTemperature,
-                                                         6500.f)));
+        color = GfCompMult(color, ws.FromRec709(_Blackbody(_Get<float>(
+                                      sd, id, HdLightTokens->colorTemperature, 6500.f))));
     const bool normalize = _Get<bool>(sd, id, HdLightTokens->normalize, false);
     const float scale = intensity * std::exp2(exposure);
     GfVec3f L = color * scale;
@@ -185,14 +188,16 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
         _Get<bool>(sd, id, TfToken("visibleInPrimaryRay"), false);
     // A rect light's texture (inputs:texture:file) is the emission image,
     // tinted by color.
-    std::string emissionImage;
+    std::string emissionImage, emissionColorSpace;
     if (_type == HdPrimTypeTokens->rectLight) {
         VtValue tv = sd->GetLightParamValue(id, HdLightTokens->textureFile);
         if (tv.IsHolding<SdfAssetPath>()) {
             const SdfAssetPath &a = tv.UncheckedGet<SdfAssetPath>();
             emissionImage = a.GetResolvedPath().empty() ? a.GetAssetPath() : a.GetResolvedPath();
-            if (TfStringStartsWith(emissionImage, "op:"))  // Houdini COP node
+            if (TfStringStartsWith(emissionImage, "op:")) {  // Houdini COP node
                 emissionImage = _delegate->GetHoudiniImage(emissionImage);
+                emissionColorSpace = ws.pbrtName;  // COPs hold working-space values
+            }
         }
     }
     auto areaHeader = [&](double area) {
@@ -202,8 +207,11 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
         os << "AttributeBegin\n  Transform " << HdPbrt_Matrix(xf) << "\n"
            << "  Material \"interface\"\n  AreaLightSource \"diffuse\"";
         if (!emissionImage.empty())
-            os << " \"string filename\" " << HdPbrt_Quote(emissionImage) << " \"float scale\" "
-               << s << " \"rgb hdpbrttint\" " << HdPbrt_Rgb(color);
+            os << " \"string filename\" " << HdPbrt_Quote(emissionImage)
+               << (emissionColorSpace.empty()
+                       ? std::string()
+                       : " \"string colorspace\" " + HdPbrt_Quote(emissionColorSpace))
+               << " \"float scale\" " << s << " \"rgb hdpbrttint\" " << HdPbrt_Rgb(color);
         else
             os << " \"rgb L\" " << HdPbrt_Rgb(color * s);
         if (!cameraVisible)
@@ -289,9 +297,11 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
         os << "AttributeBegin\n  Transform " << HdPbrt_Matrix(xf) << "\n"
            << "  ConcatTransform [0 0 -1 0 1 0 0 0 0 1 0 0 0 0 0 1]\n";
         if (!eq.empty()) {
-            float lum = 0.2126f * color[0] + 0.7152f * color[1] + 0.0722f * color[2];
-            os << "  LightSource \"infinite\" \"string filename\" " << HdPbrt_Quote(eq)
-               << " \"float scale\" " << scale * lum << links << "\n";
+            const float lum = ws.Luminance(color);
+            os << "  LightSource \"infinite\" \"string filename\" " << HdPbrt_Quote(eq);
+            if (TfStringStartsWith(tex, "op:"))  // COPs hold working-space values
+                os << " \"string colorspace\" " << HdPbrt_Quote(ws.pbrtName);
+            os << " \"float scale\" " << scale * lum << links << "\n";
         } else {
             if (!tex.empty())
                 TF_WARN("hdPbrt: could not use dome texture %s", tex.c_str());

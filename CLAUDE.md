@@ -11,14 +11,17 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (35 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (36 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
     the Blender flavor.
   - `build/pbrt`, `build/hdpbrt-houdini`, `build/hdpbrt-blender`: build dirs. Since
     2026-11-25 they use `/opt/hfs22.0.508` (HFS, and the Blender flavor's PYTHON_INCLUDE):
-    the `/opt/hfs22.0` symlink still points at the removed 22.0.368.
+    the `/opt/hfs22.0` symlink still points at the removed 22.0.368. `src/osd-include/opensubdiv`
+    (the Blender flavor's OpenSubdiv headers) pointed through that symlink: the Blender build
+    kept OpenSubdiv 3.5 objects and failed to load in Blender (3.7) until it was repointed at
+    22.0.508 on 2026-11-26.
   - `install/houdini`, `install/blender`: hdPbrt.so, plugInfo.json, and symlinks to pbrt and
     imgtool.
   - `houdini/dso/usd_plugins/`: what Houdini loads through `HOUDINI_PATH`.
@@ -133,6 +136,12 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    RGBIlluminantSpectrum / photometric(illuminant), like pbrt's lights. Majorant cells the
    temperature can reach get >= 1 and SampleRay a sigma floor of 4 / cell, so fire without smoke
    is sampled.
+36. ACEScg: `RGBColorSpace::ACEScg` ("acescg", AP1, ACES white, its own rgb2spec table; EXR
+   chromaticities find it too). `"string colorspace"` on imagemap textures, diffuse area lights
+   and infinite lights overrides an image's primaries (pbrt otherwise takes the file's metadata,
+   else sRGB). RGBFilm `"bool hdpbrtkeepcolorspace"` writes the PFM in the film's color space
+   (pbrt converts PFM/PNG output to sRGB; the display stream was never converted, so without it
+   the final image and the stream disagree).
 
 ## Done in the 2026-11-22 session
 
@@ -250,6 +259,31 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   instance. Before that, point instances were in no collection (unlit by any linked light). Area-light shapes don't block, shadow or show a
   back (pbrt `interface` material, patch 10; rechecked 2026-11-25 with a rect light seen
   from behind over a floor).
+- Working color space ACEScg (2026-11-26, pbrt patch 36; Jens: always ACEScg, for Houdini with
+  an ACES OCIO config and Blender files set to ACEScg). `ColorSpace "acescg"` heads the scene:
+  material/light/displayColor numbers are ACEScg and so is the color AOV
+  (`hdpbrtkeepcolorspace`). `pbrt:workingSpace` = `lin_rec709` switches back; not in the
+  settings UI; `tests/typhoon/render_hdpbrt.py` sets it (Typhoon and Karma's default config are
+  Rec.709), so the suites are unchanged. Conventions measured from Karma CPU (husk) under
+  Houdini's `cg-config` (scene_linear ACEScg): constants are raw ACEScg; every texture (8-bit
+  sRGB, unlabeled EXR, EXR labeled Rec.709 and even labeled AP1, .hdr) is read as Rec.709 and
+  converted; color temperature is Rec.709 converted (Bradford D65 -> ACES white). hdPbrt: images
+  keep pbrt's rule (file metadata, else sRGB primaries; an AP1-labeled EXR stays AP1, unlike
+  Karma); `"string colorspace"` = working space for raw textures (UsdUVTexture raw, MaterialX
+  Raw/data) and COP images; named MaterialX/OCIO spaces (ACEScg/AP1, 2020, sRGB/709) as such;
+  `HdPbrtWorkingSpace::FromRec709` for color temperature and Karma's pyro blackbody table;
+  working-space luminance for the dome's color tint. Media in ACEScg use pbrt's RGB
+  upsampling (`rgb sigma_a`): the 3-band spectra were fitted to Rec.709 channels. vs Karma
+  (`tests/aces/run_aces.sh`, `ACES_RESULTS.txt`; diffuse under a white dome): constant albedo
+  within 1-3%, textures +2%
+  red (pbrt lifts sRGB images with its D65 table under D60 white, Karma uses Bradford),
+  lights 0.4-0.6% (white, 3000 K, 6500 K). Blender 5.3 (working space ACEScg via
+  `wm.set_working_color_space`) vs Cycles: same hue, 1-3% darker (BSDF mapping). Limit:
+  colors near the AP1 primaries can't be reached by pbrt's smooth spectra (ACEScg (1,0,0)
+  light -> (0.90, 0.18, 0.01), reflectance -> (0.63, 0.14, 0.00)); everything inside Rec.709
+  round-trips within 1%. The Blender add-on warns when a file's working space isn't ACEScg;
+  Houdini needs an ACEScg OCIO config (`$OCIO`, e.g. `$HFS/packages/ocio/cg-config-*.ocio`),
+  Houdini 22's default config is Rec.709.
 - Houdini op: images (done 2026-11-26, Houdini flavor): texture files (UsdUVTexture, MaterialX
   image nodes) and rect/dome light textures that start with `op:` (COP nodes, with Houdini's
   `{output}`, `[frame]`, `(xres,yres)` modifiers) are cooked with the HDK's
