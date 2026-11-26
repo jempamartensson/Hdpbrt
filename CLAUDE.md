@@ -354,6 +354,22 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   `diffuse` and `hdpbrtlayered` take it (`HdPbrt_MaterialLine`). The visible image is unchanged.
   The "leaf" sphere and the ground in `tests/spectral/ir_scene.usda` use both routes. Blender's
   Hydra export doesn't pass custom mesh attributes (checked), so Blender can't set it yet.
+- Houdini material UI for it (2026-11-26). Houdini reads renderer .ds files only for Viewport,
+  Global (Render Settings), Light, Camera and Geometry (Render Geometry Settings LOP; probed
+  every LOP type): there is no material one. So: `houdini/scripts/vop/<type>_OnCreated.py` for
+  mtlxstandard_surface, mtlxopen_pbr_surface, usdpreviewsurface and mtlxsurface call
+  `scripts/python/hdpbrt_houdini.py`, which adds a collapsible "pbrt" folder of spare parms tagged
+  `sidefx::shader_isparm` / `sidefx::shader_parmname` (Houdini's translator then writes
+  `inputs:pbrt:irReflectance` on the USD shader; untagged spare parms are dropped). Parms at their
+  default aren't written, and `__activate__` toggles / `sidefx::shader_forceparmval` are ignored
+  for spare parms, so the "Infrared Reflectance" checkbox (tagged `shader_isparm 0`) has a
+  callback that sets the value to 0.6 (on) or back to the -1 default (off). Existing nodes:
+  `hdpbrt_houdini.add_material_parms(hou.selectedNodes())`. `_Geometry.ds` gives the Render
+  Geometry Settings LOP `primvars:pbrt:irReflectance` (constant). Checked in hython: plain
+  Material Library MaterialX shader -> `"float hdpbrtir" 0.6` in the pbrt scene. Not through a
+  Karma Material Builder: its MaterialX graph is on `outputs:kma:surface` and hdPbrt asks for
+  "kma" after the universal context, so it gets the builder's UsdPreviewSurface (an older issue:
+  such materials render as their preview in hdPbrt).
 - Not translated yet: in-memory Houdini volumes (`op:` paths). Volume materials other than
   the Karma pyro shader (e.g. MaterialX volumes on Volume prims) use the renderer settings.
 - Karma pyro shader (2026-11-25, pbrt patch 35): Houdini exports kma_pyroshader as a MaterialX

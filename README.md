@@ -93,7 +93,10 @@ Lights and cameras can also work in nanometers: `pbrt:spectrum` band / blackbody
 on the pbrt tab of Light and Camera LOPs. For infrared, a material's diffuse reflectance above
 the red edge can be set with a float shader input `pbrt:irReflectance` (or per object with a
 constant primvar `pbrt_irReflectance`, e.g. a detail attribute in SOPs): foliage at about 0.6
-glows as on infrared film. See `docs/images/infrared.png`.
+glows as on infrared film. In Houdini, MaterialX standard/OpenPBR surface and USD Preview
+Surface nodes get a "pbrt" folder with an Infrared Reflectance checkbox (new nodes; for existing
+ones run `hdpbrt_houdini.add_material_parms(hou.selectedNodes())` in the Python shell), and the
+Render Geometry Settings LOP has it per object. See `docs/images/infrared.png`.
 Not yet: volume materials other than the Karma pyro shader,
 in-memory Houdini volumes (write VDBs to disk).
 

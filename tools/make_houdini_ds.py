@@ -8,7 +8,9 @@
 #                 a "pbrt:..." attribute on the RenderSettings prim, which
 #                 Houdini (viewport and husk) hands to the delegate;
 #   _Light.ds, _Camera.ds: a pbrt tab on light and camera LOPs ("pbrt:..."
-#                 attributes on those prims, read by HdPbrtLight / HdPbrtCamera).
+#                 attributes on those prims, read by HdPbrtLight / HdPbrtCamera);
+#   _Geometry.ds: a pbrt tab on the Render Geometry Settings LOP (primvars).
+# Houdini has no such file for materials: see scripts/python/hdpbrt_houdini.py.
 # Parm names are the setting names encoded with hou.text.encodeParm.
 import os
 import hou
@@ -78,6 +80,14 @@ CAMERA_SETTINGS = [
      'Sensor', 'Spectral response written to the green channel.', ('pbrt:sensor', 'bands')),
     ('pbrt:sensorBlue', 'Blue Band (center, FWHM nm)', 'float2', (550.0, 80.0), (360, 1100),
      'Sensor', 'Spectral response written to the blue channel.', ('pbrt:sensor', 'bands')),
+]
+
+# Render Geometry Settings LOP: primvars on geometry prims.
+GEOMETRY_SETTINGS = [
+    ('primvars:pbrt:irReflectance', 'Infrared Reflectance', 'float', 0.6, (0, 1), 'Infrared',
+     'Diffuse reflectance above the red edge for these objects, for infrared renders '
+     '(pbrt:sensor bands on the camera); overrides the material\'s. Real leaves reflect about '
+     '0.5-0.6 there. The visible image is unchanged.'),
 ]
 
 VALUE_TYPE = {'int': 'int', 'float': 'float', 'bool': 'bool', 'string': 'string', 'menu': 'token',
@@ -168,3 +178,6 @@ write('HdPbrtRendererPlugin_Light.ds',
 write('HdPbrtRendererPlugin_Camera.ds',
       '/// hdPbrt camera properties ("pbrt:*" attributes on camera prims).', True,
       CAMERA_SETTINGS)
+write('HdPbrtRendererPlugin_Geometry.ds',
+      '/// hdPbrt geometry properties (constant "primvars:pbrt:*" on geometry prims).', True,
+      GEOMETRY_SETTINGS)
