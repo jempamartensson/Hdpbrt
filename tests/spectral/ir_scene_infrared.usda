@@ -1,0 +1,14 @@
+#usda 1.0
+(
+    subLayers = [@./ir_scene.usda@]
+)
+over "World"
+{
+    over "cam"
+    {
+        token pbrt:sensor = "bands"
+        float2 pbrt:sensorRed = (850, 100)
+        float2 pbrt:sensorGreen = (650, 80)
+        float2 pbrt:sensorBlue = (550, 80)
+    }
+}

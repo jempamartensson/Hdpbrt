@@ -187,6 +187,8 @@ void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
             lens.lensRadius = cam->GetFocalLength() / (2.f * cam->GetFStop());
             lens.focusDistance = cam->GetFocusDistance();
         }
+        if (auto *pcam = dynamic_cast<HdPbrtCamera const *>(cam))
+            lens.sensor = pcam->GetSensorParams();
         if (debug)
             fprintf(stderr, "hdPbrt camera %s: fStop %g focusDistance %g focalLength %g -> "
                             "lensradius %g\n",

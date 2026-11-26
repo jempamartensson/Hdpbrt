@@ -745,7 +745,7 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
     os << "Film \"rgb\" \"string filename\" " << HdPbrt_Quote(pfm)
        << " \"integer xresolution\" " << width << " \"integer yresolution\" " << height
        << " \"bool hdpbrtdepth\" true \"bool hdpbrtids\" true"
-       << " \"bool hdpbrtkeepcolorspace\" true";
+       << " \"bool hdpbrtkeepcolorspace\" true" << lens.sensor;
     // pbrt scales the image by (shutterclose - shutteropen) * iso / 100. The
     // motion-blur shutter must not change the brightness, so cancel it, and
     // apply the camera's exposure scale instead.

@@ -1,0 +1,232 @@
+From 60101e0ab3752c5fb0957e121210f8e8d7125e71 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Thu, 26 Nov 2026 08:21:14 +0100
+Subject: [PATCH] Spectral lights and camera: 360-1100 nm, power-normalized
+ light spectra, Gaussian band sensor (for hdPbrt)
+
+- Lambda_max 830 -> 1100 nm. Visible rendering is unchanged (camera
+  wavelengths still from SampleVisible; CIE curves are 0 beyond 830).
+- Lights: "bool hdpbrtpowernormalize" normalizes a spectrum by radiant
+  power (that of the color space's white at 1 nit over 360-830) instead of
+  luminance, so infrared/ultraviolet light spectra work.
+- RGBFilm sensor "hdpbrtbands" with "float hdpbrtsensorbands" [center FWHM]
+  x 3: Gaussian channel responses written raw, wavelengths sampled
+  uniformly over the bands.
+---
+ src/pbrt/film.cpp        | 37 +++++++++++++++++++++++++++++++++++++
+ src/pbrt/film.h          | 24 ++++++++++++++++++++++++
+ src/pbrt/lights.cpp      | 34 ++++++++++++++++++++++++++++------
+ src/pbrt/util/spectrum.h |  6 +++++-
+ 4 files changed, 94 insertions(+), 7 deletions(-)
+
+diff --git a/src/pbrt/film.cpp b/src/pbrt/film.cpp
+index 42ccedb..c5c5d42 100644
+--- a/src/pbrt/film.cpp
++++ b/src/pbrt/film.cpp
+@@ -241,6 +241,43 @@ PixelSensor *PixelSensor::Create(const ParameterDictionary &parameters,
+     if (sensorName == "cie1931") {
+         return alloc.new_object<PixelSensor>(colorSpace, sensorIllum, imagingRatio,
+                                              alloc);
++    } else if (sensorName == "hdpbrtbands") {
++        // hdPbrt: three Gaussian channel responses, "float hdpbrtsensorbands"
++        // [center FWHM] x 3 in nm (e.g. infrared false color). Each channel is
++        // normalized so that an equal-energy spectrum carrying the radiant power
++        // of the color space's white at 1 nit (what a white light of intensity 1
++        // emits) reads 1; the film writes the channels unconverted.
++        std::vector<Float> b = parameters.GetFloatArray("hdpbrtsensorbands");
++        if (b.size() != 6)
++            ErrorExit(loc, "\"hdpbrtsensorbands\" needs 6 values (center, FWHM per channel).");
++        const Spectrum white = &colorSpace->illuminant;
++        Float whitePower = 0;  // over the visible range (illuminant tables differ beyond)
++        for (Float l = 360; l <= 830; ++l)
++            whitePower += white(l);
++        whitePower /= SpectrumToPhotometric(white);
++        const Float flat = whitePower / (830 - 360);  // per nm, as white over 360-830
++        Float lo = Lambda_max, hi = Lambda_min;
++        Spectrum ch[3];
++        for (int c = 0; c < 3; ++c) {
++            const Float center = b[2 * c], sigma = std::max<Float>(b[2 * c + 1], 1) / 2.35482f;
++            lo = std::min(lo, center - 3 * sigma);
++            hi = std::max(hi, center + 3 * sigma);
++            std::vector<Float> samples;
++            Float sum = 0;
++            for (Float l = Lambda_min; l <= Lambda_max; ++l) {
++                const Float v = std::exp(-Sqr(l - center) / (2 * Sqr(sigma)));
++                samples.push_back(l);
++                samples.push_back(v);
++                sum += v;
++            }
++            for (size_t i = 1; i < samples.size(); i += 2)
++                samples[i] /= flat * sum;
++            ch[c] = PiecewiseLinearSpectrum::FromInterleaved(samples, false, alloc);
++        }
++        lo = Clamp(lo, Lambda_min, Lambda_max);
++        hi = Clamp(hi, Lambda_min, Lambda_max);
++        return alloc.new_object<PixelSensor>(ch[0], ch[1], ch[2], colorSpace, imagingRatio,
++                                             lo, hi, alloc);
+     } else {
+         Spectrum r = GetNamedSpectrum(sensorName + "_r");
+         Spectrum g = GetNamedSpectrum(sensorName + "_g");
+diff --git a/src/pbrt/film.h b/src/pbrt/film.h
+index 3ea12bc..a46ec48 100644
+--- a/src/pbrt/film.h
++++ b/src/pbrt/film.h
+@@ -77,6 +77,19 @@ class PixelSensor {
+         XYZFromSensorRGB = *m;
+     }
+ 
++    // hdPbrt "hdpbrtbands": raw channel responses (no color matrix: the film
++    // writes them as they are), wavelengths sampled uniformly over
++    // [lambdaMin, lambdaMax].
++    PixelSensor(Spectrum r, Spectrum g, Spectrum b, const RGBColorSpace *outputColorSpace,
++                Float imagingRatio, Float lambdaMin, Float lambdaMax, Allocator alloc)
++        : r_bar(r, alloc),
++          g_bar(g, alloc),
++          b_bar(b, alloc),
++          imagingRatio(imagingRatio),
++          hdpbrtLambdaMin(lambdaMin),
++          hdpbrtLambdaMax(lambdaMax) {
++        XYZFromSensorRGB = outputColorSpace->XYZFromRGB;
++    }
+     PixelSensor(const RGBColorSpace *outputColorSpace, Spectrum sensorIllum,
+                 Float imagingRatio, Allocator alloc)
+         : r_bar(&Spectra::X(), alloc),
+@@ -99,6 +112,13 @@ class PixelSensor {
+                                   (b_bar.Sample(lambda) * L).Average());
+     }
+ 
++    PBRT_CPU_GPU
++    bool HdPbrtSamplesRange() const { return hdpbrtLambdaMax > hdpbrtLambdaMin; }
++    PBRT_CPU_GPU
++    Float HdPbrtLambdaMin() const { return hdpbrtLambdaMin; }
++    PBRT_CPU_GPU
++    Float HdPbrtLambdaMax() const { return hdpbrtLambdaMax; }
++
+     // PixelSensor Public Members
+     SquareMatrix<3> XYZFromSensorRGB;
+ 
+@@ -111,6 +131,7 @@ class PixelSensor {
+     // PixelSensor Private Members
+     DenselySampledSpectrum r_bar, g_bar, b_bar;
+     Float imagingRatio;
++    Float hdpbrtLambdaMin = 0, hdpbrtLambdaMax = 0;
+     static constexpr int nSwatchReflectances = 24;
+     static Spectrum swatchReflectances[nSwatchReflectances];
+ };
+@@ -211,6 +232,9 @@ class FilmBase {
+ 
+     PBRT_CPU_GPU
+     SampledWavelengths SampleWavelengths(Float u) const {
++        if (sensor && sensor->HdPbrtSamplesRange())
++            return SampledWavelengths::SampleUniform(u, sensor->HdPbrtLambdaMin(),
++                                                     sensor->HdPbrtLambdaMax());
+         return SampledWavelengths::SampleVisible(u);
+     }
+ 
+diff --git a/src/pbrt/lights.cpp b/src/pbrt/lights.cpp
+index 7a2163f..1c794ac 100644
+--- a/src/pbrt/lights.cpp
++++ b/src/pbrt/lights.cpp
+@@ -189,6 +189,27 @@ std::string PointLight::ToString() const {
+     return StringPrintf("[ PointLight %s I: %s scale: %f ]", BaseToString(), I, scale);
+ }
+ 
++// hdPbrt: the brightness normalization of a light's spectrum. pbrt divides
++// by the luminance (1 nit per unit of scale); with "bool hdpbrtpowernormalize"
++// a spectrum given in nanometers (also outside the visible range, where it has
++// no luminance) instead carries the radiant power of the color space's white
++// at 1 nit, so an 850 nm light of intensity 1 emits as much power as a white
++// light of intensity 1.
++static Float HdPbrtSpectrumNormalization(const ParameterDictionary &parameters,
++                                         Spectrum s, const RGBColorSpace *colorSpace) {
++    if (!parameters.GetOneBool("hdpbrtpowernormalize", false))
++        return 1 / SpectrumToPhotometric(s);
++    const Spectrum white = &colorSpace->illuminant;
++    Float sPower = 0, whitePower = 0;
++    for (Float l = Lambda_min; l <= Lambda_max; ++l)
++        sPower += s(l);
++    for (Float l = 360; l <= 830; ++l)  // white's power over the visible range
++        whitePower += white(l);
++    if (sPower <= 0)
++        return 0;
++    return whitePower / SpectrumToPhotometric(white) / sPower;
++}
++
+ PointLight *PointLight::Create(const Transform &renderFromLight, Medium medium,
+                                const ParameterDictionary &parameters,
+                                const RGBColorSpace *colorSpace, const FileLoc *loc,
+@@ -197,7 +218,7 @@ PointLight *PointLight::Create(const Transform &renderFromLight, Medium medium,
+                                            SpectrumType::Illuminant, alloc);
+     Float sc = parameters.GetOneFloat("scale", 1);
+ 
+-    sc /= SpectrumToPhotometric(I);
++    sc *= HdPbrtSpectrumNormalization(parameters, I, colorSpace);
+ 
+     Float phi_v = parameters.GetOneFloat("power", -1);
+     if (phi_v > 0) {
+@@ -304,7 +325,7 @@ DistantLight *DistantLight::Create(const Transform &renderFromLight,
+     Transform finalRenderFromLight = renderFromLight * t;
+ 
+     // Scale the light spectrum to be equivalent to 1 nit
+-    sc /= SpectrumToPhotometric(L);
++    sc *= HdPbrtSpectrumNormalization(parameters, L, colorSpace);
+ 
+     // Adjust scale to meet target illuminance value
+     // Like for IBLs we measure illuminance as incident on an upward-facing
+@@ -706,7 +727,7 @@ GoniometricLight *GoniometricLight::Create(const Transform &renderFromLight,
+                       texname);
+     }
+ 
+-    sc /= SpectrumToPhotometric(I);
++    sc *= HdPbrtSpectrumNormalization(parameters, I, colorSpace);
+ 
+     Float phi_v = parameters.GetOneFloat("power", -1);
+     if (phi_v > 0) {
+@@ -967,7 +988,8 @@ DiffuseAreaLight *DiffuseAreaLight::Create(const Transform &renderFromLight,
+         L = &colorSpace->illuminant;
+ 
+     // scale so that radiance is equivalent to 1 nit
+-    scale /= SpectrumToPhotometric(L ? L : &colorSpace->illuminant);
++    scale *= HdPbrtSpectrumNormalization(parameters, L ? L : &colorSpace->illuminant,
++                                         colorSpace);
+ 
+     Float phi_v = parameters.GetOneFloat("power", -1.0f);
+     if (phi_v > 0) {
+@@ -1514,7 +1536,7 @@ SpotLight *SpotLight::Create(const Transform &renderFromLight, Medium medium,
+     Transform t = Translate(Vector3f(from.x, from.y, from.z)) * Inverse(dirToZ);
+     Transform finalRenderFromLight = renderFromLight * t;
+ 
+-    sc /= SpectrumToPhotometric(I);
++    sc *= HdPbrtSpectrumNormalization(parameters, I, colorSpace);
+ 
+     Float phi_v = parameters.GetOneFloat("power", -1);
+     if (phi_v > 0) {
+@@ -1632,7 +1654,7 @@ Light Light::Create(const std::string &name, const ParameterDictionary &paramete
+                                "\"filename\" with ImageInfiniteLight");
+ 
+             // Scale the light spectrum to be equivalent to 1 nit
+-            scale /= SpectrumToPhotometric(L[0]);
++            scale *= HdPbrtSpectrumNormalization(parameters, L[0], colorSpace);
+ 
+             if (E_v > 0) {
+                 // If the scene specifies desired illuminance, first calculate
+diff --git a/src/pbrt/util/spectrum.h b/src/pbrt/util/spectrum.h
+index 660523b..4399964 100644
+--- a/src/pbrt/util/spectrum.h
++++ b/src/pbrt/util/spectrum.h
+@@ -31,7 +31,11 @@
+ namespace pbrt {
+ 
+ // Spectrum Constants
+-constexpr Float Lambda_min = 360, Lambda_max = 830;
++// hdPbrt: up to 1100 nm (silicon's limit) so lights and the "hdpbrtbands" sensor
++// can work in the near infrared. Visible rendering is unchanged: camera
++// wavelengths are still sampled over 360-830 unless a sensor asks otherwise,
++// and the CIE curves are zero beyond 830.
++constexpr Float Lambda_min = 360, Lambda_max = 1100;
+ 
+ static constexpr int NSpectrumSamples = 4;
+ 
+-- 
+2.43.0
+

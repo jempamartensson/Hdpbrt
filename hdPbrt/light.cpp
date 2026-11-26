@@ -30,7 +30,29 @@ T _Get(HdSceneDelegate *sd, SdfPath const &id, TfToken const &name, T def)
         if (v.IsHolding<double>()) return (float)v.UncheckedGet<double>();
         if (v.IsHolding<int>()) return (float)v.UncheckedGet<int>();
     }
+    if constexpr (std::is_same_v<T, TfToken>) {
+        if (v.IsHolding<std::string>()) return TfToken(v.UncheckedGet<std::string>());
+    }
     return def;
+}
+
+// pbrt's spectrum for a band light (pbrt:spectrum "band"): a Gaussian of the
+// given center and FWHM in nanometers, on pbrt's 360-1100 nm range.
+std::string _BandSpectrum(float center, float fwhm)
+{
+    const float sigma = std::max(fwhm, 1.f) / 2.35482f;
+    const float lo = std::max(360.f, center - 4 * sigma), hi = std::min(1100.f, center + 4 * sigma);
+    std::ostringstream os;
+    os << "[";
+    const float step = std::max(0.5f, std::min(5.f, sigma / 4));
+    if (lo > 360.f)
+        os << " " << lo - step << " 0";
+    for (float l = lo; l <= hi + 1e-3f; l += step)
+        os << " " << l << " " << std::exp(-(l - center) * (l - center) / (2 * sigma * sigma));
+    if (hi < 1100.f)
+        os << " " << hi + step << " 0";
+    os << " ]";
+    return os.str();
 }
 
 // Color of a black body in linear Rec.709 (converted to the working space by
@@ -113,6 +135,37 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
                                       sd, id, HdLightTokens->colorTemperature, 6500.f))));
     const bool normalize = _Get<bool>(sd, id, HdLightTokens->normalize, false);
     const float scale = intensity * std::exp2(exposure);
+    // pbrt:spectrum: "rgb" (color, as UsdLux), "band" (a Gaussian at
+    // pbrt:wavelength with FWHM pbrt:bandwidth, nm, carrying the radiant power
+    // of a white light of the same intensity: it can be invisible infrared or
+    // ultraviolet) or "blackbody" (pbrt's spectral black body at
+    // inputs:colorTemperature, luminance as a white light, infrared included).
+    // The spectral modes ignore color and color temperature; textured lights
+    // stay RGB.
+    const TfToken spectrumMode =
+        _Get<TfToken>(sd, id, TfToken("pbrt:spectrum"), TfToken("rgb"));
+    const bool bandLight = spectrumMode == "band", blackbodyLight = spectrumMode == "blackbody";
+    if (bandLight || blackbodyLight)
+        color = GfVec3f(1);
+    else if (spectrumMode != "rgb")
+        TF_WARN("hdPbrt: %s: pbrt:spectrum \"%s\" unknown (rgb, band, blackbody)", id.GetText(),
+                spectrumMode.GetText());
+    // A light's emission parameter (L or I) for the color times scale v.
+    auto emit = [&](const char *name, GfVec3f const &v) {
+        std::ostringstream e;
+        if (bandLight)
+            e << " \"spectrum " << name << "\" "
+              << _BandSpectrum(_Get<float>(sd, id, TfToken("pbrt:wavelength"), 850.f),
+                               _Get<float>(sd, id, TfToken("pbrt:bandwidth"), 40.f))
+              << " \"bool hdpbrtpowernormalize\" true \"float scale\" " << v[0];
+        else if (blackbodyLight)
+            e << " \"blackbody " << name << "\" "
+              << _Get<float>(sd, id, HdLightTokens->colorTemperature, 6500.f)
+              << " \"float scale\" " << v[0];
+        else
+            e << " \"rgb " << name << "\" " << HdPbrt_Rgb(v);
+        return e.str();
+    };
     GfVec3f L = color * scale;
 
     // Light shaping (UsdLuxShapingAPI), written only for authored values: pbrt
@@ -213,7 +266,7 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
                        : " \"string colorspace\" " + HdPbrt_Quote(emissionColorSpace))
                << " \"float scale\" " << s << " \"rgb hdpbrttint\" " << HdPbrt_Rgb(color);
         else
-            os << " \"rgb L\" " << HdPbrt_Rgb(color * s);
+            os << emit("L", color * s);
         if (!cameraVisible)
             os << " \"bool hdpbrtcamera\" false";
         // The cylinder is written rotated (pbrt's runs along z, USD's along x):
@@ -238,7 +291,7 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
             const double s2 = std::pow(std::sin(thetaMax), 2);
             Ld /= float(thetaMax <= M_PI / 2 ? s2 * M_PI : (2 - s2) * M_PI);
         }
-        os << " \"rgb L\" " << HdPbrt_Rgb(Ld);
+        os << emit("L", Ld);
         if (angle > 0)
             os << " \"float hdpbrtangle\" " << angle;
         os << links << "\nAttributeEnd\n";
@@ -252,7 +305,7 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
             // with normalize the luminance is divided by the area 4 pi r^2.
             GfVec3f I = normalize ? L / 4.f : L * float(M_PI * rr * rr);
             os << "AttributeBegin\n  Transform " << HdPbrt_Matrix(xf) << "\n"
-               << "  LightSource \"point\" \"rgb I\" " << HdPbrt_Rgb(I) << shaping
+               << "  LightSource \"point\"" << emit("I", I) << shaping
                << "\nAttributeEnd\n";
         } else {
             areaHeader(4 * M_PI * r * r * _ScaleUniform2(xf));
@@ -305,7 +358,7 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
         } else {
             if (!tex.empty())
                 TF_WARN("hdPbrt: could not use dome texture %s", tex.c_str());
-            os << "  LightSource \"infinite\" \"rgb L\" " << HdPbrt_Rgb(L) << links << "\n";
+            os << "  LightSource \"infinite\"" << emit("L", L) << links << "\n";
         }
         os << "AttributeEnd\n";
     } else {

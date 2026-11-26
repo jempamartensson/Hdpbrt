@@ -145,8 +145,10 @@ bool HdPbrt_WriteIESTable(const std::string &iesPath, float angleScale, bool nor
 // lensRadius 0 = pinhole (no depth of field).
 struct HdPbrtLens {
     float lensRadius = 0.f, focusDistance = 0.f;
+    std::string sensor;  // Film sensor parameters (camera pbrt:sensor), or ""
     bool operator==(HdPbrtLens const &o) const {
-        return lensRadius == o.lensRadius && focusDistance == o.focusDistance;
+        return lensRadius == o.lensRadius && focusDistance == o.focusDistance &&
+               sensor == o.sensor;
     }
     bool operator!=(HdPbrtLens const &o) const { return !(*this == o); }
 };
@@ -452,10 +454,13 @@ public:
     void Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
               HdDirtyBits *dirtyBits) override;
     HdTimeSampleArray<GfMatrix4d, 4> GetTransformSamples() const;
+    // pbrt Film parameters for the camera's spectral response (pbrt:sensor).
+    std::string GetSensorParams() const;
 
 private:
     mutable std::mutex _mutex;
     HdTimeSampleArray<GfMatrix4d, 4> _xform;
+    std::string _sensor;
 };
 
 // ---------------------------------------------------------------------------

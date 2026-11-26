@@ -88,6 +88,9 @@ is ACEScg, so use an ACEScg OCIO config in Houdini (Houdini 22's default config 
 Rec.709; `$HFS/packages/ocio/cg-config-*.ocio` is ACEScg) and set Blender files' working space
 to ACEScg. Textures are read in their own color space (file metadata or the shader's, else
 sRGB/Rec.709 primaries) and converted, as Karma does.
+Lights and cameras can also work in nanometers: `pbrt:spectrum` band / blackbody on lights,
+`pbrt:sensor` bands on cameras (e.g. infrared false color, 360-1100 nm); in Houdini they are
+on the pbrt tab of Light and Camera LOPs. See `docs/images/infrared.png`.
 Not yet: volume materials other than the Karma pyro shader,
 in-memory Houdini volumes (write VDBs to disk).
 

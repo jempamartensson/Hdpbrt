@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (36 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (37 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -142,6 +142,14 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    else sRGB). RGBFilm `"bool hdpbrtkeepcolorspace"` writes the PFM in the film's color space
    (pbrt converts PFM/PNG output to sRGB; the display stream was never converted, so without it
    the final image and the stream disagree).
+37. Spectral lights and camera: `Lambda_max` 830 -> 1100 nm (visible rendering unchanged: camera
+   wavelengths still come from SampleVisible, the CIE curves are 0 beyond 830). Lights take
+   `"bool hdpbrtpowernormalize"`: the spectrum carries the radiant power (360-830) of the color
+   space's white at 1 nit instead of luminance 1 (an infrared spectrum has none). RGBFilm sensor
+   `"hdpbrtbands"` + `"float hdpbrtsensorbands"` [center FWHM] x 3 (nm): Gaussian responses
+   written raw (XYZFromSensorRGB = the output space's XYZFromRGB), each normalized so an
+   equal-energy spectrum with white's visible power reads 1, and wavelengths sampled uniformly
+   over the bands' +-3 sigma (PixelSensor::HdPbrtSamplesRange, FilmBase::SampleWavelengths).
 
 ## Done in the 2026-11-22 session
 
@@ -317,8 +325,23 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   viewport passes them to the delegate (an exported scene had pixelsamples 8 / path). The
   UsdRenderers.json entry is only `valid` + `menulabel` (flipbook pixel-identical without it;
   other fields such as depthstyle left at Houdini's defaults, which work).
-- Requested 2026-11-26 (Jens, for tonight): (2) a switch on lights and the camera to work in nanometers
-  instead of RGB (spectral lights / a spectral camera response, e.g. infrared photography).
+- Spectral lights and camera (done 2026-11-26, Jens: "nanometers instead of RGB, think infrared
+  photography"; pbrt patch 37). Lights: `pbrt:spectrum` = rgb (UsdLux color) | band (Gaussian at
+  `pbrt:wavelength`, FWHM `pbrt:bandwidth`, nm; radiant power of a white light of the same
+  intensity) | blackbody (pbrt's spectral black body at inputs:colorTemperature, luminance as
+  white); spectral modes ignore color; textured lights stay RGB (`light.cpp` `emit`). Camera:
+  `pbrt:sensor` = cie1931 | bands (`pbrt:sensorRed/Green/Blue` float2 center, FWHM; defaults
+  850/100, 650/80, 550/80 = infrared false color), read in `HdPbrtCamera::Sync`, passed as
+  `HdPbrtLens::sensor` onto the Film line. Hydra delivers plain `pbrt:*` attributes on light and
+  camera prims (GetLightParamValue / GetCameraParamValue). `_Light.ds` / `_Camera.ds` give Light
+  and Camera LOPs a pbrt tab (checked: authors those attributes; band fields hide unless their
+  mode is on). Checks: an 850 nm light is black to the color camera, red (4.1) to the bands
+  camera; white light through the bands reads (0.77, 1.03, 1.21) (ACES D60's real spectrum,
+  with infrared). Test scene: `tests/spectral/ir_scene.usda` (+ `_infrared` override);
+  `docs/images/infrared.png`. Limit: RGB reflectances have no infrared character (pbrt's
+  sigmoid upsampling just extends the RGB curve), so foliage doesn't glow in IR (no Wood
+  effect); next step would be per-material infrared reflectance. IR renders are noisier
+  (uniform wavelength sampling).
 - Not translated yet: in-memory Houdini volumes (`op:` paths). Volume materials other than
   the Karma pyro shader (e.g. MaterialX volumes on Volume prims) use the renderer settings.
 - Karma pyro shader (2026-11-25, pbrt patch 35): Houdini exports kma_pyroshader as a MaterialX

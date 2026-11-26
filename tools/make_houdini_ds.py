@@ -6,7 +6,9 @@
 #                 the delegate with SetRenderSetting under the decoded name);
 #   _Global.ds:   the Render Settings LOP and Edit Properties: each setting is
 #                 a "pbrt:..." attribute on the RenderSettings prim, which
-#                 Houdini (viewport and husk) hands to the delegate.
+#                 Houdini (viewport and husk) hands to the delegate;
+#   _Light.ds, _Camera.ds: a pbrt tab on light and camera LOPs ("pbrt:..."
+#                 attributes on those prims, read by HdPbrtLight / HdPbrtCamera).
 # Parm names are the setting names encoded with hou.text.encodeParm.
 import os
 import hou
@@ -51,21 +53,52 @@ SETTINGS = [
      'Also write the pbrt scene (with its PLY meshes) here.'),
 ]
 
+# Per-prim properties (same tuple layout; an optional 8th item: the setting this
+# one shows with, as (name, value)).
+LIGHT_SETTINGS = [
+    ('pbrt:spectrum', 'Spectrum', 'menu', 'rgb', ['rgb', 'band', 'blackbody'], 'Spectrum',
+     'rgb: the light\'s color (UsdLux). band: a Gaussian at Wavelength with FWHM Bandwidth (nm, '
+     '360-1100), carrying the radiant power of a white light of the same intensity, so it can be '
+     'invisible infrared. blackbody: a spectral black body at the color temperature (infrared '
+     'included), as bright as a white light. The spectral modes ignore color; textured lights '
+     'stay RGB.'),
+    ('pbrt:wavelength', 'Wavelength (nm)', 'float', 850.0, (360, 1100), 'Spectrum',
+     'Peak wavelength of a band light.', ('pbrt:spectrum', 'band')),
+    ('pbrt:bandwidth', 'Bandwidth (nm)', 'float', 40.0, (1, 400), 'Spectrum',
+     'Full width at half maximum of a band light.', ('pbrt:spectrum', 'band')),
+]
+CAMERA_SETTINGS = [
+    ('pbrt:sensor', 'Sensor', 'menu', 'cie1931', ['cie1931', 'bands'], 'Sensor',
+     'cie1931: a color camera (the image in the working color space). bands: the image\'s R, G '
+     'and B are three Gaussian spectral responses in nm (360-1100), written raw: infrared false '
+     'color (default bands), monochrome infrared (three equal bands), ...'),
+    ('pbrt:sensorRed', 'Red Band (center, FWHM nm)', 'float2', (850.0, 100.0), (360, 1100), 'Sensor',
+     'Spectral response written to the red channel.', ('pbrt:sensor', 'bands')),
+    ('pbrt:sensorGreen', 'Green Band (center, FWHM nm)', 'float2', (650.0, 80.0), (360, 1100),
+     'Sensor', 'Spectral response written to the green channel.', ('pbrt:sensor', 'bands')),
+    ('pbrt:sensorBlue', 'Blue Band (center, FWHM nm)', 'float2', (550.0, 80.0), (360, 1100),
+     'Sensor', 'Spectral response written to the blue channel.', ('pbrt:sensor', 'bands')),
+]
+
 VALUE_TYPE = {'int': 'int', 'float': 'float', 'bool': 'bool', 'string': 'string', 'menu': 'token',
-              'file': 'string'}
+              'file': 'string', 'float2': 'float2'}
 PARM_TYPE = {'int': 'integer', 'float': 'float', 'bool': 'toggle', 'string': 'string',
-             'menu': 'string', 'file': 'file'}
+             'menu': 'string', 'file': 'file', 'float2': 'float'}
 
 
 def q(s):
     return '"%s"' % str(s).replace('\\', '\\\\').replace('"', '\\"')
 
 
-def value_parm(name, label, kind, default, extra, category, help, scope, usd):
+def value_parm(name, label, kind, default, extra, category, help, scope, usd, shows=None):
     enc = hou.text.encodeParm(name)
     lines = ['    parm {', '        name    %s' % q(enc), '        label   %s' % q(label),
-             '        type    %s' % PARM_TYPE[kind], '        size    1']
-    if kind == 'bool':
+             '        type    %s' % PARM_TYPE[kind],
+             '        size    %d' % (2 if kind == 'float2' else 1)]
+    if kind == 'float2':
+        lines.append('        default { %s %s }' % default)
+        lines.append('        range   { %s %s }' % extra)
+    elif kind == 'bool':
         lines.append('        default { %d }' % int(default))
     elif kind in ('int', 'float'):
         lines.append('        default { %s }' % default)
@@ -85,12 +118,14 @@ def value_parm(name, label, kind, default, extra, category, help, scope, usd):
     if usd:
         c = hou.text.encodeParm(name + '_control')
         lines.append('        disablewhen "{ %s == block } { %s == none }"' % (c, c))
+    if shows:
+        lines.append('        hidewhen "{ %s != %s }"' % (hou.text.encodeParm(shows[0]), q(shows[1])))
     lines.append('    }')
     return lines
 
 
 def control_parm(name, label, kind):
-    vt = {'int': 'int', 'float': 'float', 'bool': 'bool'}.get(kind, 'string')
+    vt = {'int': 'int', 'float': 'float', 'bool': 'bool', 'float2': 'float2'}.get(kind, 'string')
     return ['    parm {', '        name    %s' % q(hou.text.encodeParm(name + '_control')),
             '        label   %s' % q(label), '        type    string',
             '        default { "none" }', '        menujoin {',
@@ -100,17 +135,19 @@ def control_parm(name, label, kind):
             '    }']
 
 
-def write(fname, header, usd):
+def write(fname, header, usd, settings=SETTINGS):
     out = ['/// Generated by tools/make_houdini_ds.py; edit that, not this file.', header,
            '#include "$HFS/houdini/soho/parameters/CommonMacros.ds"', '{',
            '    name    "pbrt"', '    label   "pbrt"',
            '    parmtag { spare_opfilter "!!SHOP/PROPERTIES!!" }',
            '    parmtag { spare_classtags "render" }', '']
-    for name, label, kind, default, extra, category, help in SETTINGS:
+    for entry in settings:
+        name, label, kind, default, extra, category, help = entry[:7]
+        shows = entry[7] if len(entry) > 7 else None
         if usd:
             out += control_parm(name, label, kind)
         out += value_parm(name, label, kind, default, extra, category, help,
-                          'viewport', usd)
+                          'viewport', usd, shows)
         out.append('')
     out.append('}')
     path = os.path.join(outdir, fname)
@@ -125,3 +162,9 @@ write('HdPbrtRendererPlugin_Viewport.ds',
 write('HdPbrtRendererPlugin_Global.ds',
       '/// hdPbrt render settings for the Render Settings LOP ("pbrt:*" attributes on the\n'
       '/// RenderSettings prim).', True)
+write('HdPbrtRendererPlugin_Light.ds',
+      '/// hdPbrt light properties ("pbrt:*" attributes on UsdLux light prims).', True,
+      LIGHT_SETTINGS)
+write('HdPbrtRendererPlugin_Camera.ds',
+      '/// hdPbrt camera properties ("pbrt:*" attributes on camera prims).', True,
+      CAMERA_SETTINGS)
