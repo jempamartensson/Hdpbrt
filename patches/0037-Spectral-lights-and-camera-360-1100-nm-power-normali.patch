@@ -1,7 +1,7 @@
 From 60101e0ab3752c5fb0957e121210f8e8d7125e71 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Thu, 26 Nov 2026 08:21:14 +0100
-Subject: [PATCH 37/38] Spectral lights and camera: 360-1100 nm,
+Subject: [PATCH 37/39] Spectral lights and camera: 360-1100 nm,
  power-normalized light spectra, Gaussian band sensor (for hdPbrt)
 
 - Lambda_max 830 -> 1100 nm. Visible rendering is unchanged (camera

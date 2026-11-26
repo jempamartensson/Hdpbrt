@@ -285,6 +285,83 @@
     }
 
     parm {
+        name    "xn__pbrtdisplacement_control_3fb"
+        label   "Displacement"
+        type    string
+        default { "none" }
+        menujoin {
+            [ "import loputils" ]
+            [ "return loputils.createEditPropertiesControlMenu(kwargs, 'bool')" ]
+            language python
+        }
+        parmtag { "sidefx::look" "icon" }
+    }
+    parm {
+        name    "xn__pbrtdisplacement_21a"
+        label   "Displacement"
+        type    toggle
+        size    1
+        default { 1 }
+        help    "True displacement of meshes by their material's displacement (height maps with uvs)."
+        parmtag { "spare_category" "Geometry" }
+        parmtag { "uiscope" "viewport" }
+        parmtag { "usdvaluetype" "bool" }
+        disablewhen "{ xn__pbrtdisplacement_control_3fb == block } { xn__pbrtdisplacement_control_3fb == none }"
+    }
+
+    parm {
+        name    "xn__pbrtdicingRate_control_ucb"
+        label   "Dicing Rate (pixels)"
+        type    string
+        default { "none" }
+        menujoin {
+            [ "import loputils" ]
+            [ "return loputils.createEditPropertiesControlMenu(kwargs, 'float')" ]
+            language python
+        }
+        parmtag { "sidefx::look" "icon" }
+    }
+    parm {
+        name    "xn__pbrtdicingRate_tya"
+        label   "Dicing Rate (pixels)"
+        type    float
+        size    1
+        default { 2.0 }
+        range   { 0.25 16 }
+        help    "Edge length of displaced triangles on screen, in pixels (smaller = finer, slower). Geometry outside the view is diced 4x more coarsely."
+        parmtag { "spare_category" "Geometry" }
+        parmtag { "uiscope" "viewport" }
+        parmtag { "usdvaluetype" "float" }
+        disablewhen "{ xn__pbrtdicingRate_control_ucb == block } { xn__pbrtdicingRate_control_ucb == none }"
+    }
+
+    parm {
+        name    "xn__pbrtdicingMaxTriangles_control_vpb"
+        label   "Dicing Max Triangles"
+        type    string
+        default { "none" }
+        menujoin {
+            [ "import loputils" ]
+            [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+            language python
+        }
+        parmtag { "sidefx::look" "icon" }
+    }
+    parm {
+        name    "xn__pbrtdicingMaxTriangles_ucb"
+        label   "Dicing Max Triangles"
+        type    integer
+        size    1
+        default { 20000000 }
+        range   { 100000 100000000 }
+        help    "Triangle budget per displaced mesh: past it the mesh is diced more coarsely."
+        parmtag { "spare_category" "Geometry" }
+        parmtag { "uiscope" "viewport" }
+        parmtag { "usdvaluetype" "int" }
+        disablewhen "{ xn__pbrtdicingMaxTriangles_control_vpb == block } { xn__pbrtdicingMaxTriangles_control_vpb == none }"
+    }
+
+    parm {
         name    "xn__pbrtvolumeDensity_control_qhb"
         label   "Volume Density Scale"
         type    string

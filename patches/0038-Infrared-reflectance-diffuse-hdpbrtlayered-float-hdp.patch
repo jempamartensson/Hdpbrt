@@ -1,7 +1,7 @@
 From cb235229914c03e1c6f37b2e024a938a091ea33f Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Thu, 26 Nov 2026 19:47:16 +0100
-Subject: [PATCH 38/38] Infrared reflectance: diffuse/hdpbrtlayered "float
+Subject: [PATCH 38/39] Infrared reflectance: diffuse/hdpbrtlayered "float
  hdpbrtir" above a red edge, per-wavelength mix texture (for hdPbrt)
 
 ---

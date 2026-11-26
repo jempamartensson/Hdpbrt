@@ -1,7 +1,7 @@
 From 73d85e8747b30db4979b7de9124bafe62c0a8014 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Mon, 23 Nov 2026 07:02:17 +0100
-Subject: [PATCH 13/38] Dielectric: optional "transmissiontint" on every
+Subject: [PATCH 13/39] Dielectric: optional "transmissiontint" on every
  transmission event (for hdPbrt)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

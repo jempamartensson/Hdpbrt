@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -955,6 +956,95 @@ HdPbrtMaterialDesc HdPbrtMaterial::GetDesc() const
     return preview ? _previewDesc : _desc;
 }
 
+void HdPbrtMaterial::_BuildDisplacement(HdMaterialNetworkMap const &map,
+                                        HdPbrtMaterialDesc *result) const
+{
+    HdMaterialNetwork2 net2 = HdConvertToHdMaterialNetwork2(map);
+    auto term = net2.terminals.find(HdMaterialTerminalTokens->displacement);
+    if (term == net2.terminals.end())
+        return;
+    auto it = net2.nodes.find(term->second.upstreamNode);
+    if (it == net2.nodes.end())
+        return;
+    const HdMaterialNode2 &disp = it->second;
+    const std::string type = disp.nodeTypeId.GetString();
+    if (!TfStringStartsWith(type, "ND_displacement_float") && type != "UsdPreviewSurface")
+        return;  // vector displacement isn't supported
+    const std::string pfx = TfMakeValidIdentifier(GetId().GetString()) + "_disp";
+    _Builder b{_Net{net2}, pfx, HdPbrtMaterialDesc{}, 0, _delegate};
+    // value = a * texture + c, folding constant multiply / add / subtract nodes.
+    std::function<bool(const HdMaterialNode2 &, const char *, double *, double *, std::string *)>
+        fold = [&](const HdMaterialNode2 &node, const char *input, double *a, double *c,
+                   std::string *tex) -> bool {
+        *tex = b.Texture(node, input, false);
+        if (!tex->empty()) {
+            *a = 1;
+            *c = 0;
+            // UsdUVTexture: scale is on the pbrt texture, bias added here.
+            const HdMaterialNode2 *up = b.net.Upstream(node, TfToken(input));
+            if (up && up->nodeTypeId == "UsdUVTexture") {
+                VtValue bias = _Param(*up, "bias");
+                if (bias.IsHolding<GfVec4f>())
+                    *c = bias.UncheckedGet<GfVec4f>()[0];
+            }
+            return true;
+        }
+        const HdMaterialNode2 *up = b.net.Upstream(node, TfToken(input));
+        if (!up)
+            return false;
+        const std::string t = up->nodeTypeId.GetString();
+        auto connected = [&](const char *in) {
+            return up->inputConnections.count(TfToken(in)) > 0;
+        };
+        const bool mul = TfStringStartsWith(t, "ND_multiply_float");
+        const bool add = TfStringStartsWith(t, "ND_add_float");
+        const bool sub = TfStringStartsWith(t, "ND_subtract_float");
+        if (!mul && !add && !sub)
+            return false;
+        const bool first = connected("in1");
+        if (first == connected("in2"))
+            return false;  // both or neither connected
+        const char *other = first ? "in2" : "in1";
+        const double k = _Float(*up, other, mul ? 1.f : 0.f);
+        double ia, ic;
+        if (!fold(*up, first ? "in1" : "in2", &ia, &ic, tex))
+            return false;
+        if (mul) {
+            *a = ia * k;
+            *c = ic * k;
+        } else if (add) {
+            *a = ia;
+            *c = ic + k;
+        } else if (first) {  // in1 - k
+            *a = ia;
+            *c = ic - k;
+        } else {  // k - in2
+            *a = -ia;
+            *c = k - ic;
+        }
+        return true;
+    };
+    double a = 1, c = 0;
+    std::string tex;
+    if (!fold(disp, "displacement", &a, &c, &tex)) {
+        if (getenv("HDPBRT_DEBUG"))
+            fprintf(stderr, "hdPbrt %s: displacement graph not supported (only an image "
+                            "with constant scale/offset)\n", GetId().GetText());
+        return;
+    }
+    if (type != "UsdPreviewSurface") {
+        const double scale = _Float(disp, "scale", 1.f);
+        a *= scale;
+        c *= scale;
+    }
+    if (std::fabs(a) < 1e-12)
+        return;
+    result->displacementTexture = tex;
+    result->displacementScale = float(a);
+    result->displacementOffset = float(c / a);
+    result->textures += b.desc.textures;
+}
+
 HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
 {
     HdPbrtMaterialDesc result = HdPbrt_DefaultMaterial();
@@ -1446,6 +1536,11 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
         }
     }
 
+    // True displacement (pbrt patch 39): the displacement terminal's height
+    // texture with constant scale/offset (MaterialX ND_displacement_float, or
+    // UsdPreviewSurface's displacement input).
+    if (res.IsHolding<HdMaterialNetworkMap>())
+        _BuildDisplacement(res.UncheckedGet<HdMaterialNetworkMap>(), &result);
     // Infrared reflectance: inputs pbrt:irReflectance / pbrt:irEdge on the
     // surface shader (or the Material's terminal node).
     if (res.IsHolding<HdMaterialNetworkMap>()) {

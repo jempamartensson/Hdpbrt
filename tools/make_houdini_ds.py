@@ -43,6 +43,13 @@ SETTINGS = [
      'Point-position keys over the shutter for deforming meshes.'),
     ('pbrt:subdivLevel', 'Subdivision Level', 'int', 2, (0, 6), 'Geometry',
      'Refinement level for catmullClark/loop meshes (0 = the cage).'),
+    ('pbrt:displacement', 'Displacement', 'bool', True, None, 'Geometry',
+     "True displacement of meshes by their material's displacement (height maps with uvs)."),
+    ('pbrt:dicingRate', 'Dicing Rate (pixels)', 'float', 2.0, (0.25, 16), 'Geometry',
+     'Edge length of displaced triangles on screen, in pixels (smaller = finer, slower). Geometry '
+     'outside the view is diced 4x more coarsely.'),
+    ('pbrt:dicingMaxTriangles', 'Dicing Max Triangles', 'int', 20000000, (100000, 100000000),
+     'Geometry', 'Triangle budget per displaced mesh: past it the mesh is diced more coarsely.'),
     ('pbrt:volumeDensity', 'Volume Density Scale', 'float', 1.0, (0, 10), 'Volumes',
      'Density scale for volumes without a pyro shader.'),
     ('pbrt:volumeAlbedo', 'Volume Albedo', 'float', 0.9, (0, 1), 'Volumes',

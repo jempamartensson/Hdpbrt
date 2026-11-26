@@ -1,0 +1,233 @@
+From d344fa6f7f65a0377ddcc4e0063ff8b0d54fcb99 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Thu, 26 Nov 2026 21:19:39 +0100
+Subject: [PATCH 39/39] plymesh displacement: screen-space dicing (pixel size,
+ off-screen 4x coarser, instance placement), triangle budget, crack-free
+ seams, scale/offset (for hdPbrt)
+
+---
+ src/pbrt/shapes.cpp  | 111 ++++++++++++++++++++++++++++++++++++-------
+ src/pbrt/util/mesh.h |  62 +++++++++++++++++++++---
+ 2 files changed, 150 insertions(+), 23 deletions(-)
+
+diff --git a/src/pbrt/shapes.cpp b/src/pbrt/shapes.cpp
+index df0f854..bd04d10 100644
+--- a/src/pbrt/shapes.cpp
++++ b/src/pbrt/shapes.cpp
+@@ -1460,24 +1460,101 @@ pstd::vector<Shape> Shape::Create(
+             LOG_VERBOSE("Starting to displace mesh \"%s\" with \"%s\"", filename,
+                         displacementTexName);
+ 
++            // hdPbrt: screen-space dicing. "hdpbrtdicepixel" is the size of
++            // a pixel (radians for a perspective camera at the render-space
++            // origin, CameraWorld; world units with "hdpbrtdiceortho"), so
++            // edges are measured in pixels against "hdpbrtdicerate".
++            // "hdpbrtdicexform" (16 floats, Transform layout): world from
++            // object for meshes inside ObjectBegin (instances), whose own
++            // transform is the identity. "hdpbrtdicemaxtris": per-mesh
++            // triangle budget (the edge length doubles until it fits).
++            // "hdpbrtdiceview" (16 floats, Transform layout): camera from
++            // render space (USD camera, looking down -z) and
++            // "hdpbrtdicewindow" [x0 x1 y0 y1] its screen window (tan units,
++            // or camera units for ortho): edges outside the view are diced
++            // "hdpbrtdiceoffscreen" (0.25) times as finely.
++            // Displacement = scale * (texture + offset).
++            const Float dicePixel = parameters.GetOneFloat("hdpbrtdicepixel", 0.f);
++            const bool diceOrtho = parameters.GetOneBool("hdpbrtdiceortho", false);
++            const Float diceRate = parameters.GetOneFloat("hdpbrtdicerate", 1.f);
++            const int maxTris = parameters.GetOneInt("hdpbrtdicemaxtris", 0);
++            const std::vector<Float> diceXform = parameters.GetFloatArray("hdpbrtdicexform");
++            const Float dispScale = parameters.GetOneFloat("hdpbrtdisplacementscale", 1.f);
++            const Float dispOffset = parameters.GetOneFloat("hdpbrtdisplacementoffset", 0.f);
++            const std::vector<Float> diceView = parameters.GetFloatArray("hdpbrtdiceview");
++            const std::vector<Float> diceWindow = parameters.GetFloatArray("hdpbrtdicewindow");
++            const Float offscreen = parameters.GetOneFloat("hdpbrtdiceoffscreen", 0.25f);
++            const bool frustum = diceView.size() == 16 && diceWindow.size() == 4;
++            Transform cameraFromRender;
++            if (frustum)
++                cameraFromRender =
++                    Transform(Transpose(SquareMatrix<4>(pstd::MakeConstSpan(diceView))));
++            // Screen window grown by 10% on each side.
++            Float wx0 = 0, wx1 = 0, wy0 = 0, wy1 = 0;
++            if (frustum) {
++                Float mx = 0.1f * (diceWindow[1] - diceWindow[0]);
++                Float my = 0.1f * (diceWindow[3] - diceWindow[2]);
++                wx0 = diceWindow[0] - mx; wx1 = diceWindow[1] + mx;
++                wy0 = diceWindow[2] - my; wy1 = diceWindow[3] + my;
++            }
++            Transform diceFromObject = *renderFromObject;
++            if (diceXform.size() == 16)
++                diceFromObject = diceFromObject *
++                                 Transform(Transpose(SquareMatrix<4>(pstd::MakeConstSpan(diceXform))));
++            const bool screen = dicePixel > 0;
++            Float maxDist = screen ? std::max<Float>(diceRate, 0.05f) : edgeLength;
++
+             int origTriCount = plyMesh.triIndices.size() / 3;
+-            plyMesh = plyMesh.Displace(
+-                [&](Point3f v0, Point3f v1) {
+-                    v0 = (*renderFromObject)(v0);
+-                    v1 = (*renderFromObject)(v1);
+-                    return Distance(v0, v1);
+-                },
+-                edgeLength,
+-                [&](Point3f *p, const Normal3f *n, const Point2f *uv, int nVertices) {
+-                    ParallelFor(0, nVertices, [=](int i) {
+-                        TextureEvalContext ctx;
+-                        ctx.p = p[i];
+-                        ctx.uv = uv[i];
+-                        Float d = UniversalTextureEvaluator()(displacement, ctx);
+-                        p[i] += Vector3f(d * n[i]);
+-                    });
+-                },
+-                loc);
++            TriQuadMesh displaced;
++            for (int attempt = 0;; ++attempt) {
++                bool over = false;
++                displaced = plyMesh.Displace(
++                    [&](Point3f v0, Point3f v1) {
++                        v0 = diceFromObject(v0);
++                        v1 = diceFromObject(v1);
++                        Float d = Distance(v0, v1);
++                        if (screen) {
++                            const Point3f mid = (v0 + v1) / 2;
++                            Float z = diceOrtho ? 1.f
++                                                : std::max<Float>(Length(Vector3f(mid)), 1e-4f);
++                            d /= dicePixel * z;
++                            if (frustum) {
++                                const Point3f q = cameraFromRender(mid);
++                                bool inside;
++                                if (diceOrtho)
++                                    inside = q.x >= wx0 && q.x <= wx1 && q.y >= wy0 && q.y <= wy1;
++                                else if (q.z >= 0)
++                                    inside = false;  // behind the camera
++                                else {
++                                    const Float sx = q.x / -q.z, sy = q.y / -q.z;
++                                    inside = sx >= wx0 && sx <= wx1 && sy >= wy0 && sy <= wy1;
++                                }
++                                if (!inside)
++                                    d *= offscreen;
++                            }
++                        }
++                        return d;
++                    },
++                    maxDist,
++                    [&](Point3f *p, const Normal3f *n, const Point2f *uv, int nVertices) {
++                        ParallelFor(0, nVertices, [=](int i) {
++                            TextureEvalContext ctx;
++                            ctx.p = p[i];
++                            ctx.uv = uv[i];
++                            Float d = UniversalTextureEvaluator()(displacement, ctx);
++                            d = dispScale * (d + dispOffset);
++                            p[i] += Vector3f(d * n[i]);
++                        });
++                    },
++                    loc, screen, maxTris > 0 ? size_t(maxTris) : 0, &over);
++                if (!over)
++                    break;
++                maxDist *= 2;
++                if (attempt == 0)
++                    Warning(loc, "%s: displacement needs more than %d triangles; dicing "
++                                 "more coarsely.", filename, maxTris);
++            }
++            plyMesh = std::move(displaced);
+ 
+             LOG_VERBOSE("Finished displacing mesh \"%s\" with \"%s\" -> %d tris",
+                         filename, displacementTexName, plyMesh.triIndices.size() / 3);
+diff --git a/src/pbrt/util/mesh.h b/src/pbrt/util/mesh.h
+index 3eb1df1..a9ca788 100644
+--- a/src/pbrt/util/mesh.h
++++ b/src/pbrt/util/mesh.h
+@@ -16,6 +16,7 @@
+ 
+ #include <array>
+ #include <string>
++#include <unordered_map>
+ #include <vector>
+ 
+ namespace pbrt {
+@@ -136,9 +137,15 @@ struct TriQuadMesh {
+ 
+     std::string ToString() const;
+ 
++    // hdPbrt: weldByPosition displaces vertices that share a position (an
++    // unwelded seam: face-varying uvs or normals) along their common averaged
++    // normal and averages the new normals over them, so seams stay closed.
++    // maxTris > 0: stop refining past that many triangles and set *overBudget
++    // (the mesh returned is then incomplete).
+     template <typename Dist, typename Disp>
+     TriQuadMesh Displace(Dist &&dist, Float maxDist, Disp &&displace,
+-                         const FileLoc *loc = nullptr) const {
++                         const FileLoc *loc = nullptr, bool weldByPosition = false,
++                         size_t maxTris = 0, bool *overBudget = nullptr) const {
+         if (uv.empty())
+             ErrorExit(loc, "Vertex uvs are currently required by Displace(). Sorry.\n");
+ 
+@@ -152,17 +159,60 @@ struct TriQuadMesh {
+ 
+         // Refine
+         HashMap<std::pair<int, int>, int, HashIntPair> edgeSplit({});
+-        for (int i = 0; i < oldTriIndices.size() / 3; ++i)
++        for (int i = 0; i < oldTriIndices.size() / 3; ++i) {
+             outputMesh.Refine(dist, maxDist, oldTriIndices[3 * i],
+                               oldTriIndices[3 * i + 1], oldTriIndices[3 * i + 2],
+                               edgeSplit);
++            if (maxTris > 0 && outputMesh.triIndices.size() / 3 > maxTris) {
++                if (overBudget)
++                    *overBudget = true;
++                return outputMesh;
++            }
++        }
+ 
+-        // Displace
+-        displace(outputMesh.p.data(), outputMesh.n.data(), outputMesh.uv.data(),
+-                 outputMesh.p.size());
++        if (!weldByPosition) {
++            // Displace
++            displace(outputMesh.p.data(), outputMesh.n.data(), outputMesh.uv.data(),
++                     outputMesh.p.size());
+ 
+-        outputMesh.ComputeNormals();
++            outputMesh.ComputeNormals();
++
++            return outputMesh;
++        }
+ 
++        // Group the vertices by position (before displacement).
++        struct HashPoint {
++            size_t operator()(const Point3f &q) const { return Hash(q.x, q.y, q.z); }
++        };
++        const size_t nv = outputMesh.p.size();
++        std::vector<int> group(nv);
++        int nGroups = 0;
++        {
++            std::unordered_map<Point3f, int, HashPoint> first;
++            first.reserve(nv);
++            for (size_t i = 0; i < nv; ++i) {
++                auto it = first.find(outputMesh.p[i]);
++                if (it == first.end())
++                    it = first.emplace(outputMesh.p[i], nGroups++).first;
++                group[i] = it->second;
++            }
++        }
++        auto averageOverGroups = [&](std::vector<Normal3f> &nn) {
++            if (nGroups == (int)nv)
++                return;
++            std::vector<Normal3f> sum(nGroups, Normal3f(0, 0, 0));
++            for (size_t i = 0; i < nv; ++i)
++                sum[group[i]] += nn[i];
++            for (size_t i = 0; i < nv; ++i) {
++                Normal3f s = sum[group[i]];
++                nn[i] = LengthSquared(s) > 0 ? Normalize(s) : nn[i];
++            }
++        };
++        std::vector<Normal3f> dispN(outputMesh.n);
++        averageOverGroups(dispN);
++        displace(outputMesh.p.data(), dispN.data(), outputMesh.uv.data(), nv);
++        outputMesh.ComputeNormals();
++        averageOverGroups(outputMesh.n);
+         return outputMesh;
+     }
+ 
+-- 
+2.43.0
+

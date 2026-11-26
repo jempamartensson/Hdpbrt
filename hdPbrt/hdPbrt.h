@@ -64,6 +64,9 @@ PXR_NAMESPACE_OPEN_SCOPE
     ((volumeTemperatureScale, "pbrt:volumeTemperatureScale")) \
     ((exportPath, "pbrt:exportPath"))           \
     ((materialPreview, "pbrt:materialPreview")) \
+    ((displacement, "pbrt:displacement"))       \
+    ((dicingRate, "pbrt:dicingRate"))           \
+    ((dicingMaxTriangles, "pbrt:dicingMaxTriangles")) \
     ((pbrtExecutable, "pbrt:executable"))       \
     ((workingSpace, "pbrt:workingSpace"))
 
@@ -166,6 +169,13 @@ std::string HdPbrt_Rgb(const GfVec3f &c);
 
 struct HdPbrtWriteContext {
     std::set<SdfPath> texturesWritten;
+    // Screen-space dicing of displaced meshes (pbrt patch 39): the size of a
+    // pixel (radians at the camera, or world units for an orthographic
+    // camera), and the camera position in world space.
+    float dicePixel = 0.f;
+    bool diceOrtho = false;
+    GfVec3d cameraPos{0, 0, 0};
+    std::string diceView;  // " \"float hdpbrtdiceview\" [...] \"float hdpbrtdicewindow\" [...]"
     int objectCounter = 0;
     int volumeCounter = 0;
     size_t numMeshes = 0, numInstances = 0;
@@ -203,6 +213,10 @@ struct HdPbrtMaterialDesc {
     // red edge (nm), for infrared renders; < 0: the RGB fit continues.
     float irReflectance = -1.f;
     float irEdge = 720.f;
+    // True displacement (pbrt patch 39): a float texture along the normal,
+    // displacement = scale * (texture + offset).
+    std::string displacementTexture;
+    float displacementScale = 1.f, displacementOffset = 0.f;
 };
 
 class HdPbrtMaterial final : public HdMaterial {
@@ -217,6 +231,7 @@ public:
 
 private:
     HdPbrtMaterialDesc _Build(VtValue const &materialResource) const;
+    void _BuildDisplacement(HdMaterialNetworkMap const &map, HdPbrtMaterialDesc *result) const;
 
     HdPbrtRenderDelegate *_delegate;
     mutable std::mutex _mutex;
@@ -324,6 +339,8 @@ protected:
     virtual std::string _Shapes(std::string const &extra) const = 0;
     // Emissive materials become area lights on these shapes (meshes).
     virtual bool _CanEmit() const { return false; }
+    // Displaced by the material's displacement (meshes with uvs).
+    virtual bool _CanDisplace() const { return false; }
 
     void _SyncTransform(HdSceneDelegate *sd);
     void _SyncInstancing(HdSceneDelegate *sd);  // after the instancer synced
@@ -340,6 +357,7 @@ protected:
     bool _hasDisplayColor = false;
     float _displayOpacity = 1.f;
     float _irReflectance = -1.f;  // primvar pbrt:irReflectance, < 0: none
+    mutable bool _warnedNoUV = false;  // displacement without uvs
     bool _instanced = false;
     VtArray<TfToken> _categories;
 };
@@ -359,6 +377,7 @@ protected:
     HdRprim const &_Prim() const override { return *this; }
     std::string _Shapes(std::string const &extra) const override;
     bool _CanEmit() const override { return true; }
+    bool _CanDisplace() const override { return _hasUV; }
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override { return bits; }
     void _InitRepr(TfToken const &reprToken, HdDirtyBits *dirtyBits) override {}
 
@@ -369,6 +388,7 @@ private:
     void _UpdateMotionPlys(std::vector<float> const &times) const;
 
     std::string _plyPath;
+    bool _hasUV = false;
     size_t _numTriangles = 0;
     int _plyVersion = 0;
 

@@ -129,6 +129,12 @@ void HdPbrtRenderDelegate::_Init()
     add("Volume Temperature Scale (Kelvin per unit, 0 = no emission)",
         HdPbrtSettingsTokens->volumeTemperatureScale, VtValue(0.f));
     add("Export .pbrt Scene To", HdPbrtSettingsTokens->exportPath, VtValue(std::string()));
+    add("Displacement (true displacement of meshes)", HdPbrtSettingsTokens->displacement,
+        VtValue(true));
+    add("Dicing Rate (displacement edge length in pixels)", HdPbrtSettingsTokens->dicingRate,
+        VtValue(2.f));
+    add("Dicing Max Triangles (per displaced mesh)", HdPbrtSettingsTokens->dicingMaxTriangles,
+        VtValue(20000000));
     add("Material Preview (UsdPreviewSurface instead of MaterialX / Karma graphs)",
         HdPbrtSettingsTokens->materialPreview, VtValue(false));
     _PopulateDefaultSettings(_settingDescriptors);
@@ -843,6 +849,21 @@ bool HdPbrtRenderDelegate::StartRender(HdRenderIndex *index, const GfMatrix4d &v
 
     os << "WorldBegin\n";
     HdPbrtWriteContext ctx;
+    // Screen-space dicing: the screen window is in tan units (fov 90) or
+    // camera-space units (orthographic), so its width over xres is a pixel.
+    ctx.dicePixel = float((sx1 - sx0) / width);
+    ctx.diceOrtho = ortho;
+    ctx.cameraPos = view.GetInverse().ExtractTranslation();
+    {
+        // Camera from render space (pbrt's CameraWorld: world moved so the
+        // camera is at the origin), for coarser dicing outside the view.
+        GfMatrix4d renderToWorld(1.0);
+        renderToWorld.SetTranslate(ctx.cameraPos);
+        char w[160];
+        snprintf(w, sizeof(w), " \"float hdpbrtdicewindow\" [%.9g %.9g %.9g %.9g]", sx0, sx1,
+                 sy0, sy1);
+        ctx.diceView = " \"float hdpbrtdiceview\" " + HdPbrt_Matrix(renderToWorld * view) + w;
+    }
     {
         os << lightText;
         std::lock_guard<std::mutex> l(_registryMutex);

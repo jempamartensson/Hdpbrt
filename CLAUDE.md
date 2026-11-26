@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (38 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (39 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -154,6 +154,17 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    the red edge), `"float hdpbrtiredge"` (nm, default 720) and `"float hdpbrtirwidth"` (60). The
    reflectance texture is wrapped in a SpectrumMixTexture that blends per wavelength (smoothstep
    across the edge; `SetHdPbrtInfrared`) instead of by `amount`.
+39. Displacement on `plymesh` (pbrt's own `TriQuadMesh::Displace`, extended): screen-space dicing
+   with `"float hdpbrtdicepixel"` (pixel size: radians, CameraWorld so the camera is at the
+   render-space origin; world units with `"bool hdpbrtdiceortho"`) and `"float hdpbrtdicerate"`
+   (edge length in pixels); `"float hdpbrtdiceview"` [16] (camera from render space, USD camera
+   looking down -z) + `"float hdpbrtdicewindow"` [4]: edges outside the window (+10%) or behind
+   the camera count `"hdpbrtdiceoffscreen"` (0.25) as long; `"float hdpbrtdicexform"` [16]
+   (world from object for shapes inside ObjectBegin/Identity: the nearest instance);
+   `"integer hdpbrtdicemaxtris"` (refinement stops past it and restarts with the edge length
+   doubled, warning); with dicing on, vertices sharing a position (unwelded seams) displace along
+   their averaged normal and get averaged normals afterwards (no cracks); displacement =
+   `hdpbrtdisplacementscale` x (texture + `hdpbrtdisplacementoffset`).
 
 ## Done in the 2026-11-22 session
 
@@ -381,6 +392,25 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   only recognizes the single pyro node of the universal network, so both descriptions take the
   pyro volume from whichever version has it (kma-first alone made every pyro frame plain smoke;
   run_pyro.sh caught it, now identical to PYRO_RESULTS.txt).
+- True displacement (2026-11-26, pbrt patch 39; Jens chose screen-space dicing and scalar height
+  maps first). `HdPbrtMaterial::_BuildDisplacement` reads the displacement terminal:
+  `ND_displacement_float` (its `scale`) or UsdPreviewSurface's `displacement` input, an image
+  through `_Builder::Texture` (float, linear), folding constant ND_multiply/add/subtract_float
+  nodes into scale/offset (UsdUVTexture: scale on the pbrt texture, bias as offset). Procedural
+  graphs are skipped (`HDPBRT_DEBUG` says so), so Typhoon's sin(position) `open_pbr--displacement`
+  stays undisplaced. `HdPbrtGeom::Write` adds the shape params when the mesh has uvs
+  (`_CanDisplace`; else one TF_WARN) and `pbrt:displacement` is on; the write context carries the
+  pixel size, camera position and view (`StartRender`). Settings: `pbrt:displacement` (on),
+  `pbrt:dicingRate` (pixels, default 2: same silhouettes as 1 within noise, 4x fewer triangles;
+  1 px = 0.4 px^2 triangles, finer than Karma), `pbrt:dicingMaxTriangles` (20M per mesh). Checks
+  (`tests/displacement/run_displacement.sh`, Karma via husk): silhouettes differ on 0.9% of object
+  pixels (antialiasing/noise), displaced ground within 1.5%; triangle count exactly 4x lower at
+  twice the rate; off-screen dicing 8.1M -> 5.0M triangles at rate 1 with an identical image;
+  face-varying-uv cube closed; PointInstancer dices by the nearest instance; Karma Material
+  Builder `mtlxdisplacement` + `mtlximage` reaches pbrt. `docs/images/displacement.png` (hdPbrt
+  left, Karma right; Karma's EXR has a black background). Limits: needs uvs; no vector
+  displacement; deforming displaced meshes aren't motion blurred (pbrt ignores motion files with
+  displacement); camera moves re-dice (the scene is rewritten).
 - Not translated yet: in-memory Houdini volumes (`op:` paths). Volume materials other than
   the Karma pyro shader (e.g. MaterialX volumes on Volume prims) use the renderer settings.
 - Karma pyro shader (2026-11-25, pbrt patch 35): Houdini exports kma_pyroshader as a MaterialX

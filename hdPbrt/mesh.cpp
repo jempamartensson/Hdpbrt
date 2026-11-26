@@ -408,6 +408,7 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
     if (!_plyPath.empty())
         unlink(_plyPath.c_str());  // a running pbrt keeps its open handle
     _plyPath = path;
+    _hasUV = hasUV;
     _numTriangles = writtenTris;
     _motion = std::move(motion);
     for (const std::string &m : _motionPlys)

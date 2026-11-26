@@ -62,6 +62,8 @@ Render settings: `pbrt:pixelSamples`, `pbrt:maxDepth`, `pbrt:integrator`, `pbrt:
 `pbrt:subdivLevel` (uniform subdivision of catmullClark/loop meshes, default 2, 0 = off),
 `enableExposureCompensation` (apply the camera's exposure, default on),
 `pbrt:volumeDensity` (1), `pbrt:volumeAlbedo` (0.9), `pbrt:volumeTemperatureScale` (0: no emission),
+`pbrt:displacement` (true displacement, default on), `pbrt:dicingRate` (displaced triangle edge
+length in pixels, default 2), `pbrt:dicingMaxTriangles` (per displaced mesh, default 20M),
 `pbrt:materialPreview` (render materials' UsdPreviewSurface instead of their MaterialX or Karma
 Material Builder graph, to compare; default off), `pbrt:exportPath`.
 
@@ -98,6 +100,10 @@ glows as on infrared film. In Houdini, MaterialX standard/OpenPBR surface and US
 Surface nodes get a "pbrt" folder with an Infrared Reflectance checkbox (new nodes; for existing
 ones run `hdpbrt_houdini.add_material_parms(hou.selectedNodes())` in the Python shell), and the
 Render Geometry Settings LOP has it per object. See `docs/images/infrared.png`.
+True displacement: a material's displacement (MaterialX `displacement` node or UsdPreviewSurface
+`displacement`, driven by an image with constant scale/offset) displaces meshes with uvs, diced
+in screen space (`docs/images/displacement.png`: hdPbrt left, Karma right). Not yet: vector
+displacement, procedural displacement graphs, motion blur on displaced deforming meshes.
 Not yet: volume materials other than the Karma pyro shader,
 in-memory Houdini volumes (write VDBs to disk).
 

@@ -1,7 +1,7 @@
 From 5fc4126098eb0758ea9bb199b6672906c30e6935 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Mon, 23 Nov 2026 18:50:27 +0100
-Subject: [PATCH 21/38] Dielectric "hdpbrtmultiscatter": 1/E(wo) microfacet
+Subject: [PATCH 21/39] Dielectric "hdpbrtmultiscatter": 1/E(wo) microfacet
  multiple-scattering compensation (for hdPbrt)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

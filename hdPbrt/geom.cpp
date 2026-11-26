@@ -329,9 +329,42 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
         extra << " \"texture alpha\" " << HdPbrt_Quote(mat.opacityTexture);
     else if (alpha < 0.999f)
         extra << " \"float alpha\" " << std::max(alpha, 0.f);
+    // True displacement (pbrt patch 39), diced in screen space.
+    const bool displaced = !mat.displacementTexture.empty() && ctx.dicePixel > 0 &&
+                           _delegate->GetSetting<bool>(HdPbrtSettingsTokens->displacement, true);
+    if (displaced && !_CanDisplace()) {
+        if (!_warnedNoUV) {
+            _warnedNoUV = true;
+            TF_WARN("hdPbrt: %s has no uvs; its displacement is ignored.",
+                    prim.GetId().GetText());
+        }
+    } else if (displaced) {
+        extra << " \"texture displacement\" " << HdPbrt_Quote(mat.displacementTexture)
+              << " \"float hdpbrtdicepixel\" " << ctx.dicePixel << " \"float hdpbrtdicerate\" "
+              << std::max(0.05f, _delegate->GetSetting<float>(
+                                     HdPbrtSettingsTokens->dicingRate, 2.f))
+              << " \"integer hdpbrtdicemaxtris\" "
+              << std::max(1000, _delegate->GetSetting<int>(
+                                    HdPbrtSettingsTokens->dicingMaxTriangles, 20000000));
+        if (ctx.diceOrtho)
+            extra << " \"bool hdpbrtdiceortho\" true";
+        extra << ctx.diceView;
+        if (mat.displacementScale != 1.f)
+            extra << " \"float hdpbrtdisplacementscale\" " << mat.displacementScale;
+        if (mat.displacementOffset != 0.f)
+            extra << " \"float hdpbrtdisplacementoffset\" " << mat.displacementOffset;
+    }
     const std::string shapes = _Shapes(extra.str());
     if (shapes.empty())
         return;
+    // Inside ObjectBegin the shape's own transform is the identity: dice it
+    // as placed by `worldFromObject` (the nearest instance to the camera).
+    auto diceShapes = [&](const GfMatrix4d &worldFromObject) {
+        if (!displaced || !_CanDisplace() || shapes.empty() || shapes.back() != '\n')
+            return shapes;
+        return shapes.substr(0, shapes.size() - 1) + " \"float hdpbrtdicexform\" " +
+               HdPbrt_Matrix(worldFromObject) + "\n";
+    };
     os << "# " << prim.GetId().GetString() << "\n";
     if (!_instanced) {
         std::string motionAttr;
@@ -351,14 +384,26 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
             // N-key transform motion only exists for object instances.
             std::string name = "hdpbrt_obj_" + std::to_string(ctx.objectCounter++);
             os << "ObjectBegin " << HdPbrt_Quote(name) << "\n  Identity\n  " << matLine << "  "
-               << shapes << "ObjectEnd\nAttributeBegin " << motionAttr
+               << diceShapes(keys.front()) << "ObjectEnd\nAttributeBegin " << motionAttr
                << " ObjectInstance " << HdPbrt_Quote(name) << " AttributeEnd\n";
         }
         ++ctx.numMeshes;
     } else {
         std::string name = "hdpbrt_obj_" + std::to_string(ctx.objectCounter++);
+        GfMatrix4d nearest = xf[0] * inst[0][0];
+        if (displaced) {
+            double best = 1e300;
+            for (size_t i = 0; i < inst[0].size(); ++i) {
+                const GfMatrix4d m = xf[0] * inst[0][i];
+                const double d = (m.ExtractTranslation() - ctx.cameraPos).GetLengthSq();
+                if (d < best) {
+                    best = d;
+                    nearest = m;
+                }
+            }
+        }
         os << "ObjectBegin " << HdPbrt_Quote(name) << "\n  Identity\n  " << matLine << "  "
-           << shapes << "ObjectEnd\n";
+           << diceShapes(nearest) << "ObjectEnd\n";
         // hdpbrtinstanceid: the instance index Hydra expects in the instanceId
         // AOV (flattened over nested instancers, see HdPbrtInstancer).
         std::vector<GfMatrix4d> keys(nx);

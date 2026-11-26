@@ -154,6 +154,44 @@
     }
 
     parm {
+        name    "xn__pbrtdisplacement_21a"
+        label   "Displacement"
+        type    toggle
+        size    1
+        default { 1 }
+        help    "True displacement of meshes by their material's displacement (height maps with uvs)."
+        parmtag { "spare_category" "Geometry" }
+        parmtag { "uiscope" "viewport" }
+        parmtag { "usdvaluetype" "bool" }
+    }
+
+    parm {
+        name    "xn__pbrtdicingRate_tya"
+        label   "Dicing Rate (pixels)"
+        type    float
+        size    1
+        default { 2.0 }
+        range   { 0.25 16 }
+        help    "Edge length of displaced triangles on screen, in pixels (smaller = finer, slower). Geometry outside the view is diced 4x more coarsely."
+        parmtag { "spare_category" "Geometry" }
+        parmtag { "uiscope" "viewport" }
+        parmtag { "usdvaluetype" "float" }
+    }
+
+    parm {
+        name    "xn__pbrtdicingMaxTriangles_ucb"
+        label   "Dicing Max Triangles"
+        type    integer
+        size    1
+        default { 20000000 }
+        range   { 100000 100000000 }
+        help    "Triangle budget per displaced mesh: past it the mesh is diced more coarsely."
+        parmtag { "spare_category" "Geometry" }
+        parmtag { "uiscope" "viewport" }
+        parmtag { "usdvaluetype" "int" }
+    }
+
+    parm {
         name    "xn__pbrtvolumeDensity_p3a"
         label   "Volume Density Scale"
         type    float
