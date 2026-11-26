@@ -250,6 +250,26 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   instance. Before that, point instances were in no collection (unlit by any linked light). Area-light shapes don't block, shadow or show a
   back (pbrt `interface` material, patch 10; rechecked 2026-11-25 with a rect light seen
   from behind over a floor).
+- Houdini op: images (done 2026-11-26, Houdini flavor): texture files (UsdUVTexture, MaterialX
+  image nodes) and rect/dome light textures that start with `op:` (COP nodes, with Houdini's
+  `{output}`, `[frame]`, `(xres,yres)` modifiers) are cooked with the HDK's
+  `TIL_CopResolver::getRaster` (what Karma uses; it handles Copernicus) in `houdiniImage.cpp`,
+  the only file built with the HDK's defines (from `hcustom -c`) and no USD headers; it links
+  `libHoudiniUT`. Written as float PFM (1 channel stays 1, else RGB; Houdini's bottom-first rows
+  are PFM's), read as linear. USD's Ar can't do it: Houdini's `FS_ArResolver` takes `op:` but
+  returns an empty asset for COPs. Live edits: Houdini's viewport resyncs nothing when a COP
+  changes (its COP watcher restarts Karma only; marking sprims dirty from the delegate is never
+  synced either, because Houdini stops syncing once the render converges), so each op: path
+  keeps one file (plus one equal-area EXR for domes) and the render pass polls
+  `getRasterVersion` (it moves on edit, before the cook; no cook needed) at most 4x/s, rewrites the
+  file (temp + rename) and restarts pbrt. Don't use the resolver's thread cache: Houdini only
+  clears it for Karma, so it returns the old image after an edit. Each `[frame]` path is its own
+  file; LOPs author that suffix as a time sample for time-dependent COPs (a Dome Light LOP
+  writes op:/obj/copnet1/sky[3] at frame 3), so scrubbing an animated COP leaves one file per
+  frame visited in the temp dir (frames revisited reuse theirs). Tests: `tests/cop_textures/cop_textures.py` (op: vs the same
+  COPs saved by Houdini's rop_image: pixel-identical; text upright), `tests/viewport/vp_cop.py`
+  (live edit of a texture COP and a dome COP), `tests/viewport/vp_cop_frames.py` (animated COP
+  through a Dome Light LOP at frames 3, 7, 3: exact in the viewport).
 - Not translated yet: in-memory Houdini volumes (`op:` paths). Volume materials other than
   the Karma pyro shader (e.g. MaterialX volumes on Volume prims) use the renderer settings.
 - Karma pyro shader (2026-11-25, pbrt patch 35): Houdini exports kma_pyroshader as a MaterialX

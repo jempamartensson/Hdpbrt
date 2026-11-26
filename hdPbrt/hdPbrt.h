@@ -37,6 +37,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -180,7 +181,7 @@ struct HdPbrtMaterialDesc {
 
 class HdPbrtMaterial final : public HdMaterial {
 public:
-    explicit HdPbrtMaterial(SdfPath const &id);
+    HdPbrtMaterial(SdfPath const &id, HdPbrtRenderDelegate *delegate);
     void Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
               HdDirtyBits *dirtyBits) override;
     HdDirtyBits GetInitialDirtyBitsMask() const override { return AllDirty; }
@@ -191,6 +192,7 @@ public:
     }
 
 private:
+    HdPbrtRenderDelegate *_delegate;
     mutable std::mutex _mutex;
     HdPbrtMaterialDesc _desc;
 };
@@ -592,6 +594,16 @@ public:
     std::string LinkParam(VtArray<TfToken> const &categories);
     // HdPbrt_WriteIESTable, cached per file, mtime, angle scale and normalize.
     std::string GetIESTable(const std::string &ies, float angleScale, bool normalize);
+    // A Houdini op: image (COP node, Houdini flavor) cooked into a float PFM.
+    // Each op: path keeps its file; when the node changes, PollHoudiniImages
+    // rewrites it and restarts the render (Houdini's viewport doesn't resync
+    // anything when a COP changes, so the scene text can't depend on it).
+    // Empty on failure (warns).
+    std::string GetHoudiniImage(const std::string &opPath);
+    // The same for a dome light: the image in pbrt's equal-area layout.
+    std::string GetHoudiniEquiArea(const std::string &opPath);
+    // Called by the render pass on every execute (at most 4 checks a second).
+    void PollHoudiniImages();
     bool GetNanoVDB(const std::string &vdb, const std::string &densityGrid,
                     const std::string &temperatureGrid, std::string *nvdb, GfRange3d *bbox);
 
@@ -628,6 +640,17 @@ private:
     std::map<std::string, std::string> _equiAreaCache;
     std::map<std::string, std::pair<std::string, GfRange3d>> _nanoVdbCache;
     std::map<std::string, std::string> _iesCache;
+    struct _HoudiniImage {
+        std::string version, file;   // file: stable for the op: path
+        std::string equiArea;        // stable too, when a dome uses it
+        int opid = -1;
+        long long nodeVersion = -1;  // HdPbrt_HoudiniImageVersion at the last cook
+        bool ok = false;
+    };
+    bool _CookHoudiniImage(const std::string &opPath, _HoudiniImage &img);  // _texMutex held
+    bool _MakeEquiArea(const std::string &latlong, const std::string &out);
+    std::map<std::string, _HoudiniImage> _houdiniImages;
+    std::chrono::steady_clock::time_point _lastHoudiniPoll;
     std::mutex _linkMutex;
     std::map<TfToken, int> _linkBits;
     hdpbrt::PbrtSession _session;

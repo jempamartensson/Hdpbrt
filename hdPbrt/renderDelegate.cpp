@@ -27,6 +27,14 @@
 
 extern char **environ;
 
+#ifdef HDPBRT_HOUDINI
+// houdiniImage.cpp (HDK)
+bool HdPbrt_HoudiniImage(const std::string &path, std::string *version,
+                         std::string (*writeTo)(void *ctx, const std::string &version),
+                         void *ctx, int *opid, std::string *error);
+long long HdPbrt_HoudiniImageVersion(int opid);
+#endif
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 TF_DEFINE_PUBLIC_TOKENS(HdPbrtSettingsTokens, HDPBRT_SETTINGS_TOKENS);
@@ -294,7 +302,7 @@ HdSprim *HdPbrtRenderDelegate::CreateSprim(TfToken const &typeId, SdfPath const 
     if (typeId == HdPrimTypeTokens->camera)
         return new HdPbrtCamera(sprimId);
     if (typeId == HdPrimTypeTokens->material)
-        return new HdPbrtMaterial(sprimId);
+        return new HdPbrtMaterial(sprimId, this);
     if (std::find(_supportedSprims.begin(), _supportedSprims.end(), typeId) !=
         _supportedSprims.end())
         return new HdPbrtLight(sprimId, typeId, this);
@@ -415,17 +423,26 @@ std::string HdPbrtRenderDelegate::GetEquiAreaTexture(const std::string &latlong)
     auto it = _equiAreaCache.find(key);
     if (it != _equiAreaCache.end())
         return it->second;
-    std::string exe = _PbrtExecutable();
-    std::string imgtool = std::filesystem::path(exe).parent_path() / "imgtool";
     std::string out = NewTempPath("env", ".exr");
-    bool ok = _RunTool({imgtool, "makeequiarea", latlong, "--outfile", out},
-                       NewTempPath("imgtool", ".log"));
-    if (!ok) {
-        TF_WARN("hdPbrt: imgtool makeequiarea failed for %s", latlong.c_str());
+    if (!_MakeEquiArea(latlong, out))
         out.clear();
-    }
     _equiAreaCache[key] = out;
     return out;
+}
+
+bool HdPbrtRenderDelegate::_MakeEquiArea(const std::string &latlong, const std::string &out)
+{
+    std::string imgtool = std::filesystem::path(_PbrtExecutable()).parent_path() / "imgtool";
+    // Through a temporary file, so `out` is replaced in one step.
+    const std::string tmp = out + ".tmp.exr";
+    bool ok = _RunTool({imgtool, "makeequiarea", latlong, "--outfile", tmp},
+                       NewTempPath("imgtool", ".log")) &&
+              rename(tmp.c_str(), out.c_str()) == 0;
+    if (!ok) {
+        unlink(tmp.c_str());
+        TF_WARN("hdPbrt: imgtool makeequiarea failed for %s", latlong.c_str());
+    }
+    return ok;
 }
 
 int HdPbrtRenderDelegate::LinkBit(TfToken const &collection)
@@ -484,6 +501,104 @@ std::string HdPbrtRenderDelegate::GetIESTable(const std::string &ies, float angl
     }
     _iesCache[key] = out;
     return out;
+}
+
+bool HdPbrtRenderDelegate::_CookHoudiniImage(const std::string &opPath, _HoudiniImage &img)
+{
+#ifdef HDPBRT_HOUDINI
+    if (img.file.empty())
+        img.file = NewTempPath("cop", ".pfm");
+    struct Ctx {
+        _HoudiniImage *img;
+        std::string tmp;
+    } ctx{&img, {}};
+    // Written next to the file and renamed over it: a pbrt still starting
+    // never sees half an image.
+    auto writeTo = [](void *c, const std::string &version) -> std::string {
+        Ctx &x = *static_cast<Ctx *>(c);
+        if (x.img->ok && x.img->version == version)
+            return {};  // unchanged
+        x.tmp = x.img->file + ".tmp";
+        return x.tmp;
+    };
+    std::string version, error;
+    int opid = -1;
+    const bool ok = ::HdPbrt_HoudiniImage(opPath, &version, writeTo, &ctx, &opid, &error);
+    img.opid = opid;
+    img.nodeVersion = ::HdPbrt_HoudiniImageVersion(opid);
+    if (ok && !ctx.tmp.empty() && rename(ctx.tmp.c_str(), img.file.c_str()) != 0) {
+        error = "could not rename " + ctx.tmp;
+        unlink(ctx.tmp.c_str());
+        img.ok = false;
+    } else {
+        img.ok = ok;
+    }
+    if (!img.ok) {
+        TF_WARN("hdPbrt: Houdini image %s: %s", opPath.c_str(), error.c_str());
+        img.version.clear();
+        return false;
+    }
+    if (img.version != version && !img.equiArea.empty() &&
+        !_MakeEquiArea(img.file, img.equiArea))
+        img.equiArea.clear();
+    img.version = version;
+    return true;
+#else
+    (void)img;
+    TF_WARN("hdPbrt: op: images (%s) need Houdini", opPath.c_str());
+    return false;
+#endif
+}
+
+std::string HdPbrtRenderDelegate::GetHoudiniImage(const std::string &opPath)
+{
+    std::lock_guard<std::mutex> l(_texMutex);
+    _HoudiniImage &img = _houdiniImages[opPath];
+    return _CookHoudiniImage(opPath, img) ? img.file : std::string();
+}
+
+std::string HdPbrtRenderDelegate::GetHoudiniEquiArea(const std::string &opPath)
+{
+    std::lock_guard<std::mutex> l(_texMutex);
+    _HoudiniImage &img = _houdiniImages[opPath];
+    if (!_CookHoudiniImage(opPath, img))
+        return {};
+    if (img.equiArea.empty()) {
+        std::string out = NewTempPath("env", ".exr");
+        if (_MakeEquiArea(img.file, out))
+            img.equiArea = out;
+    }
+    return img.equiArea;
+}
+
+void HdPbrtRenderDelegate::PollHoudiniImages()
+{
+#ifdef HDPBRT_HOUDINI
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> l(_texMutex);
+        if (_houdiniImages.empty())
+            return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - _lastHoudiniPoll < std::chrono::milliseconds(250))
+            return;
+        _lastHoudiniPoll = now;
+        static const bool debug = getenv("HDPBRT_DEBUG") != nullptr;
+        for (auto &kv : _houdiniImages) {
+            _HoudiniImage &img = kv.second;
+            if (img.opid < 0 || ::HdPbrt_HoudiniImageVersion(img.opid) == img.nodeVersion)
+                continue;
+            const std::string before = img.version;
+            _CookHoudiniImage(kv.first, img);
+            if (debug)
+                fprintf(stderr, "hdPbrt: op: image %s changed (%s -> %s)\n", kv.first.c_str(),
+                        before.c_str(), img.version.c_str());
+            changed |= img.version != before;
+        }
+    }
+    if (changed && _renderParam)
+        _renderParam->Edit();  // the render pass restarts pbrt with the new files
+#endif
 }
 
 bool HdPbrtRenderDelegate::GetNanoVDB(const std::string &vdb, const std::string &densityGrid,

@@ -69,7 +69,8 @@ Environment: `HDPBRT_PBRT_EXECUTABLE`, `HDPBRT_TMPDIR`, `HDPBRT_KEEP_TMP=1`,
 Meshes (catmullClark/loop subdivision with OpenSubdiv, creases, holes), implicit shapes,
 basis curves (bspline, bezier, catmullRom, linear; tubes or ribbons), points (spheres),
 point instancers, volumes (OpenVDB fields as a pbrt NanoVDB medium); UsdPreviewSurface and MaterialX standard_surface /
-open_pbr_surface (mapped to pbrt conductor, dielectric or coateddiffuse) with image textures;
+open_pbr_surface (mapped to pbrt conductor, dielectric or coateddiffuse) with image textures
+(in Houdini also `op:` paths to COP nodes, updating live when the COP changes);
 distant, sphere, rect, disk, cylinder and dome lights, light shaping (cone, focus, IES
 profiles) on sphere, rect and disk lights, light linking and shadow linking; perspective and orthographic cameras,
 depth of field from the camera's fStop and focusDistance (thin lens), camera exposure
@@ -78,7 +79,7 @@ over the camera shutter (meshes and point instances) and deformation blur for me
 points are time-sampled, with N keys for curved motion, and camera motion (two keys);
 color, depth, primId and instanceId AOVs (viewport selection, including point instances).
 Without a dome light the background is transparent, so the host's viewport background shows.
-Not yet: velocity motion blur, volume materials,
+Not yet: volume materials other than the Karma pyro shader,
 in-memory Houdini volumes (write VDBs to disk).
 
 ## Tests

@@ -145,6 +145,7 @@ struct _Builder {
     std::string prefix;  // unique texture name prefix
     HdPbrtMaterialDesc desc;
     int texCount = 0;
+    HdPbrtRenderDelegate *delegate = nullptr;  // for Houdini op: images
 
     // Follow `input` on `node`: returns a named pbrt texture if it's driven by an
     // image, sets *fromPrimvar if it reads displayColor-like primvars.
@@ -168,7 +169,14 @@ struct _Builder {
         if (!_IsTextureNode(*up))
             return {};
         std::string file = _AssetPath(_Param(*up, "file"));
-        if (file.empty() || !_SupportedImage(file))
+        // Houdini op: images (COP nodes) are cooked into a float file; they
+        // hold linear values, whatever the node's color space says.
+        const bool houdiniImage = TfStringStartsWith(file, "op:");
+        if (houdiniImage)
+            file = delegate ? delegate->GetHoudiniImage(file) : std::string();
+        else if (!_SupportedImage(file))
+            file.clear();
+        if (file.empty())
             return {};
         // UsdUVTexture: sourceColorSpace "auto" decodes 8-bit images as sRGB.
         // MaterialX image nodes: a file is in the document's (linear) color
@@ -188,7 +196,7 @@ struct _Builder {
             if (cs.IsHolding<TfToken>() && cs.UncheckedGet<TfToken>() == "raw")
                 encoding = "linear";
         }
-        if (!isColor)
+        if (!isColor || houdiniImage)
             encoding = "linear";
         std::string name = prefix + "_" + input + std::to_string(texCount++);
         std::ostringstream os;
@@ -850,7 +858,8 @@ bool HdPbrt_PyroVolume(const HdMaterialNetwork2 &net, const HdMaterialNode2 &n,
     return true;
 }
 
-HdPbrtMaterial::HdPbrtMaterial(SdfPath const &id) : HdMaterial(id) {}
+HdPbrtMaterial::HdPbrtMaterial(SdfPath const &id, HdPbrtRenderDelegate *delegate)
+    : HdMaterial(id), _delegate(delegate) {}
 
 void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
                           HdDirtyBits *dirtyBits)
@@ -930,7 +939,7 @@ void HdPbrtMaterial::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderP
             result = d;
         } else if (surf) {
             std::string pfx = TfMakeValidIdentifier(GetId().GetString());
-            _Builder b{_Net{net2}, pfx, HdPbrtMaterialDesc{}, 0};
+            _Builder b{_Net{net2}, pfx, HdPbrtMaterialDesc{}, 0, _delegate};
             const std::string type = surf->nodeTypeId.GetString();
             // MaterialX BSDF-node graphs (ND_surface) go through their own mapper.
             const bool mtlxGraph = _MtlxMapper{b}.MapSurface(*surf, b.desc);

@@ -44,6 +44,9 @@ target_compile_options(hdPbrt PRIVATE -Wno-deprecated -Wno-deprecated-declaratio
 
 if(HDPBRT_FLAVOR STREQUAL "houdini")
   set(HFS "/opt/hfs22.0.508" CACHE PATH "Houdini install")
+  # The HDK's VERSION define (houdiniImage.cpp): from the install's sys header.
+  file(STRINGS ${HFS}/toolkit/include/SYS/SYS_Version.h _hv REGEX "define SYS_VERSION_FULL ")
+  string(REGEX REPLACE ".*\"(.*)\".*" "\\1" HDPBRT_HOUDINI_VERSION "${_hv}")
   target_link_options(hdPbrt PRIVATE -Wl,--no-undefined)
   target_compile_definitions(hdPbrt PRIVATE HDPBRT_HOUDINI=1)
   target_include_directories(hdPbrt SYSTEM PRIVATE
@@ -55,6 +58,13 @@ if(HDPBRT_FLAVOR STREQUAL "houdini")
   target_link_libraries(hdPbrt PRIVATE ${HFS}/dsolib/libtbb.so ${HFS}/python/lib/libpython3.13.so
     ${HFS}/dsolib/libosdCPU.so)
   set_target_properties(hdPbrt PROPERTIES INSTALL_RPATH "${HFS}/dsolib" BUILD_RPATH "${HFS}/dsolib")
+  # op: images (COP nodes) through the HDK's TIL_CopResolver. Only this file
+  # sees the HDK's defines (from `hcustom -c`); it includes no USD headers.
+  target_sources(hdPbrt PRIVATE hdPbrt/houdiniImage.cpp)
+  set_source_files_properties(hdPbrt/houdiniImage.cpp PROPERTIES COMPILE_DEFINITIONS
+    "VERSION=\"${HDPBRT_HOUDINI_VERSION}\";_GNU_SOURCE;LINUX;AMD64;SIZEOF_VOID_P=8;SESI_LITTLE_ENDIAN;HBOOST_ASIO_USE_TS_EXECUTOR_AS_DEFAULT=1;HBOOST_BIND_GLOBAL_PLACEHOLDERS=1;ENABLE_THREADS;USE_PTHREADS;_REENTRANT;_FILE_OFFSET_BITS=64;OPENCL_ENABLED=1;OPENVDB_ENABLED=1"
+    COMPILE_OPTIONS "-faligned-new")
+  target_link_libraries(hdPbrt PRIVATE ${HFS}/dsolib/libHoudiniUT.so)
 elseif(HDPBRT_FLAVOR STREQUAL "blender")
   set(BLENDER_LIB "/opt/blender-5.3.0-linux-x64/lib" CACHE PATH "Blender lib dir")
   set(USD_SOURCE "" CACHE PATH "OpenUSD source tree matching Blender's USD")

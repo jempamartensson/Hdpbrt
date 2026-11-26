@@ -71,6 +71,10 @@ void HdPbrtRenderPass::_ToNdcDepth(std::vector<float> *zs, GfMatrix4d const &pro
 void HdPbrtRenderPass::_Execute(HdRenderPassStateSharedPtr const &state,
                                 TfTokenVector const &renderTags)
 {
+    // Houdini op: images whose COP changed are rewritten in place; then the
+    // scene version moves and pbrt restarts below.
+    _delegate->PollHoudiniImages();
+
     // Find the color AOV.
     HdPbrtRenderBuffer *color = nullptr, *depth = nullptr;
     HdPbrtRenderBuffer *primId = nullptr, *instanceId = nullptr;

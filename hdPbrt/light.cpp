@@ -191,6 +191,8 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
         if (tv.IsHolding<SdfAssetPath>()) {
             const SdfAssetPath &a = tv.UncheckedGet<SdfAssetPath>();
             emissionImage = a.GetResolvedPath().empty() ? a.GetAssetPath() : a.GetResolvedPath();
+            if (TfStringStartsWith(emissionImage, "op:"))  // Houdini COP node
+                emissionImage = _delegate->GetHoudiniImage(emissionImage);
         }
     }
     auto areaHeader = [&](double area) {
@@ -278,7 +280,9 @@ void HdPbrtLight::Sync(HdSceneDelegate *sd, HdRenderParam *renderParam, HdDirtyB
             const SdfAssetPath &a = tv.UncheckedGet<SdfAssetPath>();
             tex = a.GetResolvedPath().empty() ? a.GetAssetPath() : a.GetResolvedPath();
         }
-        std::string eq = tex.empty() ? std::string() : _delegate->GetEquiAreaTexture(tex);
+        std::string eq = tex.empty()                     ? std::string()
+                         : TfStringStartsWith(tex, "op:") ? _delegate->GetHoudiniEquiArea(tex)
+                                                          : _delegate->GetEquiAreaTexture(tex);
         // pbrt's environment frame is +Z up with phi = atan2(y, x); USD's dome
         // is +Y up with the lat-long image's center toward +Z and u growing
         // toward -X (OpenEXR convention). d_usd = (p.y, p.z, -p.x).
