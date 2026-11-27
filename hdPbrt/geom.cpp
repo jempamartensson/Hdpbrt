@@ -17,7 +17,12 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 TF_DEFINE_PRIVATE_TOKENS(_tokens, (displayColor)(displayOpacity)
                          ((pbrtIrReflectance, "pbrt:irReflectance"))
-                         ((pbrtIrReflectanceSop, "pbrt_irReflectance")));
+                         ((pbrtIrReflectanceSop, "pbrt_irReflectance"))
+                         ((pbrtDicingRate, "pbrt:dicingRate"))
+                         ((pbrtDicingRateSop, "pbrt_dicingRate"))
+                         ((pbrtDicingMaxTriangles, "pbrt:dicingMaxTriangles"))
+                         ((pbrtDicingMaxTrianglesSop, "pbrt_dicingMaxTriangles"))
+                         ((karmaDicingQuality, "karma:object:dicingquality")));
 
 namespace {
 
@@ -48,6 +53,24 @@ VtValue _GetFlat(HdSceneDelegate *sd, SdfPath const &id, TfToken const &name)
             _Flatten<float>(&v, indices);
     }
     return v;
+}
+
+// The first value of a scalar primvar, `fallback` if it has none.
+float _Scalar(VtValue const &v, float fallback)
+{
+    if (v.IsHolding<float>())
+        return v.UncheckedGet<float>();
+    if (v.IsHolding<double>())
+        return (float)v.UncheckedGet<double>();
+    if (v.IsHolding<int>())
+        return (float)v.UncheckedGet<int>();
+    if (v.IsHolding<VtFloatArray>() && !v.UncheckedGet<VtFloatArray>().empty())
+        return v.UncheckedGet<VtFloatArray>()[0];
+    if (v.IsHolding<VtDoubleArray>() && !v.UncheckedGet<VtDoubleArray>().empty())
+        return (float)v.UncheckedGet<VtDoubleArray>()[0];
+    if (v.IsHolding<VtIntArray>() && !v.UncheckedGet<VtIntArray>().empty())
+        return (float)v.UncheckedGet<VtIntArray>()[0];
+    return fallback;
 }
 
 }  // namespace
@@ -168,20 +191,22 @@ void HdPbrtGeom::_SyncDisplayColor(HdSceneDelegate *sd)
     // and Blender can't have a colon in the name).
     HdPbrtPrimvar ir = HdPbrt_FindPrimvar(
         sd, id, {_tokens->pbrtIrReflectance, _tokens->pbrtIrReflectanceSop});
-    float irRefl = -1.f;
-    if (ir.valid) {
-        const VtValue &v = ir.value;
-        if (v.IsHolding<VtFloatArray>() && !v.UncheckedGet<VtFloatArray>().empty())
-            irRefl = v.UncheckedGet<VtFloatArray>()[0];
-        else if (v.IsHolding<float>())
-            irRefl = v.UncheckedGet<float>();
-        else if (v.IsHolding<double>())
-            irRefl = (float)v.UncheckedGet<double>();
-        else if (v.IsHolding<VtDoubleArray>() && !v.UncheckedGet<VtDoubleArray>().empty())
-            irRefl = (float)v.UncheckedGet<VtDoubleArray>()[0];
-    }
+    const float irRefl = ir.valid ? _Scalar(ir.value, -1.f) : -1.f;
+    // Per-object dicing for displacement: pbrt:dicingRate (pixels) overrides
+    // the render setting; Karma's dicing quality divides it (2 = twice as fine).
+    auto scalar = [&](std::vector<TfToken> const &names) {
+        HdPbrtPrimvar pv = HdPbrt_FindPrimvar(sd, id, names);
+        return pv.valid ? _Scalar(pv.value, -1.f) : -1.f;
+    };
+    const float diceRate = scalar({_tokens->pbrtDicingRate, _tokens->pbrtDicingRateSop});
+    const float diceQuality = scalar({_tokens->karmaDicingQuality});
+    const float diceMaxTris =
+        scalar({_tokens->pbrtDicingMaxTriangles, _tokens->pbrtDicingMaxTrianglesSop});
     std::lock_guard<std::mutex> lock(_mutex);
     _irReflectance = irRefl;
+    _dicingRate = diceRate;
+    _dicingQuality = diceQuality;
+    _dicingMaxTriangles = diceMaxTris > 0 ? (int)std::min(diceMaxTris, 2e9f) : -1;
     _displayColor = col;
     _hasDisplayColor = ok;
     _displayOpacity = op;
@@ -367,12 +392,19 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
         } else {
             extra << " \"texture displacement\" " << HdPbrt_Quote(mat.displacementTexture);
         }
+        // Per-object primvars (see _SyncDisplayColor) over the render settings.
+        float rate = _dicingRate > 0
+                         ? _dicingRate
+                         : _delegate->GetSetting<float>(HdPbrtSettingsTokens->dicingRate, 2.f);
+        if (_dicingQuality >= 0)
+            rate /= std::max(_dicingQuality, 0.01f);
+        const int maxTris =
+            _dicingMaxTriangles > 0
+                ? _dicingMaxTriangles
+                : _delegate->GetSetting<int>(HdPbrtSettingsTokens->dicingMaxTriangles, 20000000);
         extra << " \"float hdpbrtdicepixel\" " << ctx.dicePixel << " \"float hdpbrtdicerate\" "
-              << std::max(0.05f, _delegate->GetSetting<float>(
-                                     HdPbrtSettingsTokens->dicingRate, 2.f))
-              << " \"integer hdpbrtdicemaxtris\" "
-              << std::max(1000, _delegate->GetSetting<int>(
-                                    HdPbrtSettingsTokens->dicingMaxTriangles, 20000000));
+              << std::min(std::max(0.05f, rate), 1e4f) << " \"integer hdpbrtdicemaxtris\" "
+              << std::max(1000, maxTris);
         if (ctx.diceOrtho)
             extra << " \"bool hdpbrtdiceortho\" true";
         extra << ctx.diceView;

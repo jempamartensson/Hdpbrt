@@ -109,7 +109,10 @@ MaterialX graphs: noise, fractal, cell and worley noise, math, position/normal/u
 nodes built from them in the MaterialX standard library, with the same noise as Karma
 (`docs/images/procedural_displacement.png`). Graphs can read primvars (`geompropvalue`,
 `geomcolor`; constant, vertex, uniform, face-varying), so one material can displace each mesh
-differently, and deforming displaced meshes are motion blurred.
+differently, and deforming displaced meshes are motion blurred. Dicing can be set per object with
+constant primvars `pbrt:dicingRate` (pixels, overrides the render setting; `pbrt_dicingRate` as a
+SOP attribute), Karma's `karma:object:dicingquality` (divides the rate: 2 = twice as fine) and
+`pbrt:dicingMaxTriangles`; the Render Geometry Settings LOP has them on its pbrt tab.
 Not yet: volume materials other than the Karma pyro shader,
 in-memory Houdini volumes (write VDBs to disk).
 

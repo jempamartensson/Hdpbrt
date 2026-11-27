@@ -33,4 +33,56 @@
         disablewhen "{ xn__primvarspbrtirReflectance_control_vube == block } { xn__primvarspbrtirReflectance_control_vube == none }"
     }
 
+    parm {
+        name    "xn__primvarspbrtdicingRate_control_zpbe"
+        label   "Dicing Rate (pixels)"
+        type    string
+        default { "none" }
+        menujoin {
+            [ "import loputils" ]
+            [ "return loputils.createEditPropertiesControlMenu(kwargs, 'float')" ]
+            language python
+        }
+        parmtag { "sidefx::look" "icon" }
+    }
+    parm {
+        name    "xn__primvarspbrtdicingRate_ycbe"
+        label   "Dicing Rate (pixels)"
+        type    float
+        size    1
+        default { 2.0 }
+        range   { 0.25 16 }
+        help    "Edge length of these objects' displaced triangles on screen, in pixels; overrides the render setting (smaller = finer, slower). A constant karma:object:dicingquality divides it."
+        parmtag { "spare_category" "Displacement" }
+        parmtag { "uiscope" "viewport" }
+        parmtag { "usdvaluetype" "float" }
+        disablewhen "{ xn__primvarspbrtdicingRate_control_zpbe == block } { xn__primvarspbrtdicingRate_control_zpbe == none }"
+    }
+
+    parm {
+        name    "xn__primvarspbrtdicingMaxTriangles_control_02be"
+        label   "Dicing Max Triangles"
+        type    string
+        default { "none" }
+        menujoin {
+            [ "import loputils" ]
+            [ "return loputils.createEditPropertiesControlMenu(kwargs, 'int')" ]
+            language python
+        }
+        parmtag { "sidefx::look" "icon" }
+    }
+    parm {
+        name    "xn__primvarspbrtdicingMaxTriangles_zpbe"
+        label   "Dicing Max Triangles"
+        type    integer
+        size    1
+        default { 20000000 }
+        range   { 100000 100000000 }
+        help    "Triangle budget for each of these displaced meshes; overrides the render setting."
+        parmtag { "spare_category" "Displacement" }
+        parmtag { "uiscope" "viewport" }
+        parmtag { "usdvaluetype" "int" }
+        disablewhen "{ xn__primvarspbrtdicingMaxTriangles_control_02be == block } { xn__primvarspbrtdicingMaxTriangles_control_02be == none }"
+    }
+
 }

@@ -378,6 +378,10 @@ protected:
     bool _hasDisplayColor = false;
     float _displayOpacity = 1.f;
     float _irReflectance = -1.f;  // primvar pbrt:irReflectance, < 0: none
+    // Per-object dicing primvars (pbrt:dicingRate, karma:object:dicingquality,
+    // pbrt:dicingMaxTriangles), < 0: none (the render settings).
+    float _dicingRate = -1.f, _dicingQuality = -1.f;
+    int _dicingMaxTriangles = -1;
     mutable bool _warnedNoUV = false;  // displacement without uvs
     bool _instanced = false;
     VtArray<TfToken> _categories;

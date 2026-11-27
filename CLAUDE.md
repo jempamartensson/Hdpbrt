@@ -476,6 +476,14 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   displaced sphere's blur coverage correlates 0.991 with Karma's (mean 0.43 vs 0.50, the same
   without displacement); with near-zero deformation the blurred sphere equals the static one
   (every pose displaced). `tests/motion_scene.usda` still blurs.
+- Per-object dicing (2026-11-27, hdPbrt only): constant primvars `pbrt:dicingRate` /
+  `pbrt_dicingRate` (pixels, over the render setting), `karma:object:dicingquality` (divides
+  the rate, min 0.01; Karma's meaning: 2 = twice as fine) and `pbrt:dicingMaxTriangles` /
+  `pbrt_dicingMaxTriangles`, read in `_SyncDisplayColor` with irReflectance, applied in
+  `HdPbrtGeom::Write`; rate clamped to [0.05, 1e4]. Render Geometry Settings LOP tab
+  (`GEOMETRY_SETTINGS`). Check (`tests/displacement/make_dicing_scene.py`, HDPBRT_KEEP_TMP):
+  the four spheres get rates 2, 16, 8, 0.5; 66k triangles per sphere at 2, 1.13M at 0.5, none
+  added at 8/16 (the subdivided base mesh is already finer: dicing never coarsens).
 - Not translated yet: in-memory Houdini volumes (`op:` paths). Volume materials other than
   the Karma pyro shader (e.g. MaterialX volumes on Volume prims) use the renderer settings.
 - Karma pyro shader (2026-11-25, pbrt patch 35): Houdini exports kma_pyroshader as a MaterialX

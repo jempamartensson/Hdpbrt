@@ -98,6 +98,12 @@ GEOMETRY_SETTINGS = [
      'Diffuse reflectance above the red edge for these objects, for infrared renders '
      '(pbrt:sensor bands on the camera); overrides the material\'s. Real leaves reflect about '
      '0.5-0.6 there. The visible image is unchanged.'),
+    ('primvars:pbrt:dicingRate', 'Dicing Rate (pixels)', 'float', 2.0, (0.25, 16), 'Displacement',
+     'Edge length of these objects\' displaced triangles on screen, in pixels; overrides the '
+     'render setting (smaller = finer, slower). A constant karma:object:dicingquality divides it.'),
+    ('primvars:pbrt:dicingMaxTriangles', 'Dicing Max Triangles', 'int', 20000000,
+     (100000, 100000000), 'Displacement',
+     'Triangle budget for each of these displaced meshes; overrides the render setting.'),
 ]
 
 VALUE_TYPE = {'int': 'int', 'float': 'float', 'bool': 'bool', 'string': 'string', 'menu': 'token',
