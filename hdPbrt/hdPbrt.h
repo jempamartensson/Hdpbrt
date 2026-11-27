@@ -221,6 +221,10 @@ struct HdPbrtMaterialDesc {
     // RGB in (dPdu, dPdv, N) space, d = vectorScale * rgb + vectorBias.
     bool displacementVector = false;
     GfVec3f displacementVectorScale{1.f}, displacementVectorBias{0.f};
+    // Procedural displacement (pbrt patch 41): a compiled MaterialX graph
+    // (mtlxGraph.cpp) in place of the texture, its images (file, encoding).
+    std::string displacementGraph;
+    std::vector<std::string> displacementGraphImages;
 };
 
 class HdPbrtMaterial final : public HdMaterial {
@@ -244,6 +248,12 @@ private:
 };
 
 // True while HdPbrtMaterial fetches its preview network (material.cpp).
+// Procedural displacement (pbrt patch 41): compiles the MaterialX graph
+// driving `disp` (ND_displacement_float / _vector3: displacement x scale) into
+// a pbrt "hdpbrtgraph" program; false (with the reason) for unsupported graphs.
+bool HdPbrt_CompileDisplacementGraph(const HdMaterialNetwork2 &net, const HdMaterialNode2 &disp,
+                                     HdPbrtRenderDelegate *delegate, std::string *program,
+                                     std::vector<std::string> *images, std::string *error);
 bool HdPbrt_PreviewContexts();
 
 // Karma pyro shader node -> HdPbrtMaterialDesc volume fields (material.cpp).

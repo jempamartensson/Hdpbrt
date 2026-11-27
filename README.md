@@ -104,8 +104,11 @@ True displacement: a material's displacement (MaterialX `displacement` node or U
 `displacement`, driven by an image with constant scale/offset) displaces meshes with uvs, diced
 in screen space (`docs/images/displacement.png`: hdPbrt left, Karma right). Vector displacement
 (MaterialX `displacement` node of type vector3, an image in tangent space (dPdu, dPdv, N), as
-Karma) works the same way (`docs/images/vector_displacement.png`). Not yet: procedural
-displacement graphs, motion blur on displaced deforming meshes.
+Karma) works the same way (`docs/images/vector_displacement.png`), and so do procedural
+MaterialX graphs: noise, fractal, cell and worley noise, math, position/normal/uv, images and
+nodes built from them in the MaterialX standard library, with the same noise as Karma
+(`docs/images/procedural_displacement.png`). Not yet: graphs reading primvars other than uvs,
+motion blur on displaced deforming meshes.
 Not yet: volume materials other than the Karma pyro shader,
 in-memory Houdini volumes (write VDBs to disk).
 

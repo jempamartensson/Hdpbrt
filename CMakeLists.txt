@@ -35,6 +35,7 @@ add_library(hdPbrt SHARED
   hdPbrt/ies.cpp
   third_party/cycles_ies/ies.cpp
   hdPbrt/material.cpp
+  hdPbrt/mtlxGraph.cpp
   hdPbrt/light.cpp
   hdPbrt/instancer.cpp
   hdPbrt/sceneIndexPlugin.cpp)

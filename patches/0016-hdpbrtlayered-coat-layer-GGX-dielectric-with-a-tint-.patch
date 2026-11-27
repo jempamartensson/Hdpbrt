@@ -1,7 +1,7 @@
 From 0321e3f7f2903ab084006314a364940785055001 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Mon, 23 Nov 2026 07:33:13 +0100
-Subject: [PATCH 16/40] hdpbrtlayered: coat layer (GGX dielectric with a tint
+Subject: [PATCH 16/41] hdpbrtlayered: coat layer (GGX dielectric with a tint
  on the layers below) (for hdPbrt)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

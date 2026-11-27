@@ -330,7 +330,8 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
     else if (alpha < 0.999f)
         extra << " \"float alpha\" " << std::max(alpha, 0.f);
     // True displacement (pbrt patch 39), diced in screen space.
-    const bool displaced = !mat.displacementTexture.empty() && ctx.dicePixel > 0 &&
+    const bool displaced = (!mat.displacementTexture.empty() || !mat.displacementGraph.empty()) &&
+                           ctx.dicePixel > 0 &&
                            _delegate->GetSetting<bool>(HdPbrtSettingsTokens->displacement, true);
     if (displaced && !_CanDisplace()) {
         if (!_warnedNoUV) {
@@ -339,8 +340,20 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
                     prim.GetId().GetText());
         }
     } else if (displaced) {
-        extra << " \"texture displacement\" " << HdPbrt_Quote(mat.displacementTexture)
-              << " \"float hdpbrtdicepixel\" " << ctx.dicePixel << " \"float hdpbrtdicerate\" "
+        if (!mat.displacementGraph.empty()) {
+            extra << " \"string hdpbrtgraph\" " << HdPbrt_Quote(mat.displacementGraph)
+                  << " \"float hdpbrtgraphcamera\" [" << ctx.cameraPos[0] << " "
+                  << ctx.cameraPos[1] << " " << ctx.cameraPos[2] << "]";
+            if (!mat.displacementGraphImages.empty()) {
+                extra << " \"string hdpbrtgraphimages\" [";
+                for (const std::string &f : mat.displacementGraphImages)
+                    extra << " " << HdPbrt_Quote(f);
+                extra << " ]";
+            }
+        } else {
+            extra << " \"texture displacement\" " << HdPbrt_Quote(mat.displacementTexture);
+        }
+        extra << " \"float hdpbrtdicepixel\" " << ctx.dicePixel << " \"float hdpbrtdicerate\" "
               << std::max(0.05f, _delegate->GetSetting<float>(
                                      HdPbrtSettingsTokens->dicingRate, 2.f))
               << " \"integer hdpbrtdicemaxtris\" "

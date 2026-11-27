@@ -974,6 +974,25 @@ void HdPbrtMaterial::_BuildDisplacement(HdMaterialNetworkMap const &map,
         return;
     const std::string pfx = TfMakeValidIdentifier(GetId().GetString()) + "_disp";
     _Builder b{_Net{net2}, pfx, HdPbrtMaterialDesc{}, 0, _delegate};
+    // Procedural graphs (anything the image folding below doesn't cover):
+    // compiled for pbrt's graph evaluator (pbrt patch 41).
+    auto procedural = [&]() {
+        std::string program, error;
+        std::vector<std::string> images;
+        if (type == "UsdPreviewSurface" ||
+            !HdPbrt_CompileDisplacementGraph(net2, disp, _delegate, &program, &images, &error)) {
+            if (getenv("HDPBRT_DEBUG"))
+                fprintf(stderr, "hdPbrt %s: displacement graph not supported: %s\n",
+                        GetId().GetText(), error.c_str());
+            return;
+        }
+        result->displacementGraph = program;
+        result->displacementGraphImages = images;
+        result->displacementVector = vector;
+        if (getenv("HDPBRT_DEBUG"))
+            fprintf(stderr, "hdPbrt %s: procedural displacement: %s\n", GetId().GetText(),
+                    program.c_str());
+    };
     if (vector) {
         // value = a * rgb + c per component, folding constant vector3 (or
         // vector3 by float) multiply / add / subtract nodes.
@@ -1026,10 +1045,9 @@ void HdPbrtMaterial::_BuildDisplacement(HdMaterialNetworkMap const &map,
         };
         GfVec3d a(1), c(0);
         std::string tex;
-        if (!fold3(disp, "displacement", &a, &c, &tex)) {
-            if (getenv("HDPBRT_DEBUG"))
-                fprintf(stderr, "hdPbrt %s: vector displacement graph not supported (only an "
-                                "image with constant scale/offset)\n", GetId().GetText());
+        if (!fold3(disp, "displacement", &a, &c, &tex) ||
+            disp.inputConnections.count(TfToken("scale"))) {
+            procedural();
             return;
         }
         const double scale = _Float(disp, "scale", 1.f);
@@ -1096,10 +1114,9 @@ void HdPbrtMaterial::_BuildDisplacement(HdMaterialNetworkMap const &map,
     };
     double a = 1, c = 0;
     std::string tex;
-    if (!fold(disp, "displacement", &a, &c, &tex)) {
-        if (getenv("HDPBRT_DEBUG"))
-            fprintf(stderr, "hdPbrt %s: displacement graph not supported (only an image "
-                            "with constant scale/offset)\n", GetId().GetText());
+    if (!fold(disp, "displacement", &a, &c, &tex) ||
+        disp.inputConnections.count(TfToken("scale"))) {
+        procedural();
         return;
     }
     if (type != "UsdPreviewSurface") {

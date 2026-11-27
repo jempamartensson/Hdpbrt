@@ -1,7 +1,7 @@
 From 94c88d96903b3966009f4fc5c5bdf1190eed2270 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sun, 22 Nov 2026 18:44:38 +0100
-Subject: [PATCH 06/40] N-key motion: transform keys for object instances and N
+Subject: [PATCH 06/41] N-key motion: transform keys for object instances and N
  mesh poses (for hdPbrt)
 
 An ObjectInstance takes Attribute "shape" "float hdpbrtmotionxforms" [16 * N] and

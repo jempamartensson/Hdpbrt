@@ -1,0 +1,948 @@
+From ee1479bb439e0f26db621e6bcfe5be602e13c013 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Fri, 27 Nov 2026 08:17:11 +0100
+Subject: [PATCH 41/41] plymesh procedural displacement: "string hdpbrtgraph"
+ register program (MaterialX graphs compiled by hdPbrt), MaterialX reference
+ noise (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                |   2 +
+ src/pbrt/shapes.cpp           |  61 ++-
+ src/pbrt/util/hdpbrtgraph.cpp | 709 ++++++++++++++++++++++++++++++++++
+ src/pbrt/util/hdpbrtgraph.h   |  78 ++++
+ 4 files changed, 842 insertions(+), 8 deletions(-)
+ create mode 100644 src/pbrt/util/hdpbrtgraph.cpp
+ create mode 100644 src/pbrt/util/hdpbrtgraph.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 702a9f9..fa755a3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -643,6 +643,7 @@ SET (PBRT_UTIL_SOURCE
+   src/pbrt/util/lowdiscrepancy.cpp
+   src/pbrt/util/math.cpp
+   src/pbrt/util/memory.cpp
++  src/pbrt/util/hdpbrtgraph.cpp
+   src/pbrt/util/mesh.cpp
+   src/pbrt/util/mipmap.cpp
+   src/pbrt/util/noise.cpp
+@@ -694,6 +695,7 @@ SET (PBRT_UTIL_SOURCE_HEADERS
+   src/pbrt/util/lowdiscrepancy.h
+   src/pbrt/util/math.h
+   src/pbrt/util/memory.h
++  src/pbrt/util/hdpbrtgraph.h
+   src/pbrt/util/mesh.h
+   src/pbrt/util/mipmap.h
+   src/pbrt/util/noise.h
+diff --git a/src/pbrt/shapes.cpp b/src/pbrt/shapes.cpp
+index 6e7de59..4acd827 100644
+--- a/src/pbrt/shapes.cpp
++++ b/src/pbrt/shapes.cpp
+@@ -15,6 +15,7 @@
+ #include <pbrt/util/error.h>
+ #include <pbrt/util/file.h>
+ #include <pbrt/util/float.h>
++#include <pbrt/util/hdpbrtgraph.h>
+ #include <pbrt/util/image.h>
+ #include <pbrt/util/loopsubdiv.h>
+ #include <pbrt/util/lowdiscrepancy.h>
+@@ -1451,11 +1452,24 @@ pstd::vector<Shape> Shape::Create(
+         edgeLength *= Options->displacementEdgeScale;
+ 
+         std::string displacementTexName = parameters.GetTexture("displacement");
+-        if (!displacementTexName.empty()) {
+-            auto iter = floatTextures.find(displacementTexName);
+-            if (iter == floatTextures.end())
+-                ErrorExit(loc, "%s: no such texture defined.", displacementTexName);
+-            FloatTexture displacement = iter->second;
++        // hdPbrt: a procedural displacement graph (util/hdpbrtgraph.h) in
++        // place of the texture: "string hdpbrtgraph" (the program),
++        // "string hdpbrtgraphimages" (file, encoding pairs) and
++        // "float hdpbrtgraphcamera" [3] (world position of the render-space
++        // origin, for "world" space geometry).
++        const std::string graphProgram = parameters.GetOneString("hdpbrtgraph", "");
++        if (!displacementTexName.empty() || !graphProgram.empty()) {
++            FloatTexture displacement;
++            if (!displacementTexName.empty()) {
++                auto iter = floatTextures.find(displacementTexName);
++                if (iter == floatTextures.end())
++                    ErrorExit(loc, "%s: no such texture defined.", displacementTexName);
++                displacement = iter->second;
++            }
++            std::unique_ptr<HdPbrtGraph> graph;
++            if (!graphProgram.empty())
++                graph = HdPbrtGraph::Parse(graphProgram,
++                                           parameters.GetStringArray("hdpbrtgraphimages"), loc);
+ 
+             LOG_VERBOSE("Starting to displace mesh \"%s\" with \"%s\"", filename,
+                         displacementTexName);
+@@ -1489,10 +1503,13 @@ pstd::vector<Shape> Shape::Create(
+             const Float offscreen = parameters.GetOneFloat("hdpbrtdiceoffscreen", 0.25f);
+             const bool frustum = diceView.size() == 16 && diceWindow.size() == 4;
+             const FloatImageTexture *vectorTex = nullptr;
++            bool vectorMode = false;
+             Vector3f vScale(1, 1, 1), vBias(0, 0, 0);
+             if (parameters.GetOneBool("hdpbrtvectordisplacement", false)) {
+-                vectorTex = displacement.CastOrNullptr<FloatImageTexture>();
+-                if (!vectorTex)
++                if (!graph && displacement)
++                    vectorTex = displacement.CastOrNullptr<FloatImageTexture>();
++                vectorMode = graph || vectorTex;
++                if (!vectorMode)
+                     Warning(loc, "%s: vector displacement needs an image texture; "
+                                  "displacing along the normal.", filename);
+                 std::vector<Float> s = parameters.GetFloatArray("hdpbrtvdispscale");
+@@ -1518,6 +1535,14 @@ pstd::vector<Shape> Shape::Create(
+             if (diceXform.size() == 16)
+                 diceFromObject = diceFromObject *
+                                  Transform(Transpose(SquareMatrix<4>(pstd::MakeConstSpan(diceXform))));
++            std::vector<Float> cam = parameters.GetFloatArray("hdpbrtgraphcamera");
++            if (graph && graph->UsesWorld()) {
++                Transform worldFromRender;
++                if (cam.size() == 3)
++                    worldFromRender = Translate(Vector3f(cam[0], cam[1], cam[2]));
++                graph->worldFromObject = worldFromRender * diceFromObject;
++            }
++            const HdPbrtGraph *graphPtr = graph.get();
+             const bool screen = dicePixel > 0;
+             Float maxDist = screen ? std::max<Float>(diceRate, 0.05f) : edgeLength;
+ 
+@@ -1559,6 +1584,26 @@ pstd::vector<Shape> Shape::Create(
+                             TextureEvalContext ctx;
+                             ctx.p = p[i];
+                             ctx.uv = uv[i];
++                            if (graphPtr) {
++                                HdPbrtGraph::Vertex vx;
++                                vx.p = p[i];
++                                vx.n = n[i];
++                                vx.uv = uv[i];
++                                if (dpdu) {
++                                    vx.dpdu = dpdu[i];
++                                    vx.dpdv = dpdv[i];
++                                }
++                                const HdPbrtGraph::V4 g = graphPtr->Evaluate(vx);
++                                if (vectorMode) {
++                                    const Float dx = vScale.x * g[0] + vBias.x;
++                                    const Float dy = vScale.y * g[1] + vBias.y;
++                                    const Float dz = vScale.z * g[2] + vBias.z;
++                                    p[i] += dx * dpdu[i] + dy * dpdv[i] + dz * Vector3f(n[i]);
++                                } else {
++                                    p[i] += Vector3f(dispScale * (g[0] + dispOffset) * n[i]);
++                                }
++                                return;
++                            }
+                             if (vectorTex) {
+                                 const RGB c = vectorTex->EvaluateRGB(ctx);
+                                 const Float dx = vScale.x * c.r + vBias.x;
+@@ -1573,7 +1618,7 @@ pstd::vector<Shape> Shape::Create(
+                         });
+                     },
+                     loc, screen, maxTris > 0 ? size_t(maxTris) : 0, &over,
+-                    vectorTex != nullptr);
++                    vectorMode || (graph && graph->UsesTangents()));
+                 if (!over)
+                     break;
+                 maxDist *= 2;
+diff --git a/src/pbrt/util/hdpbrtgraph.cpp b/src/pbrt/util/hdpbrtgraph.cpp
+new file mode 100644
+index 0000000..fd6b957
+--- /dev/null
++++ b/src/pbrt/util/hdpbrtgraph.cpp
+@@ -0,0 +1,709 @@
++// hdPbrt: procedural displacement graphs (see hdpbrtgraph.h).
++//
++// The noise functions are a C++ transcription of MaterialX's
++// libraries/stdlib/genglsl/lib/mx_noise.glsl, itself a modified version of the
++// noise library of Open Shading Language:
++//
++// Copyright (c) 2009-2010 Sony Pictures Imageworks Inc., et al.
++// All Rights Reserved.
++//
++// Redistribution and use in source and binary forms, with or without
++// modification, are permitted provided that the following conditions are
++// met:
++// * Redistributions of source code must retain the above copyright
++//   notice, this list of conditions and the following disclaimer.
++// * Redistributions in binary form must reproduce the above copyright
++//   notice, this list of conditions and the following disclaimer in the
++//   documentation and/or other materials provided with the distribution.
++// * Neither the name of Sony Pictures Imageworks nor the names of its
++//   contributors may be used to endorse or promote products derived from
++//   this software without specific prior written permission.
++// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++#include <pbrt/util/hdpbrtgraph.h>
++
++#include <pbrt/util/color.h>
++#include <pbrt/util/error.h>
++#include <pbrt/util/file.h>
++#include <pbrt/util/math.h>
++
++#include <cmath>
++#include <cstdint>
++#include <map>
++#include <mutex>
++#include <sstream>
++
++namespace pbrt {
++
++// ---------------------------------------------------------------------------
++// MaterialX reference noise
++
++namespace {
++
++inline uint32_t Rotl32(uint32_t x, int k) {
++    return (x << k) | (x >> (32 - k));
++}
++
++inline void BjMix(uint32_t &a, uint32_t &b, uint32_t &c) {
++    a -= c; a ^= Rotl32(c, 4); c += b;
++    b -= a; b ^= Rotl32(a, 6); a += c;
++    c -= b; c ^= Rotl32(b, 8); b += a;
++    a -= c; a ^= Rotl32(c, 16); c += b;
++    b -= a; b ^= Rotl32(a, 19); a += c;
++    c -= b; c ^= Rotl32(b, 4); b += a;
++}
++
++inline uint32_t BjFinal(uint32_t a, uint32_t b, uint32_t c) {
++    c ^= b; c -= Rotl32(b, 14);
++    a ^= c; a -= Rotl32(c, 11);
++    b ^= a; b -= Rotl32(a, 25);
++    c ^= b; c -= Rotl32(b, 16);
++    a ^= c; a -= Rotl32(c, 4);
++    b ^= a; b -= Rotl32(a, 14);
++    c ^= b; c -= Rotl32(b, 24);
++    return c;
++}
++
++inline Float BitsTo01(uint32_t bits) {
++    return Float(double(bits) / double(0xffffffffu));
++}
++
++inline Float Fade(Float t) {
++    return t * t * t * (t * (t * 6 - 15) + 10);
++}
++
++inline int FloorI(Float x) {
++    return int(std::floor(x));
++}
++
++inline Float FloorFrac(Float x, int *i) {
++    *i = FloorI(x);
++    return x - Float(*i);
++}
++
++inline uint32_t HashInt(int x, int y) {
++    uint32_t a, b, c;
++    a = b = c = 0xdeadbeefu + (2u << 2u) + 13u;
++    a += uint32_t(x);
++    b += uint32_t(y);
++    return BjFinal(a, b, c);
++}
++
++inline uint32_t HashInt(int x, int y, int z) {
++    uint32_t a, b, c;
++    a = b = c = 0xdeadbeefu + (3u << 2u) + 13u;
++    a += uint32_t(x);
++    b += uint32_t(y);
++    c += uint32_t(z);
++    return BjFinal(a, b, c);
++}
++
++inline Float Select(bool b, Float t, Float f) {
++    return b ? t : f;
++}
++inline Float NegateIf(Float v, bool b) {
++    return b ? -v : v;
++}
++
++inline Float Gradient(uint32_t hash, Float x, Float y) {
++    uint32_t h = hash & 7u;
++    Float u = Select(h < 4u, x, y);
++    Float v = 2 * Select(h < 4u, y, x);
++    return NegateIf(u, h & 1u) + NegateIf(v, h & 2u);
++}
++
++inline Float Gradient(uint32_t hash, Float x, Float y, Float z) {
++    uint32_t h = hash & 15u;
++    Float u = Select(h < 8u, x, y);
++    Float v = Select(h < 4u, y, Select(h == 12u || h == 14u, x, z));
++    return NegateIf(u, h & 1u) + NegateIf(v, h & 2u);
++}
++
++inline Float Bilerp(Float v0, Float v1, Float v2, Float v3, Float s, Float t) {
++    Float s1 = 1 - s;
++    return (1 - t) * (v0 * s1 + v1 * s) + t * (v2 * s1 + v3 * s);
++}
++
++inline Float Trilerp(Float v0, Float v1, Float v2, Float v3, Float v4, Float v5, Float v6,
++                     Float v7, Float s, Float t, Float r) {
++    Float s1 = 1 - s, t1 = 1 - t, r1 = 1 - r;
++    return r1 * (t1 * (v0 * s1 + v1 * s) + t * (v2 * s1 + v3 * s)) +
++           r * (t1 * (v4 * s1 + v5 * s) + t * (v6 * s1 + v7 * s));
++}
++
++// Hash bytes for the vector noise: channel k is byte k of the hash.
++inline uint32_t Byte(uint32_t h, int k) {
++    return (h >> (8 * k)) & 0xFFu;
++}
++
++Float Perlin2(Point2f p, int channel) {
++    int X, Y;
++    Float fx = FloorFrac(p.x, &X), fy = FloorFrac(p.y, &Y);
++    Float u = Fade(fx), v = Fade(fy);
++    auto h = [&](int x, int y) {
++        uint32_t hh = HashInt(x, y);
++        return channel < 0 ? hh : Byte(hh, channel);
++    };
++    Float r = Bilerp(Gradient(h(X, Y), fx, fy), Gradient(h(X + 1, Y), fx - 1, fy),
++                     Gradient(h(X, Y + 1), fx, fy - 1),
++                     Gradient(h(X + 1, Y + 1), fx - 1, fy - 1), u, v);
++    return 0.6616f * r;
++}
++
++Float Perlin3(Point3f p, int channel) {
++    int X, Y, Z;
++    Float fx = FloorFrac(p.x, &X), fy = FloorFrac(p.y, &Y), fz = FloorFrac(p.z, &Z);
++    Float u = Fade(fx), v = Fade(fy), w = Fade(fz);
++    auto h = [&](int x, int y, int z) {
++        uint32_t hh = HashInt(x, y, z);
++        return channel < 0 ? hh : Byte(hh, channel);
++    };
++    Float r = Trilerp(Gradient(h(X, Y, Z), fx, fy, fz),
++                      Gradient(h(X + 1, Y, Z), fx - 1, fy, fz),
++                      Gradient(h(X, Y + 1, Z), fx, fy - 1, fz),
++                      Gradient(h(X + 1, Y + 1, Z), fx - 1, fy - 1, fz),
++                      Gradient(h(X, Y, Z + 1), fx, fy, fz - 1),
++                      Gradient(h(X + 1, Y, Z + 1), fx - 1, fy, fz - 1),
++                      Gradient(h(X, Y + 1, Z + 1), fx, fy - 1, fz - 1),
++                      Gradient(h(X + 1, Y + 1, Z + 1), fx - 1, fy - 1, fz - 1), u, v, w);
++    return 0.9820f * r;
++}
++
++Vector3f CellNoise3Ints(int ix, int iy, int iz) {
++    uint32_t a, b, c;
++    a = b = c = 0xdeadbeefu + (4u << 2u) + 13u;
++    a += uint32_t(ix);
++    b += uint32_t(iy);
++    c += uint32_t(iz);
++    BjMix(a, b, c);
++    return Vector3f(BitsTo01(BjFinal(a, b, c)), BitsTo01(BjFinal(a + 1u, b, c)),
++                    BitsTo01(BjFinal(a + 2u, b, c)));
++}
++
++// Worley: distances to the nearest three feature points (euclidean), or the
++// cell noise of the nearest (style 1; float cell noise in x when floatCell).
++Vector3f Worley2(Point2f p, Float jitter, int style, bool floatCell) {
++    int X, Y;
++    Point2f local(FloorFrac(p.x, &X), FloorFrac(p.y, &Y));
++    Float sq[3] = {1e6f, 1e6f, 1e6f};
++    Vector2f minpos(0, 0);
++    for (int x = -1; x <= 1; ++x)
++        for (int y = -1; y <= 1; ++y) {
++            Vector3f t = MxCellNoise3(Point2f(x + X, y + Y));
++            Vector2f off(t.x, t.y);
++            off = (off - Vector2f(0.5f, 0.5f)) * jitter + Vector2f(0.5f, 0.5f);
++            Vector2f cell = Vector2f(Float(x), Float(y)) + off - Vector2f(local);
++            Float d = Dot(cell, cell);
++            if (d < sq[0]) {
++                sq[2] = sq[1];
++                sq[1] = sq[0];
++                sq[0] = d;
++                minpos = cell;
++            } else if (d < sq[1]) {
++                sq[2] = sq[1];
++                sq[1] = d;
++            } else if (d < sq[2])
++                sq[2] = d;
++        }
++    if (style == 1) {
++        Point2f q(minpos.x + p.x, minpos.y + p.y);
++        return floatCell ? Vector3f(MxCellNoise(q), 0, 0) : MxCellNoise3(q);
++    }
++    return Vector3f(std::sqrt(sq[0]), std::sqrt(sq[1]), std::sqrt(sq[2]));
++}
++
++Vector3f Worley3(Point3f p, Float jitter, int style, bool floatCell) {
++    int X, Y, Z;
++    Point3f local(FloorFrac(p.x, &X), FloorFrac(p.y, &Y), FloorFrac(p.z, &Z));
++    Float sq[3] = {1e6f, 1e6f, 1e6f};
++    Vector3f minpos(0, 0, 0);
++    for (int x = -1; x <= 1; ++x)
++        for (int y = -1; y <= 1; ++y)
++            for (int z = -1; z <= 1; ++z) {
++                Vector3f off = CellNoise3Ints(x + X, y + Y, z + Z);
++                off = (off - Vector3f(0.5f, 0.5f, 0.5f)) * jitter + Vector3f(0.5f, 0.5f, 0.5f);
++                Vector3f cell = Vector3f(Float(x), Float(y), Float(z)) + off - Vector3f(local);
++                Float d = Dot(cell, cell);
++                if (d < sq[0]) {
++                    sq[2] = sq[1];
++                    sq[1] = sq[0];
++                    sq[0] = d;
++                    minpos = cell;
++                } else if (d < sq[1]) {
++                    sq[2] = sq[1];
++                    sq[1] = d;
++                } else if (d < sq[2])
++                    sq[2] = d;
++            }
++    if (style == 1)
++        return floatCell ? Vector3f(MxCellNoise(p + minpos), 0, 0) : MxCellNoise3(p + minpos);
++    return Vector3f(std::sqrt(sq[0]), std::sqrt(sq[1]), std::sqrt(sq[2]));
++}
++
++}  // namespace
++
++Float MxPerlin(Point2f p) {
++    return Perlin2(p, -1);
++}
++Float MxPerlin(Point3f p) {
++    return Perlin3(p, -1);
++}
++Vector3f MxPerlin3(Point2f p) {
++    return Vector3f(Perlin2(p, 0), Perlin2(p, 1), Perlin2(p, 2));
++}
++Vector3f MxPerlin3(Point3f p) {
++    return Vector3f(Perlin3(p, 0), Perlin3(p, 1), Perlin3(p, 2));
++}
++Float MxCellNoise(Point2f p) {
++    return BitsTo01(HashInt(FloorI(p.x), FloorI(p.y)));
++}
++Float MxCellNoise(Point3f p) {
++    return BitsTo01(HashInt(FloorI(p.x), FloorI(p.y), FloorI(p.z)));
++}
++Vector3f MxCellNoise3(Point2f p) {
++    int ix = FloorI(p.x), iy = FloorI(p.y);
++    return Vector3f(BitsTo01(HashInt(ix, iy, 0)), BitsTo01(HashInt(ix, iy, 1)),
++                    BitsTo01(HashInt(ix, iy, 2)));
++}
++Vector3f MxCellNoise3(Point3f p) {
++    return CellNoise3Ints(FloorI(p.x), FloorI(p.y), FloorI(p.z));
++}
++
++// ---------------------------------------------------------------------------
++// Program
++
++namespace {
++
++enum Op {
++    // unary componentwise
++    OpAbs, OpSign, OpFloor, OpCeil, OpRound, OpFract, OpSin, OpCos, OpTan, OpAsin,
++    OpAcos, OpSqrt, OpLn, OpExp,
++    // binary componentwise
++    OpAdd, OpSub, OpMul, OpDiv, OpMod, OpPow, OpMin, OpMax, OpAtan2,
++    // others
++    OpClamp, OpMix, OpSmooth, OpRemap, OpIfGt, OpIfGe, OpIfEq, OpSwitch, OpDot, OpLen,
++    OpNorm, OpDist, OpCross, OpExt, OpComb, OpCvt, OpRot2, OpRot3, OpPos, OpNrm, OpTan3,
++    OpBtan, OpUV, OpPerlin2, OpPerlin3, OpFractal2, OpFractal3, OpCell2, OpCell3,
++    OpWorley2, OpWorley3, OpImg, OpCopy
++};
++
++struct OpInfo {
++    const char *name;
++    Op op;
++    int minArgs;  // after dst
++};
++
++const OpInfo kOps[] = {
++    {"abs", OpAbs, 1},       {"sign", OpSign, 1},       {"floor", OpFloor, 1},
++    {"ceil", OpCeil, 1},     {"round", OpRound, 1},     {"fract", OpFract, 1},
++    {"sin", OpSin, 1},       {"cos", OpCos, 1},         {"tan", OpTan, 1},
++    {"asin", OpAsin, 1},     {"acos", OpAcos, 1},       {"sqrt", OpSqrt, 1},
++    {"ln", OpLn, 1},         {"exp", OpExp, 1},         {"add", OpAdd, 2},
++    {"sub", OpSub, 2},       {"mul", OpMul, 2},         {"div", OpDiv, 2},
++    {"mod", OpMod, 2},       {"pow", OpPow, 2},         {"min", OpMin, 2},
++    {"max", OpMax, 2},       {"atan2", OpAtan2, 2},     {"clamp", OpClamp, 3},
++    {"mix", OpMix, 3},       {"smooth", OpSmooth, 3},   {"remap", OpRemap, 5},
++    {"ifgt", OpIfGt, 4},     {"ifge", OpIfGe, 4},       {"ifeq", OpIfEq, 4},
++    {"switch", OpSwitch, 2}, {"dot", OpDot, 3},         {"len", OpLen, 2},
++    {"norm", OpNorm, 2},     {"dist", OpDist, 3},       {"cross", OpCross, 2},
++    {"ext", OpExt, 2},       {"comb", OpComb, 2},       {"cvt", OpCvt, 3},
++    {"rot2", OpRot2, 2},     {"rot3", OpRot3, 3},       {"pos", OpPos, 1},
++    {"nrm", OpNrm, 1},       {"tan3", OpTan3, 1},       {"btan", OpBtan, 1},
++    {"uv", OpUV, 0},         {"perlin2", OpPerlin2, 2}, {"perlin3", OpPerlin3, 2},
++    {"fractal2", OpFractal2, 5}, {"fractal3", OpFractal3, 5}, {"cell2", OpCell2, 2},
++    {"cell3", OpCell3, 2},   {"worley2", OpWorley2, 4}, {"worley3", OpWorley3, 4},
++    {"img", OpImg, 6},       {"copy", OpCopy, 1},
++};
++
++std::mutex imageCacheMutex;
++std::map<std::string, std::shared_ptr<const Image>> imageCache;
++
++std::shared_ptr<const Image> LoadImage(const std::string &file, const std::string &encoding) {
++    std::string key = file + "|" + encoding;
++    std::lock_guard<std::mutex> lock(imageCacheMutex);
++    auto it = imageCache.find(key);
++    if (it != imageCache.end())
++        return it->second;
++    std::shared_ptr<const Image> img;
++    if (FileExists(file)) {
++        ImageAndMetadata im =
++            Image::Read(file, Allocator(), ColorEncoding::Get(encoding, Allocator()));
++        img = std::make_shared<Image>(std::move(im.image));
++    } else {
++        Warning("%s: displacement graph image not found.", file);
++    }
++    imageCache[key] = img;
++    return img;
++}
++
++inline HdPbrtGraph::V4 Broadcast(Float f) {
++    return {f, f, f, f};
++}
++
++WrapMode AddressMode(int m) {
++    // 0 periodic, 1 clamp, 2 constant (black; the default value is not
++    // blended), 3 mirror (as periodic)
++    return m == 1 ? WrapMode::Clamp : m == 2 ? WrapMode::Black : WrapMode::Repeat;
++}
++
++}  // namespace
++
++std::unique_ptr<HdPbrtGraph> HdPbrtGraph::Parse(const std::string &program,
++                                                const std::vector<std::string> &images,
++                                                const FileLoc *loc) {
++    auto g = std::make_unique<HdPbrtGraph>();
++    int maxReg = 0;
++    std::stringstream all(program);
++    std::string line;
++    while (std::getline(all, line, ';')) {
++        std::istringstream is(line);
++        std::string name;
++        if (!(is >> name))
++            continue;
++        if (name == "c") {
++            int dst;
++            V4 v;
++            if (!(is >> dst >> v[0] >> v[1] >> v[2] >> v[3]) || dst < 0)
++                ErrorExit(loc, "hdpbrtgraph: bad constant \"%s\".", line);
++            if (dst >= int(g->init.size()))
++                g->init.resize(dst + 1, V4{0, 0, 0, 0});
++            g->init[dst] = v;
++            maxReg = std::max(maxReg, dst);
++            continue;
++        }
++        if (name == "out") {
++            if (!(is >> g->out))
++                ErrorExit(loc, "hdpbrtgraph: bad output \"%s\".", line);
++            maxReg = std::max(maxReg, g->out);
++            continue;
++        }
++        const OpInfo *info = nullptr;
++        for (const OpInfo &o : kOps)
++            if (name == o.name)
++                info = &o;
++        if (!info)
++            ErrorExit(loc, "hdpbrtgraph: unknown op \"%s\".", name);
++        Instr in;
++        in.op = info->op;
++        if (!(is >> in.dst) || in.dst < 0)
++            ErrorExit(loc, "hdpbrtgraph: bad instruction \"%s\".", line);
++        int x;
++        while (is >> x)
++            in.a.push_back(x);
++        if (int(in.a.size()) < info->minArgs)
++            ErrorExit(loc, "hdpbrtgraph: too few operands in \"%s\".", line);
++        maxReg = std::max(maxReg, in.dst);
++        if (in.op == OpPos || in.op == OpNrm || in.op == OpTan3 || in.op == OpBtan) {
++            if (in.a[0] == 1)
++                g->usesWorld = true;
++            if (in.op == OpTan3 || in.op == OpBtan)
++                g->usesTangents = true;
++        }
++        if (in.op == OpImg && (in.a[0] < 0 || 2 * in.a[0] + 1 >= int(images.size())))
++            ErrorExit(loc, "hdpbrtgraph: bad image index in \"%s\".", line);
++        g->code.push_back(std::move(in));
++    }
++    for (size_t i = 0; i + 1 < images.size(); i += 2)
++        g->images.push_back(LoadImage(images[i], images[i + 1]));
++    g->init.resize(maxReg + 1, V4{0, 0, 0, 0});
++    return g;
++}
++
++HdPbrtGraph::V4 HdPbrtGraph::Evaluate(const Vertex &vx) const {
++    thread_local std::vector<V4> R;
++    R = init;
++    const int nr = int(R.size());
++    auto reg = [&](int i) -> const V4 & {
++        static const V4 zero{0, 0, 0, 0};
++        return i >= 0 && i < nr ? R[i] : zero;
++    };
++    auto vec3 = [&](int i) {
++        const V4 &v = reg(i);
++        return Vector3f(v[0], v[1], v[2]);
++    };
++    auto put3 = [](Vector3f v, Float w = 0) { return V4{v.x, v.y, v.z, w}; };
++    for (const Instr &in : code) {
++        const std::vector<int> &a = in.a;
++        V4 r{0, 0, 0, 0};
++        auto un = [&](auto f) {
++            const V4 &x = reg(a[0]);
++            for (int k = 0; k < 4; ++k)
++                r[k] = f(x[k]);
++        };
++        auto bin = [&](auto f) {
++            const V4 &x = reg(a[0]), &y = reg(a[1]);
++            for (int k = 0; k < 4; ++k)
++                r[k] = f(x[k], y[k]);
++        };
++        switch (in.op) {
++        case OpAbs: un([](Float x) { return std::abs(x); }); break;
++        case OpSign: un([](Float x) { return Float(x > 0 ? 1 : x < 0 ? -1 : 0); }); break;
++        case OpFloor: un([](Float x) { return std::floor(x); }); break;
++        case OpCeil: un([](Float x) { return std::ceil(x); }); break;
++        case OpRound: un([](Float x) { return std::round(x); }); break;
++        case OpFract: un([](Float x) { return x - std::floor(x); }); break;
++        case OpSin: un([](Float x) { return std::sin(x); }); break;
++        case OpCos: un([](Float x) { return std::cos(x); }); break;
++        case OpTan: un([](Float x) { return std::tan(x); }); break;
++        case OpAsin: un([](Float x) { return std::asin(x); }); break;
++        case OpAcos: un([](Float x) { return std::acos(x); }); break;
++        case OpSqrt: un([](Float x) { return std::sqrt(x); }); break;
++        case OpLn: un([](Float x) { return std::log(x); }); break;
++        case OpExp: un([](Float x) { return std::exp(x); }); break;
++        case OpAdd: bin([](Float x, Float y) { return x + y; }); break;
++        case OpSub: bin([](Float x, Float y) { return x - y; }); break;
++        case OpMul: bin([](Float x, Float y) { return x * y; }); break;
++        case OpDiv: bin([](Float x, Float y) { return x / y; }); break;
++        case OpMod: bin([](Float x, Float y) { return x - y * std::floor(x / y); }); break;
++        case OpPow: bin([](Float x, Float y) { return std::pow(x, y); }); break;
++        case OpMin: bin([](Float x, Float y) { return std::min(x, y); }); break;
++        case OpMax: bin([](Float x, Float y) { return std::max(x, y); }); break;
++        case OpAtan2: bin([](Float y, Float x) { return std::atan2(y, x); }); break;
++        case OpClamp: {
++            const V4 &x = reg(a[0]), &lo = reg(a[1]), &hi = reg(a[2]);
++            for (int k = 0; k < 4; ++k)
++                r[k] = std::min(std::max(x[k], lo[k]), hi[k]);
++            break;
++        }
++        case OpMix: {  // fg, bg, mix
++            const V4 &fg = reg(a[0]), &bg = reg(a[1]), &m = reg(a[2]);
++            for (int k = 0; k < 4; ++k)
++                r[k] = bg[k] + (fg[k] - bg[k]) * m[k];
++            break;
++        }
++        case OpSmooth: {  // in, low, high
++            const V4 &x = reg(a[0]), &lo = reg(a[1]), &hi = reg(a[2]);
++            for (int k = 0; k < 4; ++k) {
++                if (x[k] >= hi[k])
++                    r[k] = 1;
++                else if (x[k] <= lo[k])
++                    r[k] = 0;
++                else {
++                    Float t = (x[k] - lo[k]) / (hi[k] - lo[k]);
++                    r[k] = t * t * (3 - 2 * t);
++                }
++            }
++            break;
++        }
++        case OpRemap: {
++            const V4 &x = reg(a[0]), &il = reg(a[1]), &ih = reg(a[2]), &ol = reg(a[3]),
++                     &oh = reg(a[4]);
++            for (int k = 0; k < 4; ++k)
++                r[k] = ol[k] + (x[k] - il[k]) * (oh[k] - ol[k]) / (ih[k] - il[k]);
++            break;
++        }
++        case OpIfGt:
++        case OpIfGe:
++        case OpIfEq: {
++            Float v1 = reg(a[0])[0], v2 = reg(a[1])[0];
++            bool c = in.op == OpIfGt ? v1 > v2 : in.op == OpIfGe ? v1 >= v2 : v1 == v2;
++            r = reg(c ? a[2] : a[3]);
++            break;
++        }
++        case OpSwitch: {
++            int n = int(a.size()) - 1;
++            int w = int(std::floor(reg(a[0])[0]));
++            w = std::min(std::max(w, 0), n - 1);
++            r = reg(a[1 + w]);
++            break;
++        }
++        case OpDot:
++        case OpDist: {
++            const V4 &x = reg(a[0]), &y = reg(a[1]);
++            int w = std::min(std::max(a[2], 1), 4);
++            Float s = 0;
++            for (int k = 0; k < w; ++k)
++                s += in.op == OpDot ? x[k] * y[k] : Sqr(x[k] - y[k]);
++            r = Broadcast(in.op == OpDot ? s : std::sqrt(s));
++            break;
++        }
++        case OpLen:
++        case OpNorm: {
++            const V4 &x = reg(a[0]);
++            int w = std::min(std::max(a[1], 1), 4);
++            Float s = 0;
++            for (int k = 0; k < w; ++k)
++                s += x[k] * x[k];
++            s = std::sqrt(s);
++            if (in.op == OpLen)
++                r = Broadcast(s);
++            else
++                for (int k = 0; k < w; ++k)
++                    r[k] = s > 0 ? x[k] / s : 0;
++            break;
++        }
++        case OpCross:
++            r = put3(Cross(vec3(a[0]), vec3(a[1])));
++            break;
++        case OpExt:
++            r = Broadcast(reg(a[0])[std::min(std::max(a[1], 0), 3)]);
++            break;
++        case OpComb:
++            for (size_t k = 0; k < a.size() && k < 4; ++k)
++                r[k] = reg(a[k])[0];
++            break;
++        case OpCvt: {  // in, from width, to width
++            const V4 &x = reg(a[0]);
++            if (a[1] == 1)
++                r = Broadcast(x[0]);
++            else {
++                r = x;
++                for (int k = a[1]; k < 4; ++k)
++                    r[k] = (k == 3 && a[2] == 4) ? 1 : 0;
++            }
++            break;
++        }
++        case OpRot2: {  // in, degrees
++            const V4 &x = reg(a[0]);
++            Float t = Radians(reg(a[1])[0]), s = std::sin(t), c = std::cos(t);
++            r = {c * x[0] + s * x[1], -s * x[0] + c * x[1], 0, 0};
++            break;
++        }
++        case OpRot3: {  // in, degrees, axis
++            Vector3f v = vec3(a[0]), axis = vec3(a[2]);
++            if (LengthSquared(axis) > 0)
++                axis = Normalize(axis);
++            Float t = Radians(reg(a[1])[0]), s = std::sin(t), c = std::cos(t);
++            r = put3(v * c + Cross(v, axis) * s + axis * Dot(axis, v) * (1 - c));
++            break;
++        }
++        case OpPos:
++            r = put3(Vector3f(a[0] == 1 ? worldFromObject(vx.p) : vx.p));
++            break;
++        case OpNrm: {
++            Vector3f n(a[0] == 1 ? worldFromObject(vx.n) : vx.n);
++            r = put3(LengthSquared(n) > 0 ? Normalize(n) : n);
++            break;
++        }
++        case OpTan3:
++        case OpBtan: {
++            Vector3f t = in.op == OpTan3 ? vx.dpdu : vx.dpdv;
++            if (a[0] == 1)
++                t = worldFromObject(t);
++            r = put3(LengthSquared(t) > 0 ? Normalize(t) : t);
++            break;
++        }
++        case OpUV:
++            r = {vx.uv.x, vx.uv.y, 0, 0};
++            break;
++        case OpPerlin2:
++        case OpPerlin3: {  // position, output width (Karma's mxstd_noise)
++            const V4 &p = reg(a[0]);
++            const int w = a[1];
++            const bool three = in.op == OpPerlin3;
++            Point2f p2(p[0], p[1]);
++            Point3f p3(p[0], p[1], p[2]);
++            if (w == 1) {
++                r = Broadcast(three ? MxPerlin(p3) : MxPerlin(p2));
++            } else {
++                Vector3f v = three ? MxPerlin3(p3) : MxPerlin3(p2);
++                Float f = 0;
++                if (w == 4)
++                    f = three ? MxPerlin(p3 + Vector3f(19, 73, 29))
++                              : MxPerlin(p2 + Vector2f(19, 73));
++                r = put3(v, f);
++            }
++            break;
++        }
++        case OpFractal2:
++        case OpFractal3: {  // position, octaves, lacunarity, diminish, width
++            const V4 &p = reg(a[0]);
++            const int oct = int(reg(a[1])[0]);
++            const Float lac = reg(a[2])[0], dim = reg(a[3])[0];
++            const int w = a[4];
++            const bool three = in.op == OpFractal3;
++            auto fractalF = [&](Point3f q) {
++                Float res = 0, amp = 1;
++                for (int i = 0; i < oct; ++i) {
++                    res += amp * (three ? MxPerlin(q) : MxPerlin(Point2f(q.x, q.y)));
++                    amp *= dim;
++                    q = Point3f(q.x * lac, q.y * lac, q.z * lac);
++                }
++                return res;
++            };
++            auto fractalV = [&](Point3f q) {
++                Vector3f res(0, 0, 0);
++                Float amp = 1;
++                for (int i = 0; i < oct; ++i) {
++                    res += amp * (three ? MxPerlin3(q) : MxPerlin3(Point2f(q.x, q.y)));
++                    amp *= dim;
++                    q = Point3f(q.x * lac, q.y * lac, q.z * lac);
++                }
++                return res;
++            };
++            Point3f q(p[0], p[1], three ? p[2] : 0);
++            const Vector3f off = three ? Vector3f(19, 193, 17) : Vector3f(19, 193, 0);
++            if (w == 1)
++                r = Broadcast(fractalF(q));
++            else if (w == 2)
++                r = {fractalF(q), fractalF(q + off), 0, 0};
++            else
++                r = put3(fractalV(q), w == 4 ? fractalF(q + off) : 0);
++            break;
++        }
++        case OpCell2:
++        case OpCell3: {  // position, width
++            const V4 &p = reg(a[0]);
++            if (a[1] == 1)
++                r = Broadcast(in.op == OpCell3 ? MxCellNoise(Point3f(p[0], p[1], p[2]))
++                                               : MxCellNoise(Point2f(p[0], p[1])));
++            else
++                r = put3(in.op == OpCell3 ? MxCellNoise3(Point3f(p[0], p[1], p[2]))
++                                          : MxCellNoise3(Point2f(p[0], p[1])));
++            break;
++        }
++        case OpWorley2:
++        case OpWorley3: {  // position, jitter, style, width
++            const V4 &p = reg(a[0]);
++            const Float jitter = reg(a[1])[0];
++            const int style = int(reg(a[2])[0]);
++            const bool f = a[3] == 1;
++            Vector3f v = in.op == OpWorley3
++                             ? Worley3(Point3f(p[0], p[1], p[2]), jitter, style, f)
++                             : Worley2(Point2f(p[0], p[1]), jitter, style, f);
++            r = f ? Broadcast(v.x) : put3(v);
++            break;
++        }
++        case OpImg: {  // image, texcoord, default, width, uwrap, vwrap
++            const std::shared_ptr<const Image> &img = images[a[0]];
++            const V4 &st = reg(a[1]);
++            const V4 &def = reg(a[2]);
++            const int w = a[3];
++            if (!img) {
++                r = def;
++                break;
++            }
++            WrapMode2D wrap(AddressMode(a[4]), AddressMode(a[5]));
++            Point2f t(st[0], 1 - st[1]);
++            const int nc = img->NChannels();
++            for (int k = 0; k < w && k < 4; ++k) {
++                if (k >= nc)
++                    r[k] = (nc == 1 && k < 3) ? r[0] : (k == 3 ? 1 : 0);
++                else
++                    r[k] = img->BilerpChannel(t, k, wrap);
++            }
++            if (w == 1)
++                r = Broadcast(r[0]);
++            break;
++        }
++        case OpCopy:
++            r = reg(a[0]);
++            break;
++        }
++        if (in.dst < nr)
++            R[in.dst] = r;
++    }
++    return reg(out);
++}
++
++}  // namespace pbrt
+diff --git a/src/pbrt/util/hdpbrtgraph.h b/src/pbrt/util/hdpbrtgraph.h
+new file mode 100644
+index 0000000..b8a0177
+--- /dev/null
++++ b/src/pbrt/util/hdpbrtgraph.h
+@@ -0,0 +1,78 @@
++// hdPbrt: procedural displacement graphs. hdPbrt compiles a MaterialX node
++// graph (the displacement terminal's upstream nodes, nodegraph-implemented
++// nodes expanded) into a small register program; plymesh evaluates it per
++// vertex during displacement ("string hdpbrtgraph", see shapes.cpp).
++//
++// Program: instructions separated by ';', each "<op> <dst> <operands...>".
++// Registers hold 4 floats; float values are broadcast to all four lanes, so
++// componentwise ops also serve MaterialX's "FA" (vector by float) variants.
++// "c <dst> x y z w" sets a constant register, "out <reg>" names the result.
++// Noise follows MaterialX's reference library (OSL's noise; Karma's VEX
++// mx_perlin / mx_cellnoise / mx_worley), vector2/vector4 noise variants as
++// Karma's mxstd.h.
++
++#ifndef PBRT_UTIL_HDPBRTGRAPH_H
++#define PBRT_UTIL_HDPBRTGRAPH_H
++
++#include <pbrt/pbrt.h>
++#include <pbrt/util/image.h>
++#include <pbrt/util/transform.h>
++#include <pbrt/util/vecmath.h>
++
++#include <array>
++#include <memory>
++#include <string>
++#include <vector>
++
++namespace pbrt {
++
++class HdPbrtGraph {
++  public:
++    using V4 = std::array<Float, 4>;
++
++    // One vertex: object-space position, normal and unit tangents, uv.
++    struct Vertex {
++        Point3f p;
++        Normal3f n;
++        Point2f uv;
++        Vector3f dpdu, dpdv;
++    };
++
++    // `images` are pairs of file name and encoding ("linear", "sRGB").
++    // Errors exit with `loc`.
++    static std::unique_ptr<HdPbrtGraph> Parse(const std::string &program,
++                                              const std::vector<std::string> &images,
++                                              const FileLoc *loc);
++
++    V4 Evaluate(const Vertex &v) const;
++
++    bool UsesTangents() const { return usesTangents; }
++    bool UsesWorld() const { return usesWorld; }
++    // For "world" space geometry (set by the shape before evaluating).
++    Transform worldFromObject;
++
++  private:
++    struct Instr {
++        int op = 0, dst = 0;
++        std::vector<int> a;
++    };
++    std::vector<Instr> code;
++    std::vector<V4> init;  // registers with constants
++    int out = 0;
++    bool usesTangents = false, usesWorld = false;
++    std::vector<std::shared_ptr<const Image>> images;
++};
++
++// MaterialX reference noise (exposed for tests).
++Float MxPerlin(Point2f p);
++Float MxPerlin(Point3f p);
++Vector3f MxPerlin3(Point2f p);
++Vector3f MxPerlin3(Point3f p);
++Float MxCellNoise(Point2f p);
++Float MxCellNoise(Point3f p);
++Vector3f MxCellNoise3(Point2f p);
++Vector3f MxCellNoise3(Point3f p);
++
++}  // namespace pbrt
++
++#endif  // PBRT_UTIL_HDPBRTGRAPH_H
+-- 
+2.43.0
+
