@@ -979,8 +979,10 @@ void HdPbrtMaterial::_BuildDisplacement(HdMaterialNetworkMap const &map,
     auto procedural = [&]() {
         std::string program, error;
         std::vector<std::string> images;
+        std::vector<std::pair<std::string, int>> primvars;
         if (type == "UsdPreviewSurface" ||
-            !HdPbrt_CompileDisplacementGraph(net2, disp, _delegate, &program, &images, &error)) {
+            !HdPbrt_CompileDisplacementGraph(net2, disp, _delegate, &program, &images, &primvars,
+                                             &error)) {
             if (getenv("HDPBRT_DEBUG"))
                 fprintf(stderr, "hdPbrt %s: displacement graph not supported: %s\n",
                         GetId().GetText(), error.c_str());
@@ -988,6 +990,7 @@ void HdPbrtMaterial::_BuildDisplacement(HdMaterialNetworkMap const &map,
         }
         result->displacementGraph = program;
         result->displacementGraphImages = images;
+        result->displacementGraphPrimvars = primvars;
         result->displacementVector = vector;
         if (getenv("HDPBRT_DEBUG"))
             fprintf(stderr, "hdPbrt %s: procedural displacement: %s\n", GetId().GetText(),

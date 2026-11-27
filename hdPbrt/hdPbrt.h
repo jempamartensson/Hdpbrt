@@ -225,6 +225,8 @@ struct HdPbrtMaterialDesc {
     // (mtlxGraph.cpp) in place of the texture, its images (file, encoding).
     std::string displacementGraph;
     std::vector<std::string> displacementGraphImages;
+    // Primvars the graph reads (geompropvalue / geomcolor): name, width.
+    std::vector<std::pair<std::string, int>> displacementGraphPrimvars;
 };
 
 class HdPbrtMaterial final : public HdMaterial {
@@ -253,7 +255,9 @@ private:
 // a pbrt "hdpbrtgraph" program; false (with the reason) for unsupported graphs.
 bool HdPbrt_CompileDisplacementGraph(const HdMaterialNetwork2 &net, const HdMaterialNode2 &disp,
                                      HdPbrtRenderDelegate *delegate, std::string *program,
-                                     std::vector<std::string> *images, std::string *error);
+                                     std::vector<std::string> *images,
+                                     std::vector<std::pair<std::string, int>> *primvars,
+                                     std::string *error);
 bool HdPbrt_PreviewContexts();
 
 // Karma pyro shader node -> HdPbrtMaterialDesc volume fields (material.cpp).
@@ -355,6 +359,9 @@ protected:
     virtual bool _CanEmit() const { return false; }
     // Displaced by the material's displacement (meshes with uvs).
     virtual bool _CanDisplace() const { return false; }
+    // A file of `width` floats per pbrt vertex of primvar `name` for
+    // displacement graphs ("" when the prim lacks it). Called with _mutex held.
+    virtual std::string _PrimvarFile(std::string const &name, int width) const { return {}; }
 
     void _SyncTransform(HdSceneDelegate *sd);
     void _SyncInstancing(HdSceneDelegate *sd);  // after the instancer synced
@@ -392,6 +399,7 @@ protected:
     std::string _Shapes(std::string const &extra) const override;
     bool _CanEmit() const override { return true; }
     bool _CanDisplace() const override { return _hasUV; }
+    std::string _PrimvarFile(std::string const &name, int width) const override;
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override { return bits; }
     void _InitRepr(TfToken const &reprToken, HdDirtyBits *dirtyBits) override {}
 
@@ -421,6 +429,24 @@ private:
     std::unique_ptr<_Motion> _motion;
     mutable std::vector<float> _motionTimes;
     mutable std::vector<std::string> _motionPlys;
+
+    // Primvars for displacement graphs, fetched when a material asks for
+    // them (the scene delegate is used outside Sync, while the scene is
+    // written) and mapped like the PLY's vertices.
+    struct _PvSource {
+        HdSceneDelegate *sd = nullptr;
+        std::vector<int> source;      // PLY vertex -> point index
+        std::vector<size_t> corner;   // PLY vertex -> triangle corner (unwelded)
+        bool unweld = false;
+        VtVec3iArray tris;            // triangles (refined points)
+        VtIntArray primParams;        // per triangle: coarse face
+        HdMeshTopology topology;      // triangulated (refined when subdivided)
+        std::shared_ptr<HdPbrtSubdiv> subdiv;
+        size_t numBasePoints = 0;
+    };
+    _PvSource _pv;
+    mutable std::map<std::string, std::string> _pvFiles;  // name#width -> file
+    mutable std::set<std::string> _pvWarned;
 };
 
 // ---------------------------------------------------------------------------

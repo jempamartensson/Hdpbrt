@@ -1,0 +1,508 @@
+From 3e7449f7d5679e9d4f1a63698fd1d9f4e3b63c99 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Fri, 27 Nov 2026 08:47:54 +0100
+Subject: [PATCH 42/42] plymesh displacement: deformation motion (every pose
+ refined like the first and displaced) and per-vertex primvars for
+ displacement graphs (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/shapes.cpp           | 101 +++++++++++++++++++++++++---
+ src/pbrt/util/hdpbrtgraph.cpp |  44 ++++++++++++-
+ src/pbrt/util/hdpbrtgraph.h   |  18 ++++-
+ src/pbrt/util/mesh.h          | 120 +++++++++++++++++++++++++---------
+ 4 files changed, 239 insertions(+), 44 deletions(-)
+
+diff --git a/src/pbrt/shapes.cpp b/src/pbrt/shapes.cpp
+index 4acd827..2681368 100644
+--- a/src/pbrt/shapes.cpp
++++ b/src/pbrt/shapes.cpp
+@@ -1458,7 +1458,10 @@ pstd::vector<Shape> Shape::Create(
+         // "float hdpbrtgraphcamera" [3] (world position of the render-space
+         // origin, for "world" space geometry).
+         const std::string graphProgram = parameters.GetOneString("hdpbrtgraph", "");
+-        if (!displacementTexName.empty() || !graphProgram.empty()) {
++        const bool displacedMesh = !displacementTexName.empty() || !graphProgram.empty();
++        std::vector<TriQuadMesh::Pose> displacedPoses;
++        std::vector<Float> displacedTimes;
++        if (displacedMesh) {
+             FloatTexture displacement;
+             if (!displacementTexName.empty()) {
+                 auto iter = floatTextures.find(displacementTexName);
+@@ -1469,7 +1472,63 @@ pstd::vector<Shape> Shape::Create(
+             std::unique_ptr<HdPbrtGraph> graph;
+             if (!graphProgram.empty())
+                 graph = HdPbrtGraph::Parse(graphProgram,
+-                                           parameters.GetStringArray("hdpbrtgraphimages"), loc);
++                                           parameters.GetStringArray("hdpbrtgraphimages"),
++                                           parameters.GetStringArray("hdpbrtgraphprimvars"),
++                                           loc);
++            // Primvars for the graph: "string hdpbrtprimvars" [name width file
++            // ...], raw little-endian float32, width values per PLY vertex.
++            {
++                std::vector<std::string> pv = parameters.GetStringArray("hdpbrtprimvars");
++                std::vector<std::string> names;
++                for (size_t i = 0; i + 2 < pv.size(); i += 3) {
++                    const int w = std::max(1, std::atoi(pv[i + 1].c_str()));
++                    std::vector<Float> data(plyMesh.p.size() * size_t(w));
++                    FILE *f = fopen(ResolveFilename(pv[i + 2]).c_str(), "rb");
++                    std::vector<float> raw(data.size());
++                    size_t got = f ? fread(raw.data(), sizeof(float), raw.size(), f) : 0;
++                    if (f)
++                        fclose(f);
++                    if (got != raw.size()) {
++                        Warning(loc, "%s: primvar file %s has %zu values, need %zu.", filename,
++                                pv[i + 2], got, raw.size());
++                        continue;
++                    }
++                    std::copy(raw.begin(), raw.end(), data.begin());
++                    plyMesh.attr.push_back(std::move(data));
++                    plyMesh.attrWidth.push_back(w);
++                    names.push_back(pv[i]);
++                }
++                if (graph)
++                    graph->BindPrimvars(names, plyMesh.attrWidth);
++            }
++            // Deformation motion of the displaced mesh: the other poses are
++            // refined like this one and displaced each.
++            std::vector<TriQuadMesh::Pose> dispPoses;
++            std::vector<Float> dispTimes;
++            {
++                std::vector<std::string> mf = parameters.GetStringArray("motionfilenames");
++                if (mf.empty()) {
++                    std::string one = parameters.GetOneString("motionfilename", "");
++                    if (!one.empty())
++                        mf.push_back(one);
++                }
++                dispTimes = parameters.GetFloatArray("motiontimes");
++                if (dispTimes.empty() && mf.size() == 1)
++                    dispTimes = {0, 1};
++                if (!mf.empty() && dispTimes.size() == mf.size() + 1) {
++                    for (const std::string &m : mf) {
++                        TriQuadMesh pose = TriQuadMesh::ReadPLY(ResolveFilename(m));
++                        if (pose.p.size() != plyMesh.p.size()) {
++                            Warning(loc, "%s: vertex count differs from %s; no motion.", m,
++                                    filename);
++                            dispPoses.clear();
++                            break;
++                        }
++                        dispPoses.push_back({std::move(pose.p), std::move(pose.n)});
++                    }
++                }
++            }
++            const std::vector<TriQuadMesh::Pose> origPoses = dispPoses;
+ 
+             LOG_VERBOSE("Starting to displace mesh \"%s\" with \"%s\"", filename,
+                         displacementTexName);
+@@ -1579,7 +1638,8 @@ pstd::vector<Shape> Shape::Create(
+                     },
+                     maxDist,
+                     [&](Point3f *p, const Normal3f *n, const Point2f *uv,
+-                        const Vector3f *dpdu, const Vector3f *dpdv, int nVertices) {
++                        const Vector3f *dpdu, const Vector3f *dpdv,
++                        const std::vector<std::vector<Float>> *attr, int nVertices) {
+                         ParallelFor(0, nVertices, [=](int i) {
+                             TextureEvalContext ctx;
+                             ctx.p = p[i];
+@@ -1589,6 +1649,8 @@ pstd::vector<Shape> Shape::Create(
+                                 vx.p = p[i];
+                                 vx.n = n[i];
+                                 vx.uv = uv[i];
++                                vx.attr = attr;
++                                vx.index = i;
+                                 if (dpdu) {
+                                     vx.dpdu = dpdu[i];
+                                     vx.dpdv = dpdv[i];
+@@ -1618,9 +1680,11 @@ pstd::vector<Shape> Shape::Create(
+                         });
+                     },
+                     loc, screen, maxTris > 0 ? size_t(maxTris) : 0, &over,
+-                    vectorMode || (graph && graph->UsesTangents()));
++                    vectorMode || (graph && graph->UsesTangents()),
++                    dispPoses.empty() ? nullptr : &dispPoses);
+                 if (!over)
+                     break;
++                dispPoses = origPoses;
+                 maxDist *= 2;
+                 if (attempt == 0)
+                     Warning(loc, "%s: displacement needs more than %d triangles; dicing "
+@@ -1632,6 +1696,10 @@ pstd::vector<Shape> Shape::Create(
+                         filename, displacementTexName, plyMesh.triIndices.size() / 3);
+ 
+             displacedTrisDelta += plyMesh.triIndices.size() / 3 - origTriCount;
++            if (!dispPoses.empty()) {
++                displacedPoses = std::move(dispPoses);
++                displacedTimes = std::move(dispTimes);
++            }
+         }
+ 
+         if (!plyMesh.triIndices.empty()) {
+@@ -1642,8 +1710,8 @@ pstd::vector<Shape> Shape::Create(
+             // hdPbrt: deformation motion blur. "string motionfilenames" are
+             // PLYs with the same vertices (and normals) at "float motiontimes"
+             // [1..N-1]; this file is the pose at motiontimes[0].
+-            // "string motionfilename" is the two-pose form. Triangles only, no
+-            // displacement.
++            // "string motionfilename" is the two-pose form. Triangles only.
++            // Displaced meshes: the poses were displaced above.
+             std::vector<std::string> motionFiles =
+                 parameters.GetStringArray("motionfilenames");
+             if (motionFiles.empty()) {
+@@ -1651,13 +1719,26 @@ pstd::vector<Shape> Shape::Create(
+                 if (!one.empty())
+                     motionFiles.push_back(one);
+             }
+-            if (!motionFiles.empty()) {
++            if (displacedMesh) {
++                if (!displacedPoses.empty()) {
++                    std::vector<std::vector<Point3f>> P;
++                    std::vector<std::vector<Normal3f>> N;
++                    for (TriQuadMesh::Pose &pose : displacedPoses) {
++                        P.push_back(std::move(pose.p));
++                        N.push_back(std::move(pose.n));
++                    }
++                    mesh->SetMotion(*renderFromObject, std::move(P), std::move(N),
++                                    std::move(displacedTimes), alloc);
++                } else if (!motionFiles.empty()) {
++                    Warning(loc, "%s: motion files ignored (pose count or motiontimes "
++                                 "mismatch).", filename);
++                }
++            } else if (!motionFiles.empty()) {
+                 std::vector<Float> times = parameters.GetFloatArray("motiontimes");
+                 if (times.empty() && motionFiles.size() == 1)
+                     times = {0, 1};
+-                if (!displacementTexName.empty() || !plyMesh.quadIndices.empty())
+-                    Warning(loc, "%s: motion files are ignored with displacement "
+-                                 "or quads.", filename);
++                if (!plyMesh.quadIndices.empty())
++                    Warning(loc, "%s: motion files are ignored with quads.", filename);
+                 else if (times.size() != motionFiles.size() + 1)
+                     Warning(loc, "%s: need %d motiontimes; no motion.", filename,
+                             int(motionFiles.size() + 1));
+diff --git a/src/pbrt/util/hdpbrtgraph.cpp b/src/pbrt/util/hdpbrtgraph.cpp
+index fd6b957..a593492 100644
+--- a/src/pbrt/util/hdpbrtgraph.cpp
++++ b/src/pbrt/util/hdpbrtgraph.cpp
+@@ -294,7 +294,7 @@ enum Op {
+     OpClamp, OpMix, OpSmooth, OpRemap, OpIfGt, OpIfGe, OpIfEq, OpSwitch, OpDot, OpLen,
+     OpNorm, OpDist, OpCross, OpExt, OpComb, OpCvt, OpRot2, OpRot3, OpPos, OpNrm, OpTan3,
+     OpBtan, OpUV, OpPerlin2, OpPerlin3, OpFractal2, OpFractal3, OpCell2, OpCell3,
+-    OpWorley2, OpWorley3, OpImg, OpCopy
++    OpWorley2, OpWorley3, OpImg, OpCopy, OpPv
+ };
+ 
+ struct OpInfo {
+@@ -322,7 +322,7 @@ const OpInfo kOps[] = {
+     {"uv", OpUV, 0},         {"perlin2", OpPerlin2, 2}, {"perlin3", OpPerlin3, 2},
+     {"fractal2", OpFractal2, 5}, {"fractal3", OpFractal3, 5}, {"cell2", OpCell2, 2},
+     {"cell3", OpCell3, 2},   {"worley2", OpWorley2, 4}, {"worley3", OpWorley3, 4},
+-    {"img", OpImg, 6},       {"copy", OpCopy, 1},
++    {"img", OpImg, 6},       {"copy", OpCopy, 1},       {"pv", OpPv, 2},
+ };
+ 
+ std::mutex imageCacheMutex;
+@@ -360,8 +360,14 @@ WrapMode AddressMode(int m) {
+ 
+ std::unique_ptr<HdPbrtGraph> HdPbrtGraph::Parse(const std::string &program,
+                                                 const std::vector<std::string> &images,
++                                                const std::vector<std::string> &primvars,
+                                                 const FileLoc *loc) {
+     auto g = std::make_unique<HdPbrtGraph>();
++    for (size_t i = 0; i + 1 < primvars.size(); i += 2) {
++        g->pvNames.push_back(primvars[i]);
++        g->pvWidths.push_back(std::max(1, std::min(4, std::atoi(primvars[i + 1].c_str()))));
++    }
++    g->pvAttr.assign(g->pvNames.size(), -1);
+     int maxReg = 0;
+     std::stringstream all(program);
+     std::string line;
+@@ -409,6 +415,8 @@ std::unique_ptr<HdPbrtGraph> HdPbrtGraph::Parse(const std::string &program,
+             if (in.op == OpTan3 || in.op == OpBtan)
+                 g->usesTangents = true;
+         }
++        if (in.op == OpPv && (in.a[0] < 0 || in.a[0] >= int(g->pvNames.size())))
++            ErrorExit(loc, "hdpbrtgraph: bad primvar slot in \"%s\".", line);
+         if (in.op == OpImg && (in.a[0] < 0 || 2 * in.a[0] + 1 >= int(images.size())))
+             ErrorExit(loc, "hdpbrtgraph: bad image index in \"%s\".", line);
+         g->code.push_back(std::move(in));
+@@ -419,6 +427,18 @@ std::unique_ptr<HdPbrtGraph> HdPbrtGraph::Parse(const std::string &program,
+     return g;
+ }
+ 
++void HdPbrtGraph::BindPrimvars(const std::vector<std::string> &attrNames,
++                               const std::vector<int> &attrWidths) {
++    for (size_t s = 0; s < pvNames.size(); ++s) {
++        pvAttr[s] = -1;
++        for (size_t a = 0; a < attrNames.size(); ++a)
++            if (attrNames[a] == pvNames[s] && attrWidths[a] >= 1) {
++                pvAttr[s] = int(a);
++                break;
++            }
++    }
++}
++
+ HdPbrtGraph::V4 HdPbrtGraph::Evaluate(const Vertex &vx) const {
+     thread_local std::vector<V4> R;
+     R = init;
+@@ -699,6 +719,26 @@ HdPbrtGraph::V4 HdPbrtGraph::Evaluate(const Vertex &vx) const {
+         case OpCopy:
+             r = reg(a[0]);
+             break;
++        case OpPv: {  // slot, default
++            const int slot = a[0], at = pvAttr[slot];
++            if (at < 0 || !vx.attr || at >= int(vx.attr->size())) {
++                r = reg(a[1]);
++                break;
++            }
++            const std::vector<Float> &d = (*vx.attr)[at];
++            const int w = pvWidths[slot];
++            const size_t base = size_t(vx.index) * w;
++            if (base + w > d.size()) {
++                r = reg(a[1]);
++                break;
++            }
++            if (w == 1)
++                r = Broadcast(d[base]);
++            else
++                for (int k = 0; k < w; ++k)
++                    r[k] = d[base + k];
++            break;
++        }
+         }
+         if (in.dst < nr)
+             R[in.dst] = r;
+diff --git a/src/pbrt/util/hdpbrtgraph.h b/src/pbrt/util/hdpbrtgraph.h
+index b8a0177..2ba7c82 100644
+--- a/src/pbrt/util/hdpbrtgraph.h
++++ b/src/pbrt/util/hdpbrtgraph.h
+@@ -36,14 +36,26 @@ class HdPbrtGraph {
+         Normal3f n;
+         Point2f uv;
+         Vector3f dpdu, dpdv;
++        // Primvars: the mesh's attributes (TriQuadMesh::attr) and this
++        // vertex's index in them.
++        const std::vector<std::vector<Float>> *attr = nullptr;
++        int index = 0;
+     };
+ 
+-    // `images` are pairs of file name and encoding ("linear", "sRGB").
+-    // Errors exit with `loc`.
++    // `images` are pairs of file name and encoding ("linear", "sRGB");
++    // `primvars` pairs of name and width, the slots of "pv" ops. Errors exit
++    // with `loc`.
+     static std::unique_ptr<HdPbrtGraph> Parse(const std::string &program,
+                                               const std::vector<std::string> &images,
++                                              const std::vector<std::string> &primvars,
+                                               const FileLoc *loc);
+ 
++    // Primvar slots -> attribute index (by name), -1 when the mesh lacks it
++    // (the "pv" op then returns its default).
++    void BindPrimvars(const std::vector<std::string> &attrNames,
++                      const std::vector<int> &attrWidths);
++    const std::vector<std::string> &PrimvarNames() const { return pvNames; }
++
+     V4 Evaluate(const Vertex &v) const;
+ 
+     bool UsesTangents() const { return usesTangents; }
+@@ -61,6 +73,8 @@ class HdPbrtGraph {
+     int out = 0;
+     bool usesTangents = false, usesWorld = false;
+     std::vector<std::shared_ptr<const Image>> images;
++    std::vector<std::string> pvNames;
++    std::vector<int> pvWidths, pvAttr;
+ };
+ 
+ // MaterialX reference noise (exposed for tests).
+diff --git a/src/pbrt/util/mesh.h b/src/pbrt/util/mesh.h
+index 2264567..221e31d 100644
+--- a/src/pbrt/util/mesh.h
++++ b/src/pbrt/util/mesh.h
+@@ -143,15 +143,24 @@ struct TriQuadMesh {
+     // normal and averages the new normals over them, so seams stay closed.
+     // maxTris > 0: stop refining past that many triangles and set *overBudget
+     // (the mesh returned is then incomplete).
+-    // A displace callback taking (p, n, uv, dpdu, dpdv, count) also gets unit
+-    // tangents per vertex (from the uvs, orthogonal to n; dpdv also to dpdu),
+-    // accumulated over vertices sharing position and uv, for vector
+-    // displacement in (dPdu, dPdv, N) space (null unless computeTangents).
++    // A displace callback taking (p, n, uv, dpdu, dpdv, attr, count) also gets
++    // unit tangents per vertex (from the uvs, orthogonal to n; dpdv also to
++    // dpdu), accumulated over vertices sharing position and uv, for vector
++    // displacement in (dPdu, dPdv, N) space (null unless computeTangents), and
++    // the refined vertex attributes (`attr`).
++    // poses: deformation motion. In: further poses of this mesh's vertices
++    // (positions, and normals or empty); out: the same refinement (made on
++    // this pose) applied to each, displaced, with their own normals.
++    struct Pose {
++        std::vector<Point3f> p;
++        std::vector<Normal3f> n;
++    };
+     template <typename Dist, typename Disp>
+     TriQuadMesh Displace(Dist &&dist, Float maxDist, Disp &&displace,
+                          const FileLoc *loc = nullptr, bool weldByPosition = false,
+                          size_t maxTris = 0, bool *overBudget = nullptr,
+-                         bool computeTangents = true) const {
++                         bool computeTangents = true,
++                         std::vector<Pose> *poses = nullptr) const {
+         if (uv.empty())
+             ErrorExit(loc, "Vertex uvs are currently required by Displace(). Sorry.\n");
+ 
+@@ -162,6 +171,8 @@ struct TriQuadMesh {
+             outputMesh.ComputeNormals();
+         std::vector<int> oldTriIndices(outputMesh.triIndices);
+         outputMesh.triIndices.clear();
++        outputMesh.splitParents.clear();
++        const size_t baseCount = outputMesh.p.size();
+ 
+         // Refine
+         HashMap<std::pair<int, int>, int, HashIntPair> edgeSplit({});
+@@ -176,38 +187,66 @@ struct TriQuadMesh {
+             }
+         }
+ 
+-        auto callDisplace = [&](const Normal3f *nn) {
++        // The other poses: their normals before refinement (as for this
++        // one), then the same splits.
++        std::vector<TriQuadMesh> poseMeshes;
++        if (poses) {
++            for (Pose &pose : *poses) {
++                TriQuadMesh pm;
++                pm.p = pose.p;
++                pm.n = pose.n;
++                pm.triIndices = oldTriIndices;
++                if (pm.n.size() != pm.p.size()) {
++                    pm.n.clear();
++                    pm.ComputeNormals();
++                }
++                pm.p.resize(baseCount);
++                pm.n.resize(baseCount);
++                for (const std::pair<int, int> &sp : outputMesh.splitParents) {
++                    pm.p.push_back((pm.p[sp.first] + pm.p[sp.second]) / 2);
++                    Normal3f nn = pm.n[sp.first] + pm.n[sp.second];
++                    pm.n.push_back(LengthSquared(nn) > 0 ? Normalize(nn) : nn);
++                }
++                pm.triIndices = outputMesh.triIndices;
++                pm.uv = outputMesh.uv;
++                poseMeshes.push_back(std::move(pm));
++            }
++        }
++        outputMesh.splitParents.clear();
++
++        auto callDisplace = [&](TriQuadMesh &m, const Normal3f *nn) {
+             if constexpr (std::is_invocable_v<Disp &, Point3f *, const Normal3f *,
+                                               const Point2f *, const Vector3f *,
+-                                              const Vector3f *, int>) {
++                                              const Vector3f *,
++                                              const std::vector<std::vector<Float>> *,
++                                              int>) {
+                 std::vector<Vector3f> dpdu, dpdv;
+                 if (computeTangents)
+-                    outputMesh.ComputeTangents(nn, &dpdu, &dpdv);
+-                displace(outputMesh.p.data(), nn, outputMesh.uv.data(), dpdu.data(),
+-                         dpdv.data(), int(outputMesh.p.size()));
++                    m.ComputeTangents(nn, &dpdu, &dpdv);
++                displace(m.p.data(), nn, m.uv.data(), dpdu.data(), dpdv.data(),
++                         &outputMesh.attr, int(m.p.size()));
++            } else if constexpr (std::is_invocable_v<Disp &, Point3f *, const Normal3f *,
++                                                     const Point2f *, const Vector3f *,
++                                                     const Vector3f *, int>) {
++                std::vector<Vector3f> dpdu, dpdv;
++                if (computeTangents)
++                    m.ComputeTangents(nn, &dpdu, &dpdv);
++                displace(m.p.data(), nn, m.uv.data(), dpdu.data(), dpdv.data(),
++                         int(m.p.size()));
+             } else {
+-                displace(outputMesh.p.data(), nn, outputMesh.uv.data(),
+-                         outputMesh.p.size());
++                displace(m.p.data(), nn, m.uv.data(), m.p.size());
+             }
+         };
+ 
+-        if (!weldByPosition) {
+-            // Displace
+-            callDisplace(outputMesh.n.data());
+-
+-            outputMesh.ComputeNormals();
+-
+-            return outputMesh;
+-        }
+-
+-        // Group the vertices by position (before displacement).
++        // Group the vertices by position (before displacement, this pose).
+         struct HashPoint {
+             size_t operator()(const Point3f &q) const { return Hash(q.x, q.y, q.z); }
+         };
+         const size_t nv = outputMesh.p.size();
+-        std::vector<int> group(nv);
++        std::vector<int> group;
+         int nGroups = 0;
+-        {
++        if (weldByPosition) {
++            group.resize(nv);
+             std::unordered_map<Point3f, int, HashPoint> first;
+             first.reserve(nv);
+             for (size_t i = 0; i < nv; ++i) {
+@@ -218,7 +257,7 @@ struct TriQuadMesh {
+             }
+         }
+         auto averageOverGroups = [&](std::vector<Normal3f> &nn) {
+-            if (nGroups == (int)nv)
++            if (!weldByPosition || nGroups == (int)nv)
+                 return;
+             std::vector<Normal3f> sum(nGroups, Normal3f(0, 0, 0));
+             for (size_t i = 0; i < nv; ++i)
+@@ -228,11 +267,19 @@ struct TriQuadMesh {
+                 nn[i] = LengthSquared(s) > 0 ? Normalize(s) : nn[i];
+             }
+         };
+-        std::vector<Normal3f> dispN(outputMesh.n);
+-        averageOverGroups(dispN);
+-        callDisplace(dispN.data());
+-        outputMesh.ComputeNormals();
+-        averageOverGroups(outputMesh.n);
++        auto finish = [&](TriQuadMesh &m) {
++            std::vector<Normal3f> dispN(m.n);
++            averageOverGroups(dispN);
++            callDisplace(m, dispN.data());
++            m.ComputeNormals();
++            averageOverGroups(m.n);
++        };
++        finish(outputMesh);
++        for (size_t k = 0; k < poseMeshes.size(); ++k) {
++            finish(poseMeshes[k]);
++            (*poses)[k].p = std::move(poseMeshes[k].p);
++            (*poses)[k].n = std::move(poseMeshes[k].n);
++        }
+         return outputMesh;
+     }
+ 
+@@ -241,6 +288,12 @@ struct TriQuadMesh {
+     std::vector<Point2f> uv;
+     std::vector<int> faceIndices;
+     std::vector<int> triIndices, quadIndices;
++    // hdPbrt: per-vertex attributes (primvars for displacement graphs), each
++    // attrWidth[i] floats per vertex; refinement averages them.
++    std::vector<std::vector<Float>> attr;
++    std::vector<int> attrWidth;
++    // hdPbrt: vertices added by Refine, in order: their edge's endpoints.
++    std::vector<std::pair<int, int>> splitParents;
+ 
+     // hdPbrt: unit tangents along u and v per vertex (triangles only), summed
+     // over the triangles around each (position, uv), made orthogonal to nn.
+@@ -349,6 +402,13 @@ struct TriQuadMesh {
+             }
+             if (!uv.empty())
+                 uv.push_back((uv[v[0]] + uv[v[1]]) / 2);
++            for (size_t a = 0; a < attr.size(); ++a) {
++                const int w = attrWidth[a];
++                std::vector<Float> &d = attr[a];
++                for (int k = 0; k < w; ++k)
++                    d.push_back((d[size_t(v[0]) * w + k] + d[size_t(v[1]) * w + k]) / 2);
++            }
++            splitParents.push_back({v[0], v[1]});
+         }
+ 
+         Refine(distance, maxDist, v[0], vmid, v[2], edgeSplit);
+-- 
+2.43.0
+

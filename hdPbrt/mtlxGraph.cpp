@@ -172,6 +172,16 @@ class Compiler {
 
     std::ostringstream code;
     std::vector<std::string> images;
+    std::vector<std::pair<std::string, int>> primvars;
+
+    int PrimvarSlot(const std::string &name, int width)
+    {
+        for (size_t i = 0; i < primvars.size(); ++i)
+            if (primvars[i].first == name && primvars[i].second == width)
+                return int(i);
+        primvars.push_back({name, width});
+        return int(primvars.size() - 1);
+    }
     int nextReg = 0;
 
     int NewReg() { return nextReg++; }
@@ -557,12 +567,16 @@ class Compiler {
         }
         if (c == "texcoord")
             return Emit("uv", {}, W);
-        if (c == "geompropvalue") {
+        if (c == "geompropvalue" || c == "geompropvalueuniform") {
             const std::string g = Str(in("geomprop"));
             if ((g == "st" || g == "uv" || g == "UV0") && W == 2)
                 return Emit("uv", {}, 2);
-            Fail("geompropvalue " + g + " (only st/uv)");
+            if (g.empty())
+                Fail("geompropvalue without a geomprop");
+            return Emit("pv", {PrimvarSlot(g, W), I("default")}, W);
         }
+        if (c == "geomcolor")
+            return Emit("pv", {PrimvarSlot("displayColor", W), ConstF(1.f).reg}, W);
         if (c == "noise2d" || c == "noise3d") {
             const bool three = c == "noise3d";
             Val n = Emit(three ? "perlin3" : "perlin2", {I(three ? "position" : "texcoord"), W},
@@ -658,7 +672,9 @@ class Compiler {
 
 bool HdPbrt_CompileDisplacementGraph(const HdMaterialNetwork2 &net, const HdMaterialNode2 &disp,
                                      HdPbrtRenderDelegate *delegate, std::string *program,
-                                     std::vector<std::string> *images, std::string *error)
+                                     std::vector<std::string> *images,
+                                     std::vector<std::pair<std::string, int>> *primvars,
+                                     std::string *error)
 {
     Compiler comp(net, delegate);
     try {
@@ -694,6 +710,7 @@ bool HdPbrt_CompileDisplacementGraph(const HdMaterialNetwork2 &net, const HdMate
     }
     *program = comp.code.str();
     *images = comp.images;
+    *primvars = comp.primvars;
     return true;
 }
 

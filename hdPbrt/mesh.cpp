@@ -29,8 +29,13 @@ HdPbrtMesh::HdPbrtMesh(SdfPath const &id, HdPbrtRenderDelegate *delegate)
 
 HdPbrtMesh::~HdPbrtMesh()
 {
-    if (!_plyPath.empty() && !getenv("HDPBRT_KEEP_TMP"))
+    if (getenv("HDPBRT_KEEP_TMP"))
+        return;
+    if (!_plyPath.empty())
         unlink(_plyPath.c_str());
+    for (const auto &f : _pvFiles)
+        if (!f.second.empty())
+            unlink(f.second.c_str());
 }
 
 void HdPbrtMesh::Finalize(HdRenderParam *renderParam)
@@ -241,14 +246,22 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
     util.ComputeTriangleIndices(&tris, &primParams);
 
     // Drop triangles with out-of-range indices (bad topology).
+    const size_t numTrisBeforeDrop = tris.size();
     {
         VtVec3iArray good;
+        VtIntArray goodParams;
         good.reserve(tris.size());
         const int n = (int)points.size();
-        for (const GfVec3i &t : tris)
-            if (t[0] >= 0 && t[1] >= 0 && t[2] >= 0 && t[0] < n && t[1] < n && t[2] < n)
+        for (size_t i = 0; i < tris.size(); ++i) {
+            const GfVec3i &t = tris[i];
+            if (t[0] >= 0 && t[1] >= 0 && t[2] >= 0 && t[0] < n && t[1] < n && t[2] < n) {
                 good.push_back(t);
+                if (i < primParams.size())
+                    goodParams.push_back(primParams[i]);
+            }
+        }
         tris = good;
+        primParams = goodParams;
     }
 
     static const bool debug = getenv("HDPBRT_DEBUG") != nullptr;
@@ -404,9 +417,27 @@ void HdPbrtMesh::_WritePly(HdSceneDelegate *sd, HdDirtyBits dirtyBits)
         }
     }
 
+    _PvSource pvs;
+    pvs.sd = sd;
+    pvs.source = source;
+    pvs.corner = corner;
+    pvs.unweld = unweld;
+    pvs.tris = tris;
+    pvs.primParams = primParams;
+    pvs.topology = topology;
+    pvs.subdiv = subdiv;
+    pvs.numBasePoints = numBasePoints;
+    if (numTrisBeforeDrop != tris.size())
+        pvs.primParams.clear();  // face-varying data no longer lines up
+
     std::lock_guard<std::mutex> lock(_mutex);
     if (!_plyPath.empty())
         unlink(_plyPath.c_str());  // a running pbrt keeps its open handle
+    _pv = std::move(pvs);
+    for (const auto &f : _pvFiles)
+        if (!f.second.empty())
+            unlink(f.second.c_str());
+    _pvFiles.clear();
     _plyPath = path;
     _hasUV = hasUV;
     _numTriangles = writtenTris;
@@ -461,6 +492,195 @@ void HdPbrtMesh::_UpdateMotionPlys(std::vector<float> const &times) const
         }
     }
     _motionPlys = paths;
+}
+
+// A primvar value as `width` floats per element (fewer components are
+// broadcast from one, else padded with zeros).
+static bool _FlattenPrimvar(const VtValue &v, int width, std::vector<float> *out)
+{
+    out->clear();
+    auto put = [&](const float *c, int n) {
+        for (int k = 0; k < width; ++k)
+            out->push_back(k < n ? c[k] : n == 1 ? c[0] : 0.f);
+    };
+    auto putArray = [&](auto const &arr, int n) {
+        for (const auto &e : arr) {
+            float c[4] = {0, 0, 0, 0};
+            if constexpr (std::is_arithmetic_v<std::decay_t<decltype(e)>>)
+                c[0] = float(e);
+            else
+                for (int k = 0; k < n; ++k)
+                    c[k] = float(e[k]);
+            put(c, n);
+        }
+    };
+    if (v.IsHolding<VtFloatArray>()) putArray(v.UncheckedGet<VtFloatArray>(), 1);
+    else if (v.IsHolding<VtDoubleArray>()) putArray(v.UncheckedGet<VtDoubleArray>(), 1);
+    else if (v.IsHolding<VtIntArray>()) putArray(v.UncheckedGet<VtIntArray>(), 1);
+    else if (v.IsHolding<VtVec2fArray>()) putArray(v.UncheckedGet<VtVec2fArray>(), 2);
+    else if (v.IsHolding<VtVec3fArray>()) putArray(v.UncheckedGet<VtVec3fArray>(), 3);
+    else if (v.IsHolding<VtVec4fArray>()) putArray(v.UncheckedGet<VtVec4fArray>(), 4);
+    else if (v.IsHolding<VtVec3dArray>()) putArray(v.UncheckedGet<VtVec3dArray>(), 3);
+    else if (v.IsHolding<float>()) { float c = v.UncheckedGet<float>(); put(&c, 1); }
+    else if (v.IsHolding<double>()) { float c = float(v.UncheckedGet<double>()); put(&c, 1); }
+    else if (v.IsHolding<int>()) { float c = float(v.UncheckedGet<int>()); put(&c, 1); }
+    else if (v.IsHolding<GfVec2f>()) put(v.UncheckedGet<GfVec2f>().data(), 2);
+    else if (v.IsHolding<GfVec3f>()) put(v.UncheckedGet<GfVec3f>().data(), 3);
+    else if (v.IsHolding<GfVec4f>()) put(v.UncheckedGet<GfVec4f>().data(), 4);
+    else return false;
+    return !out->empty();
+}
+
+std::string HdPbrtMesh::_PrimvarFile(std::string const &name, int width) const
+{
+    const std::string key = name + "#" + std::to_string(width);
+    auto cached = _pvFiles.find(key);
+    if (cached != _pvFiles.end())
+        return cached->second;
+    std::string &file = _pvFiles[key];
+    const _PvSource &pv = _pv;
+    if (!pv.sd || pv.source.empty())
+        return file;
+    SdfPath const &id = GetId();
+    auto warn = [&](const char *why) {
+        if (_pvWarned.insert(key).second)
+            TF_WARN("hdPbrt: %s primvar %s: %s; the displacement graph uses its default.",
+                    id.GetText(), name.c_str(), why);
+    };
+    // The primvar and its interpolation (Houdini's Cd is displayColor).
+    TfToken token(name);
+    HdInterpolation interp = HdInterpolationCount;
+    for (int pass = 0; pass < 2 && interp == HdInterpolationCount; ++pass) {
+        for (int i = 0; i < HdInterpolationCount && interp == HdInterpolationCount; ++i)
+            for (const HdPrimvarDescriptor &d :
+                 pv.sd->GetPrimvarDescriptors(id, HdInterpolation(i)))
+                if (d.name == token)
+                    interp = HdInterpolation(i);
+        if (interp == HdInterpolationCount && name == "Cd")
+            token = HdTokens->displayColor;
+        else
+            break;
+    }
+    if (interp == HdInterpolationCount)
+        return file;  // absent: the default, silently
+    std::vector<float> vals;
+    if (!_FlattenPrimvar(pv.sd->Get(id, token), width, &vals)) {
+        warn("unsupported value type");
+        return file;
+    }
+    const size_t count = vals.size() / width;
+    const size_t nv = pv.source.size();
+    std::vector<float> out(nv * width, 0.f);
+    auto at = [&](size_t e, int k) { return vals[e * width + k]; };
+    // Per-corner values (face-varying, uniform): to PLY vertices, averaged
+    // over the corners when the mesh isn't unwelded.
+    auto fromCorners = [&](const std::vector<float> &cv) {
+        if (pv.unweld) {
+            for (size_t v = 0; v < nv; ++v)
+                for (int k = 0; k < width; ++k)
+                    out[v * width + k] = cv[pv.corner[v] * width + k];
+            return;
+        }
+        std::vector<int> n(nv, 0);
+        for (size_t t = 0; t < pv.tris.size(); ++t)
+            for (int c = 0; c < 3; ++c) {
+                const int v = pv.tris[t][c];
+                if (v < 0 || size_t(v) >= nv)
+                    continue;
+                for (int k = 0; k < width; ++k)
+                    out[v * width + k] += cv[(t * 3 + c) * width + k];
+                ++n[v];
+            }
+        for (size_t v = 0; v < nv; ++v)
+            if (n[v])
+                for (int k = 0; k < width; ++k)
+                    out[v * width + k] /= float(n[v]);
+    };
+    if (interp == HdInterpolationConstant) {
+        for (size_t v = 0; v < nv; ++v)
+            for (int k = 0; k < width; ++k)
+                out[v * width + k] = at(0, k);
+    } else if (interp == HdInterpolationVertex || interp == HdInterpolationVarying) {
+        if (count != pv.numBasePoints) {
+            warn("wrong element count");
+            return file;
+        }
+        if (pv.subdiv) {
+            // Refine three channels at a time as points.
+            std::vector<float> refined;
+            size_t nref = 0;
+            for (int c0 = 0; c0 < width; c0 += 3) {
+                VtVec3fArray chunk(count);
+                for (size_t e = 0; e < count; ++e)
+                    for (int k = 0; k < 3; ++k)
+                        chunk[e][k] = c0 + k < width ? at(e, c0 + k) : 0.f;
+                VtVec3fArray r = pv.subdiv->RefinePoints(chunk);
+                if (r.empty()) {
+                    warn("subdivision failed");
+                    return file;
+                }
+                nref = r.size();
+                refined.resize(nref * width);
+                for (size_t e = 0; e < nref; ++e)
+                    for (int k = 0; k < 3 && c0 + k < width; ++k)
+                        refined[e * width + c0 + k] = r[e][k];
+            }
+            vals.swap(refined);
+        }
+        for (size_t v = 0; v < nv; ++v) {
+            const size_t e = size_t(pv.source[v]);
+            if (e * width + width > vals.size())
+                continue;
+            for (int k = 0; k < width; ++k)
+                out[v * width + k] = vals[e * width + k];
+        }
+    } else if (interp == HdInterpolationUniform) {
+        if (pv.subdiv || pv.primParams.size() != pv.tris.size()) {
+            warn("uniform primvars on subdivided meshes aren't supported");
+            return file;
+        }
+        std::vector<float> cv(pv.tris.size() * 3 * width);
+        for (size_t t = 0; t < pv.tris.size(); ++t) {
+            const size_t f =
+                size_t(HdMeshUtil::DecodeFaceIndexFromCoarseFaceParam(pv.primParams[t]));
+            for (int c = 0; c < 3; ++c)
+                for (int k = 0; k < width; ++k)
+                    cv[(t * 3 + c) * width + k] = f < count ? at(f, k) : 0.f;
+        }
+        fromCorners(cv);
+    } else {  // face-varying
+        if (pv.subdiv || pv.primParams.size() != pv.tris.size()) {
+            warn("face-varying primvars on subdivided meshes aren't supported");
+            return file;
+        }
+        VtVec4fArray v4(count);
+        for (size_t e = 0; e < count; ++e)
+            for (int k = 0; k < 4; ++k)
+                v4[e][k] = k < width ? at(e, k) : 0.f;
+        HdMeshTopology topo = pv.topology;
+        HdMeshUtil util(&topo, id);
+        VtVec4fArray tri = _Triangulated(util, v4, HdTypeFloatVec4);
+        if (tri.size() != pv.tris.size() * 3) {
+            warn("face-varying data doesn't match the triangles");
+            return file;
+        }
+        std::vector<float> cv(tri.size() * width);
+        for (size_t c = 0; c < tri.size(); ++c)
+            for (int k = 0; k < width; ++k)
+                cv[c * width + k] = tri[c][k];
+        fromCorners(cv);
+    }
+    std::string path = _delegate->NewTempPath("primvar", ".raw");
+    FILE *f = fopen(path.c_str(), "wb");
+    if (!f || fwrite(out.data(), sizeof(float), out.size(), f) != out.size()) {
+        if (f)
+            fclose(f);
+        warn("cannot write its file");
+        return file;
+    }
+    fclose(f);
+    file = path;
+    return file;
 }
 
 std::string HdPbrtMesh::_Shapes(std::string const &extra) const

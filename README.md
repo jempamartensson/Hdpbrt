@@ -107,8 +107,9 @@ in screen space (`docs/images/displacement.png`: hdPbrt left, Karma right). Vect
 Karma) works the same way (`docs/images/vector_displacement.png`), and so do procedural
 MaterialX graphs: noise, fractal, cell and worley noise, math, position/normal/uv, images and
 nodes built from them in the MaterialX standard library, with the same noise as Karma
-(`docs/images/procedural_displacement.png`). Not yet: graphs reading primvars other than uvs,
-motion blur on displaced deforming meshes.
+(`docs/images/procedural_displacement.png`). Graphs can read primvars (`geompropvalue`,
+`geomcolor`; constant, vertex, uniform, face-varying), so one material can displace each mesh
+differently, and deforming displaced meshes are motion blurred.
 Not yet: volume materials other than the Karma pyro shader,
 in-memory Houdini volumes (write VDBs to disk).
 

@@ -350,6 +350,20 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
                     extra << " " << HdPbrt_Quote(f);
                 extra << " ]";
             }
+            // Primvars the graph reads, as files per pbrt vertex.
+            if (!mat.displacementGraphPrimvars.empty()) {
+                std::ostringstream slots, files;
+                for (const auto &pv : mat.displacementGraphPrimvars) {
+                    slots << " " << HdPbrt_Quote(pv.first) << " \"" << pv.second << "\"";
+                    const std::string f = _PrimvarFile(pv.first, pv.second);
+                    if (!f.empty())
+                        files << " " << HdPbrt_Quote(pv.first) << " \"" << pv.second << "\" "
+                              << HdPbrt_Quote(f);
+                }
+                extra << " \"string hdpbrtgraphprimvars\" [" << slots.str() << " ]";
+                if (!files.str().empty())
+                    extra << " \"string hdpbrtprimvars\" [" << files.str() << " ]";
+            }
         } else {
             extra << " \"texture displacement\" " << HdPbrt_Quote(mat.displacementTexture);
         }
