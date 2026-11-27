@@ -102,8 +102,10 @@ ones run `hdpbrt_houdini.add_material_parms(hou.selectedNodes())` in the Python 
 Render Geometry Settings LOP has it per object. See `docs/images/infrared.png`.
 True displacement: a material's displacement (MaterialX `displacement` node or UsdPreviewSurface
 `displacement`, driven by an image with constant scale/offset) displaces meshes with uvs, diced
-in screen space (`docs/images/displacement.png`: hdPbrt left, Karma right). Not yet: vector
-displacement, procedural displacement graphs, motion blur on displaced deforming meshes.
+in screen space (`docs/images/displacement.png`: hdPbrt left, Karma right). Vector displacement
+(MaterialX `displacement` node of type vector3, an image in tangent space (dPdu, dPdv, N), as
+Karma) works the same way (`docs/images/vector_displacement.png`). Not yet: procedural
+displacement graphs, motion blur on displaced deforming meshes.
 Not yet: volume materials other than the Karma pyro shader,
 in-memory Houdini volumes (write VDBs to disk).
 

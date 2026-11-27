@@ -1,7 +1,7 @@
 From a49e7c11ec0709d7ce3850b39f41b4a3a28dd054 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Tue, 24 Nov 2026 07:56:30 +0100
-Subject: [PATCH 29/39] Dielectric: thin film on the interface (for hdPbrt)
+Subject: [PATCH 29/40] Dielectric: thin film on the interface (for hdPbrt)
 
 "filmweight"/"filmthickness" (nm)/"filmeta" on the dielectric material: the
 interface reflectance becomes Fresnel lerped with the exact spectral Airy

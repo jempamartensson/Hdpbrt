@@ -1,7 +1,7 @@
 From a10db45b0f34eb75284db4fa2aab8101e7f1056b Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sun, 22 Nov 2026 19:30:21 +0100
-Subject: [PATCH 08/39] USD light shaping on diffuse area lights and point
+Subject: [PATCH 08/40] USD light shaping on diffuse area lights and point
  lights (for hdPbrt)
 
 "float shapingfocus", "rgb shapingfocustint", "float shapingconeangle",

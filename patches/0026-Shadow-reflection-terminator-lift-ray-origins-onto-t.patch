@@ -1,7 +1,7 @@
 From 93a1c2e0a469852af09b6a4501842a27286fa8d2 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Mon, 23 Nov 2026 20:56:24 +0100
-Subject: [PATCH 26/39] Shadow/reflection terminator: lift ray origins onto the
+Subject: [PATCH 26/40] Shadow/reflection terminator: lift ray origins onto the
  smooth surface on coarse meshes (for hdPbrt)
 
 Triangle hits store Hanika 2021's lift (the hit point projected onto the

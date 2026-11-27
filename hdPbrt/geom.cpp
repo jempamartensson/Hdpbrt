@@ -349,6 +349,12 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
         if (ctx.diceOrtho)
             extra << " \"bool hdpbrtdiceortho\" true";
         extra << ctx.diceView;
+        if (mat.displacementVector) {
+            const GfVec3f &vs = mat.displacementVectorScale, &vb = mat.displacementVectorBias;
+            extra << " \"bool hdpbrtvectordisplacement\" true \"float hdpbrtvdispscale\" ["
+                  << vs[0] << " " << vs[1] << " " << vs[2] << "] \"float hdpbrtvdispbias\" ["
+                  << vb[0] << " " << vb[1] << " " << vb[2] << "]";
+        }
         if (mat.displacementScale != 1.f)
             extra << " \"float hdpbrtdisplacementscale\" " << mat.displacementScale;
         if (mat.displacementOffset != 0.f)

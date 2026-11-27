@@ -1,0 +1,230 @@
+From 259e673cab0faefd67e6f361ff7ae276336391ef Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Fri, 27 Nov 2026 07:43:40 +0100
+Subject: [PATCH 40/40] plymesh vector displacement: RGB of a float imagemap in
+ (dPdu, dPdv, N) space, per-component scale/bias, tangents from uvs (for
+ hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/shapes.cpp  | 31 ++++++++++++++--
+ src/pbrt/textures.h  |  7 ++++
+ src/pbrt/util/mesh.h | 86 +++++++++++++++++++++++++++++++++++++++++---
+ 3 files changed, 118 insertions(+), 6 deletions(-)
+
+diff --git a/src/pbrt/shapes.cpp b/src/pbrt/shapes.cpp
+index bd04d10..6e7de59 100644
+--- a/src/pbrt/shapes.cpp
++++ b/src/pbrt/shapes.cpp
+@@ -1474,6 +1474,9 @@ pstd::vector<Shape> Shape::Create(
+             // or camera units for ortho): edges outside the view are diced
+             // "hdpbrtdiceoffscreen" (0.25) times as finely.
+             // Displacement = scale * (texture + offset).
++            // "bool hdpbrtvectordisplacement": the texture (a float imagemap)
++            // is read as RGB, a vector in (dPdu, dPdv, N) space (MaterialX):
++            // d = "hdpbrtvdispscale" [3] * rgb + "hdpbrtvdispbias" [3].
+             const Float dicePixel = parameters.GetOneFloat("hdpbrtdicepixel", 0.f);
+             const bool diceOrtho = parameters.GetOneBool("hdpbrtdiceortho", false);
+             const Float diceRate = parameters.GetOneFloat("hdpbrtdicerate", 1.f);
+@@ -1485,6 +1488,20 @@ pstd::vector<Shape> Shape::Create(
+             const std::vector<Float> diceWindow = parameters.GetFloatArray("hdpbrtdicewindow");
+             const Float offscreen = parameters.GetOneFloat("hdpbrtdiceoffscreen", 0.25f);
+             const bool frustum = diceView.size() == 16 && diceWindow.size() == 4;
++            const FloatImageTexture *vectorTex = nullptr;
++            Vector3f vScale(1, 1, 1), vBias(0, 0, 0);
++            if (parameters.GetOneBool("hdpbrtvectordisplacement", false)) {
++                vectorTex = displacement.CastOrNullptr<FloatImageTexture>();
++                if (!vectorTex)
++                    Warning(loc, "%s: vector displacement needs an image texture; "
++                                 "displacing along the normal.", filename);
++                std::vector<Float> s = parameters.GetFloatArray("hdpbrtvdispscale");
++                std::vector<Float> b = parameters.GetFloatArray("hdpbrtvdispbias");
++                if (s.size() == 3)
++                    vScale = Vector3f(s[0], s[1], s[2]);
++                if (b.size() == 3)
++                    vBias = Vector3f(b[0], b[1], b[2]);
++            }
+             Transform cameraFromRender;
+             if (frustum)
+                 cameraFromRender =
+@@ -1536,17 +1553,27 @@ pstd::vector<Shape> Shape::Create(
+                         return d;
+                     },
+                     maxDist,
+-                    [&](Point3f *p, const Normal3f *n, const Point2f *uv, int nVertices) {
++                    [&](Point3f *p, const Normal3f *n, const Point2f *uv,
++                        const Vector3f *dpdu, const Vector3f *dpdv, int nVertices) {
+                         ParallelFor(0, nVertices, [=](int i) {
+                             TextureEvalContext ctx;
+                             ctx.p = p[i];
+                             ctx.uv = uv[i];
++                            if (vectorTex) {
++                                const RGB c = vectorTex->EvaluateRGB(ctx);
++                                const Float dx = vScale.x * c.r + vBias.x;
++                                const Float dy = vScale.y * c.g + vBias.y;
++                                const Float dz = vScale.z * c.b + vBias.z;
++                                p[i] += dx * dpdu[i] + dy * dpdv[i] + dz * Vector3f(n[i]);
++                                return;
++                            }
+                             Float d = UniversalTextureEvaluator()(displacement, ctx);
+                             d = dispScale * (d + dispOffset);
+                             p[i] += Vector3f(d * n[i]);
+                         });
+                     },
+-                    loc, screen, maxTris > 0 ? size_t(maxTris) : 0, &over);
++                    loc, screen, maxTris > 0 ? size_t(maxTris) : 0, &over,
++                    vectorTex != nullptr);
+                 if (!over)
+                     break;
+                 maxDist *= 2;
+diff --git a/src/pbrt/textures.h b/src/pbrt/textures.h
+index 8d0554e..6dd9d94 100644
+--- a/src/pbrt/textures.h
++++ b/src/pbrt/textures.h
+@@ -597,6 +597,13 @@ class FloatImageTexture : public ImageTextureBase {
+ #endif
+     }
+ 
++    // hdPbrt: the first three channels (vector displacement maps), CPU only.
++    RGB EvaluateRGB(TextureEvalContext ctx) const {
++        TexCoord2D c = mapping.Map(ctx);
++        c.st[1] = 1 - c.st[1];
++        return scale * mipmap->Filter<RGB>(c.st, {c.dsdx, c.dtdx}, {c.dsdy, c.dtdy});
++    }
++
+     static FloatImageTexture *Create(const Transform &renderFromTexture,
+                                      const TextureParameterDictionary &parameters,
+                                      const FileLoc *loc, Allocator alloc);
+diff --git a/src/pbrt/util/mesh.h b/src/pbrt/util/mesh.h
+index a9ca788..2264567 100644
+--- a/src/pbrt/util/mesh.h
++++ b/src/pbrt/util/mesh.h
+@@ -16,6 +16,7 @@
+ 
+ #include <array>
+ #include <string>
++#include <type_traits>
+ #include <unordered_map>
+ #include <vector>
+ 
+@@ -142,10 +143,15 @@ struct TriQuadMesh {
+     // normal and averages the new normals over them, so seams stay closed.
+     // maxTris > 0: stop refining past that many triangles and set *overBudget
+     // (the mesh returned is then incomplete).
++    // A displace callback taking (p, n, uv, dpdu, dpdv, count) also gets unit
++    // tangents per vertex (from the uvs, orthogonal to n; dpdv also to dpdu),
++    // accumulated over vertices sharing position and uv, for vector
++    // displacement in (dPdu, dPdv, N) space (null unless computeTangents).
+     template <typename Dist, typename Disp>
+     TriQuadMesh Displace(Dist &&dist, Float maxDist, Disp &&displace,
+                          const FileLoc *loc = nullptr, bool weldByPosition = false,
+-                         size_t maxTris = 0, bool *overBudget = nullptr) const {
++                         size_t maxTris = 0, bool *overBudget = nullptr,
++                         bool computeTangents = true) const {
+         if (uv.empty())
+             ErrorExit(loc, "Vertex uvs are currently required by Displace(). Sorry.\n");
+ 
+@@ -170,10 +176,24 @@ struct TriQuadMesh {
+             }
+         }
+ 
++        auto callDisplace = [&](const Normal3f *nn) {
++            if constexpr (std::is_invocable_v<Disp &, Point3f *, const Normal3f *,
++                                              const Point2f *, const Vector3f *,
++                                              const Vector3f *, int>) {
++                std::vector<Vector3f> dpdu, dpdv;
++                if (computeTangents)
++                    outputMesh.ComputeTangents(nn, &dpdu, &dpdv);
++                displace(outputMesh.p.data(), nn, outputMesh.uv.data(), dpdu.data(),
++                         dpdv.data(), int(outputMesh.p.size()));
++            } else {
++                displace(outputMesh.p.data(), nn, outputMesh.uv.data(),
++                         outputMesh.p.size());
++            }
++        };
++
+         if (!weldByPosition) {
+             // Displace
+-            displace(outputMesh.p.data(), outputMesh.n.data(), outputMesh.uv.data(),
+-                     outputMesh.p.size());
++            callDisplace(outputMesh.n.data());
+ 
+             outputMesh.ComputeNormals();
+ 
+@@ -210,7 +230,7 @@ struct TriQuadMesh {
+         };
+         std::vector<Normal3f> dispN(outputMesh.n);
+         averageOverGroups(dispN);
+-        displace(outputMesh.p.data(), dispN.data(), outputMesh.uv.data(), nv);
++        callDisplace(dispN.data());
+         outputMesh.ComputeNormals();
+         averageOverGroups(outputMesh.n);
+         return outputMesh;
+@@ -222,6 +242,64 @@ struct TriQuadMesh {
+     std::vector<int> faceIndices;
+     std::vector<int> triIndices, quadIndices;
+ 
++    // hdPbrt: unit tangents along u and v per vertex (triangles only), summed
++    // over the triangles around each (position, uv), made orthogonal to nn.
++    void ComputeTangents(const Normal3f *nn, std::vector<Vector3f> *dpdu,
++                         std::vector<Vector3f> *dpdv) const {
++        struct HashPointUV {
++            size_t operator()(const std::pair<Point3f, Point2f> &k) const {
++                return Hash(k.first.x, k.first.y, k.first.z, k.second.x, k.second.y);
++            }
++        };
++        const size_t nv = p.size();
++        std::vector<int> key(nv);
++        int nKeys = 0;
++        {
++            std::unordered_map<std::pair<Point3f, Point2f>, int, HashPointUV> first;
++            first.reserve(nv);
++            for (size_t i = 0; i < nv; ++i) {
++                auto it = first.find({p[i], uv[i]});
++                if (it == first.end())
++                    it = first.emplace(std::make_pair(p[i], uv[i]), nKeys++).first;
++                key[i] = it->second;
++            }
++        }
++        std::vector<Vector3f> su(nKeys, Vector3f(0, 0, 0)), sv(nKeys, Vector3f(0, 0, 0));
++        for (size_t t = 0; t + 2 < triIndices.size(); t += 3) {
++            const int i0 = triIndices[t], i1 = triIndices[t + 1], i2 = triIndices[t + 2];
++            const Vector3f dp1 = p[i1] - p[i0], dp2 = p[i2] - p[i0];
++            const Vector2f d1 = uv[i1] - uv[i0], d2 = uv[i2] - uv[i0];
++            const Float det = d1.x * d2.y - d1.y * d2.x;
++            if (std::abs(det) < 1e-20f)
++                continue;
++            const Vector3f tu = (d2.y * dp1 - d1.y * dp2) / det;
++            const Vector3f tv = (d1.x * dp2 - d2.x * dp1) / det;
++            for (int i : {i0, i1, i2}) {
++                su[key[i]] += tu;
++                sv[key[i]] += tv;
++            }
++        }
++        dpdu->resize(nv);
++        dpdv->resize(nv);
++        for (size_t i = 0; i < nv; ++i) {
++            const Vector3f n(nn[i]);
++            Vector3f u = su[key[i]] - Dot(su[key[i]], n) * n;
++            Vector3f v = sv[key[i]] - Dot(sv[key[i]], n) * n;
++            if (LengthSquared(u) > 0) {
++                u = Normalize(u);
++                v -= Dot(v, u) * u;
++                v = LengthSquared(v) > 0 ? Normalize(v) : Cross(n, u);
++            } else if (LengthSquared(v) > 0) {
++                v = Normalize(v);
++                u = Cross(v, n);
++            } else {
++                CoordinateSystem(n, &u, &v);
++            }
++            (*dpdu)[i] = u;
++            (*dpdv)[i] = v;
++        }
++    }
++
+   private:
+     // TriQuadMesh Private Methods
+     template <typename Dist>
+-- 
+2.43.0
+

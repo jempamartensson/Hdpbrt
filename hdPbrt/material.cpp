@@ -968,10 +968,80 @@ void HdPbrtMaterial::_BuildDisplacement(HdMaterialNetworkMap const &map,
         return;
     const HdMaterialNode2 &disp = it->second;
     const std::string type = disp.nodeTypeId.GetString();
-    if (!TfStringStartsWith(type, "ND_displacement_float") && type != "UsdPreviewSurface")
-        return;  // vector displacement isn't supported
+    const bool vector = TfStringStartsWith(type, "ND_displacement_vector3");
+    if (!vector && !TfStringStartsWith(type, "ND_displacement_float") &&
+        type != "UsdPreviewSurface")
+        return;
     const std::string pfx = TfMakeValidIdentifier(GetId().GetString()) + "_disp";
     _Builder b{_Net{net2}, pfx, HdPbrtMaterialDesc{}, 0, _delegate};
+    if (vector) {
+        // value = a * rgb + c per component, folding constant vector3 (or
+        // vector3 by float) multiply / add / subtract nodes.
+        std::function<bool(const HdMaterialNode2 &, const char *, GfVec3d *, GfVec3d *,
+                           std::string *)>
+            fold3 = [&](const HdMaterialNode2 &node, const char *input, GfVec3d *a,
+                        GfVec3d *c, std::string *tex) -> bool {
+            *tex = b.Texture(node, input, false);
+            if (!tex->empty()) {
+                *a = GfVec3d(1);
+                *c = GfVec3d(0);
+                return true;
+            }
+            const HdMaterialNode2 *up = b.net.Upstream(node, TfToken(input));
+            if (!up)
+                return false;
+            const std::string t = up->nodeTypeId.GetString();
+            const bool mul = TfStringStartsWith(t, "ND_multiply_vector3");
+            const bool add = TfStringStartsWith(t, "ND_add_vector3");
+            const bool sub = TfStringStartsWith(t, "ND_subtract_vector3");
+            if (!mul && !add && !sub)
+                return false;
+            auto connected = [&](const char *in) {
+                return up->inputConnections.count(TfToken(in)) > 0;
+            };
+            const bool first = connected("in1");
+            if (first == connected("in2"))
+                return false;
+            const GfVec3f kf = _Color(*up, first ? "in2" : "in1", GfVec3f(mul ? 1.f : 0.f));
+            const GfVec3d k(kf);
+            GfVec3d ia, ic;
+            if (!fold3(*up, first ? "in1" : "in2", &ia, &ic, tex))
+                return false;
+            for (int i = 0; i < 3; ++i) {
+                if (mul) {
+                    (*a)[i] = ia[i] * k[i];
+                    (*c)[i] = ic[i] * k[i];
+                } else if (add) {
+                    (*a)[i] = ia[i];
+                    (*c)[i] = ic[i] + k[i];
+                } else if (first) {
+                    (*a)[i] = ia[i];
+                    (*c)[i] = ic[i] - k[i];
+                } else {
+                    (*a)[i] = -ia[i];
+                    (*c)[i] = k[i] - ic[i];
+                }
+            }
+            return true;
+        };
+        GfVec3d a(1), c(0);
+        std::string tex;
+        if (!fold3(disp, "displacement", &a, &c, &tex)) {
+            if (getenv("HDPBRT_DEBUG"))
+                fprintf(stderr, "hdPbrt %s: vector displacement graph not supported (only an "
+                                "image with constant scale/offset)\n", GetId().GetText());
+            return;
+        }
+        const double scale = _Float(disp, "scale", 1.f);
+        a *= scale;
+        c *= scale;
+        result->displacementTexture = tex;
+        result->displacementVector = true;
+        result->displacementVectorScale = GfVec3f(a);
+        result->displacementVectorBias = GfVec3f(c);
+        result->textures += b.desc.textures;
+        return;
+    }
     // value = a * texture + c, folding constant multiply / add / subtract nodes.
     std::function<bool(const HdMaterialNode2 &, const char *, double *, double *, std::string *)>
         fold = [&](const HdMaterialNode2 &node, const char *input, double *a, double *c,

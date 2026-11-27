@@ -217,6 +217,10 @@ struct HdPbrtMaterialDesc {
     // displacement = scale * (texture + offset).
     std::string displacementTexture;
     float displacementScale = 1.f, displacementOffset = 0.f;
+    // Vector displacement (MaterialX ND_displacement_vector3): the texture's
+    // RGB in (dPdu, dPdv, N) space, d = vectorScale * rgb + vectorBias.
+    bool displacementVector = false;
+    GfVec3f displacementVectorScale{1.f}, displacementVectorBias{0.f};
 };
 
 class HdPbrtMaterial final : public HdMaterial {

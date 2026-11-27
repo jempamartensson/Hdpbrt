@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (39 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (40 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -165,6 +165,12 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    doubled, warning); with dicing on, vertices sharing a position (unwelded seams) displace along
    their averaged normal and get averaged normals afterwards (no cracks); displacement =
    `hdpbrtdisplacementscale` x (texture + `hdpbrtdisplacementoffset`).
+40. Vector displacement on `plymesh`: `"bool hdpbrtvectordisplacement"` reads the displacement
+   texture (must be a float `imagemap`; `FloatImageTexture::EvaluateRGB`) as RGB, a vector in
+   (dPdu, dPdv, N) space (MaterialX `ND_displacement_vector3`): d = `"float hdpbrtvdispscale"`
+   [3] x rgb + `"float hdpbrtvdispbias"` [3]. `TriQuadMesh::ComputeTangents`: unit tangents from
+   the uvs summed over vertices sharing position and uv, orthogonal to N (dPdv also to dPdu);
+   `Displace` passes them to a callback that takes them (`std::is_invocable`), only when asked.
 
 ## Done in the 2026-11-22 session
 
@@ -408,9 +414,16 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   twice the rate; off-screen dicing 8.1M -> 5.0M triangles at rate 1 with an identical image;
   face-varying-uv cube closed; PointInstancer dices by the nearest instance; Karma Material
   Builder `mtlxdisplacement` + `mtlximage` reaches pbrt. `docs/images/displacement.png` (hdPbrt
-  left, Karma right; Karma's EXR has a black background). Limits: needs uvs; no vector
-  displacement; deforming displaced meshes aren't motion blurred (pbrt ignores motion files with
+  left, Karma right; Karma's EXR has a black background). Limits: needs uvs; deforming displaced meshes aren't motion blurred (pbrt ignores motion files with
   displacement); camera moves re-dice (the scene is rewritten).
+- Vector displacement (2026-11-27, pbrt patch 40): `ND_displacement_vector3` with an image
+  (`ND_image_vector3`/color3) and constant `ND_multiply/add/subtract_vector3[FA]` nodes folded
+  into per-component scale/bias (`HdPbrtMaterialDesc::displacementVector*`). The vector is in
+  (dPdu, dPdv, N) with unit tangents, as Karma: `tests/displacement/make_vector_scene.py`
+  (mushroom overhangs on a grid, twisted ribs on a sphere sheared along dPdu) matches Karma's
+  shapes and twist direction; silhouettes differ on 1.1-1.5% of object pixels (noise)
+  (`docs/images/vector_displacement.png`). Its saturated base colors differ from Karma by
+  5-15% on flat, undisplaced ground too (material, not displacement).
 - Not translated yet: in-memory Houdini volumes (`op:` paths). Volume materials other than
   the Karma pyro shader (e.g. MaterialX volumes on Volume prims) use the renderer settings.
 - Karma pyro shader (2026-11-25, pbrt patch 35): Houdini exports kma_pyroshader as a MaterialX

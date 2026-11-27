@@ -1,7 +1,7 @@
 From aa7ef0f6d63fe7da42975b8c5d9f64bd6515ab88 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sun, 22 Nov 2026 17:49:35 +0100
-Subject: [PATCH 04/39] RGBFilm: optional coverage ("bool hdpbrtalpha"),
+Subject: [PATCH 04/40] RGBFilm: optional coverage ("bool hdpbrtalpha"),
  streamed as display channel A (for hdPbrt)
 
 The filter-weighted share of camera samples whose first hit is a surface.
