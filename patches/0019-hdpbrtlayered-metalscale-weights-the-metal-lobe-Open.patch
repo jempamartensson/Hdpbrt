@@ -1,7 +1,7 @@
 From ec001914453413fcb7e78b3cadb5486c8b7d4c7f Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Mon, 23 Nov 2026 18:27:28 +0100
-Subject: [PATCH 19/45] hdpbrtlayered: "metalscale" weights the metal lobe
+Subject: [PATCH 19/46] hdpbrtlayered: "metalscale" weights the metal lobe
  (OpenPBR specular_weight) (for hdPbrt)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

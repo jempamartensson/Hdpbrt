@@ -1,7 +1,7 @@
 From fac478ab5b74573641c67765d8ffc39fe159364c Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sun, 22 Nov 2026 20:28:35 +0100
-Subject: [PATCH 10/45] USD light behavior: distant light angular size, emitter
+Subject: [PATCH 10/46] USD light behavior: distant light angular size, emitter
  camera visibility, image tint, emitting interface shapes, shaping frame (for
  hdPbrt)
 

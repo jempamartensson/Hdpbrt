@@ -202,6 +202,9 @@ struct HdPbrtMaterialDesc {
     std::string mediumName;          // interior medium (defined in `textures`), or empty
     std::string textures;            // Texture directives this material needs
     GfVec3f emission{0, 0, 0};
+    // Varying emission (image or primvar; color x weight): a spectrum texture
+    // for the area light ("hdpbrtltexture", pbrt patch 46), or empty.
+    std::string emissionTexture;
     float opacity = 1.f;
     std::string opacityTexture;
     TfToken uvPrimvar;

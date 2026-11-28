@@ -1,7 +1,7 @@
 From 6da9a4d295e932c9b97408a1c41bab7c2ed95cb1 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Mon, 23 Nov 2026 07:16:37 +0100
-Subject: [PATCH 14/45] volpath: a scattered ray that reaches an emitting
+Subject: [PATCH 14/46] volpath: a scattered ray that reaches an emitting
  interface shape ends there (for hdPbrt)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

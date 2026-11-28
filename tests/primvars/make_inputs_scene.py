@@ -1,5 +1,5 @@
 # hython tests/primvars/make_inputs_scene.py <outdir>
-# Primvars on every texturable surface input. 19 spheres, each with one
+# Primvars on every texturable surface input. 23 spheres, each with one
 # standard_surface / OpenPBR / UsdPreviewSurface input driven by a primvar
 # reader of "pv" (geompropvalue, UsdPrimvarReader_float): value A on
 # the upper half, B on the lower (a vertex primvar, blended over the equator
@@ -39,6 +39,10 @@ CASES = [
     (PS, 'metallic', 0.0, 1.0, {'diffuseColor': (0.9, 0.6, 0.3), 'roughness': 0.3}),
     (PS, 'clearcoat', 0.0, 1.0, {'diffuseColor': (0.6, 0.1, 0.1), 'roughness': 0.6}),
     (PS, 'clearcoatRoughness', 0.0, 0.6, {'diffuseColor': (0.1, 0.1, 0.1), 'clearcoat': 1.0}),
+    (SS, 'emission', 0.0, 1.0, {'emission_color': (1.0, 0.5, 0.2), 'base_color': (0.2, 0.2, 0.2)}),
+    (SS, 'emission_color', (0.2, 0.2, 1.0), (1.0, 0.3, 0.1), {'emission': 1.0, 'base_color': (0.2, 0.2, 0.2)}),
+    (OP, 'emission_luminance', 0.0, 2.0, {'emission_color': (0.3, 1.0, 0.4), 'base_color': (0.2, 0.2, 0.2)}),
+    (PS, 'emissiveColor', (0, 0, 0), (1.0, 0.6, 0.0), {'diffuseColor': (0.2, 0.2, 0.2)}),
 ]
 
 
@@ -90,7 +94,7 @@ def build(variant):
     # lower halves differ between the renders.
     patches = []
     for n, (sh, inp, a, b, others) in enumerate(CASES):
-        x, y = -6.0 + 3.0 * (n % 5), 3.3 - 2.2 * (n // 5)
+        x, y = -6.0 + 3.0 * (n % 5), 4.4 - 2.2 * (n // 5)
         path = '/World/mtl/m%d' % n
         mat = UsdShade.Material.Define(stage, path)
         surf = UsdShade.Shader.Define(stage, path + '/surf')
@@ -102,7 +106,7 @@ def build(variant):
         if variant.startswith('pv'):
             r = UsdShade.Shader.Define(stage, path + '/pv')
             if sh == PS:
-                r.CreateIdAttr('UsdPrimvarReader_float')
+                r.CreateIdAttr('UsdPrimvarReader_float3' if t == C3 else 'UsdPrimvarReader_float')
                 r.CreateInput('varname', Sdf.ValueTypeNames.Token).Set('pv')
                 surf.CreateInput(inp, t).ConnectToSource(r.CreateOutput('result', t))
             else:

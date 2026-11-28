@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (45 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (46 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -208,6 +208,14 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
 45. hdpbrtlayered: `"coatdarkening"` (patch 34) is a float texture (weight x coat_darkening can
    vary) and `"texture hdpbrteta"` optionally replaces the constant `"eta"` of the specular
    lobe per shading point (clamped >= 1.0001; the albedo tables are indexed by eta anyway).
+46. Emission textures: AreaLightSource "diffuse" `"string hdpbrtltexture"` names a spectrum
+   texture (its illuminant version) that replaces L (times `scale`; L still sets the color
+   space normalization). `Light::L` / `DiffuseAreaLight::L` take an optional
+   `HdPbrtPrimvarHit *`: `SurfaceInteraction::Le` passes the hit's, `SampleLi` the sampled
+   point's (`ShapeSample::hdpbrtPrimvars`, set by both Triangle::Sample). Power for light
+   sampling (`Phi`, `Bounds`): mean / max of the texture at 8 points of the shape x 3
+   wavelengths (`SetHdPbrtTexture`, floor 1e-3 so it stays sampled). Triangles only carry
+   primvars (meshes; hdPbrt only makes meshes emit).
 
 ## Done in the 2026-11-22 session
 
@@ -547,7 +555,7 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   hdpbrtlayered's metal lobe (F0 = diffuseColor, white F82 edge, i.e. Schlick as the spec)
   instead of pbrt's conductor fit. Still constant in pbrt (a varying input warns, also on
   stderr under HDPBRT_DEBUG since hython drops Tf warnings): IOR (except the coat coupling),
-  coat IOR, thin film, subsurface, emission, transmission weight / depth / scatter, specular
+  coat IOR, thin film, subsurface, transmission weight / depth / scatter, specular
   anisotropy, coat_affect_color, metalscale (OpenPBR specular weight on metal), and pbrlib
   BSDF-node graphs other than their diffuse color. Check (`tests/primvars/make_inputs_scene.py`,
   in run_primvars.sh, hdPbrt only): 19 spheres, one input each driven by a primvar; with the
@@ -555,6 +563,14 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   (before the coat couplings: OpenPBR coat weight 1.4-1.9x); split spheres agree up to
   light from neighbours (transmission color: light crosses both tints). Materials run44 34/8/0
   identical to run43; materials_extra (8 groups) unchanged.
+- Varying emission (2026-11-28, pbrt patch 46): standard_surface emission_color x emission,
+  OpenPBR emission_color x emission_luminance, UsdPreviewSurface emissiveColor (images through
+  the uvs, or primvars) -> `HdPbrtMaterialDesc::emissionTexture`; a mesh emits when the
+  constant or the texture says so and writes `"rgb L" [1 1 1] "string hdpbrtltexture"`.
+  Checks: the inputs scene's four emission spheres equal their constants exactly at A and B
+  (camera hits and the light they cast); pbrt-only: a quad lit by a white-primvar texture equals
+  "rgb L" [1 1 1] pixel for pixel. Emissive meshes only (pbrt can't instance area lights).
+  Materials run45 34/8/0 identical, usdlux 326/328.
 - Per-object dicing (2026-11-27, hdPbrt only): constant primvars `pbrt:dicingRate` /
   `pbrt_dicingRate` (pixels, over the render setting), `karma:object:dicingquality` (divides
   the rate, min 0.01; Karma's meaning: 2 = twice as fine) and `pbrt:dicingMaxTriangles` /

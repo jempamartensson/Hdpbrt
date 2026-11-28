@@ -1419,7 +1419,8 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
             const char *baseWIn = nullptr, *metalIn = nullptr, *specWIn = nullptr,
                        *specColorIn = nullptr, *coatIn = nullptr, *coatColorIn = nullptr,
                        *coatRoughIn = nullptr, *sheenIn = nullptr, *sheenColorIn = nullptr,
-                       *sheenRoughIn = nullptr, *diffRoughIn = nullptr, *transColorIn = nullptr;
+                       *sheenRoughIn = nullptr, *diffRoughIn = nullptr, *transColorIn = nullptr,
+                       *emitColorIn = nullptr, *emitWIn = nullptr;
             if (type == "UsdPreviewSurface") {
                 base = _Color(*surf, "diffuseColor", GfVec3f(0.18f));
                 metallic = _Float(*surf, "metallic", 0);
@@ -1429,6 +1430,7 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 emission = _Color(*surf, "emissiveColor", GfVec3f(0));
                 baseIn = "diffuseColor"; roughIn = "roughness"; opacityIn = "opacity";
                 metalIn = "metallic"; coatIn = "clearcoat"; coatRoughIn = "clearcoatRoughness";
+                emitColorIn = "emissiveColor";
                 // Clearcoat: a white GGX coat of IOR 1.5 (UsdPreviewSurface spec).
                 coatW = std::min(std::max(_Float(*surf, "clearcoat", 0), 0.f), 1.f);
                 coatRough = _Float(*surf, "clearcoatRoughness", 0.01f);
@@ -1466,6 +1468,7 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 coatRoughIn = "coat_roughness"; sheenIn = "sheen"; sheenColorIn = "sheen_color";
                 sheenRoughIn = "sheen_roughness"; diffRoughIn = "diffuse_roughness";
                 transColorIn = "transmission_color";
+                emitColorIn = "emission_color"; emitWIn = "emission";
                 sssW = std::min(std::max(_Float(*surf, "subsurface", 0), 0.f), 1.f);
                 sssColor = _Color(*surf, "subsurface_color", GfVec3f(1));
                 sssRadius = _Color(*surf, "subsurface_radius", GfVec3f(1)) *
@@ -1526,6 +1529,7 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 coatRoughIn = "coat_roughness"; sheenIn = "fuzz_weight"; sheenColorIn = "fuzz_color";
                 sheenRoughIn = "fuzz_roughness"; diffRoughIn = "base_diffuse_roughness";
                 transColorIn = "transmission_color";
+                emitColorIn = "emission_color"; emitWIn = "emission_luminance";
                 sssW = std::min(std::max(_Float(*surf, "subsurface_weight", 0), 0.f), 1.f);
                 sssColor = _Color(*surf, "subsurface_color", GfVec3f(0.8f));
                 {
@@ -1669,6 +1673,15 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 d.baseColorTexture = b.Mul(vBase, Val{"", GfVec3f(baseK)}, true, "refl").tex;
             d.baseColorFromPrimvar = fromPrimvar;
             d.emission = emission;
+            {
+                // Emission color x weight (luminance), varying when either is.
+                const float wC = emitWIn ? _Float(*surf, emitWIn, 0) : 1.f;
+                const GfVec3f cC = emitColorIn ? _Color(*surf, emitColorIn, GfVec3f(1)) : GfVec3f(0);
+                const Val vEC = b.In(*surf, emitColorIn, true, cC);
+                const Val vEW = b.In(*surf, emitWIn, false, GfVec3f(wC));
+                if (vEC.Varies() || vEW.Varies())
+                    d.emissionTexture = b.Mul(vEC, vEW, true, "emit").tex;
+            }
             d.opacity = std::min(std::max(opacity, 0.f), 1.f);
             d.opacityTexture = opacityTex;
             std::ostringstream other;
@@ -1909,7 +1922,8 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 const char *handled[] = {baseIn,      roughIn,      opacityIn,   baseWIn,
                                          metalIn,     specWIn,      specColorIn, coatIn,
                                          coatColorIn, coatRoughIn,  sheenIn,     sheenColorIn,
-                                         sheenRoughIn, diffRoughIn, transColorIn};
+                                         sheenRoughIn, diffRoughIn, transColorIn,
+                                         emitColorIn, emitWIn};
                 std::vector<std::string> fixed;
                 for (const auto &c : surf->inputConnections) {
                     bool ok = false;

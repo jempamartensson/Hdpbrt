@@ -1,7 +1,7 @@
 From a2f9782032da4376ac60f7a42f51d22c3c10a806 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sun, 22 Nov 2026 15:09:11 +0100
-Subject: [PATCH 02/45] RGBFilm: optional first-hit camera-space depth ("bool
+Subject: [PATCH 02/46] RGBFilm: optional first-hit camera-space depth ("bool
  hdpbrtdepth"), streamed as display channel Z (for hdPbrt)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

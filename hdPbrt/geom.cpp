@@ -499,7 +499,8 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
     if (!mat.mediumName.empty())
         matLine += "  MediumInterface " + HdPbrt_Quote(mat.mediumName) + " \"\"\n";
     const bool emissive =
-        _CanEmit() && (mat.emission[0] > 0 || mat.emission[1] > 0 || mat.emission[2] > 0);
+        _CanEmit() && (mat.emission[0] > 0 || mat.emission[1] > 0 || mat.emission[2] > 0 ||
+                       !mat.emissionTexture.empty());
 
     // hdpbrtprimid: Hydra's prim id, streamed back by pbrt for the primId AOV
     // (selection). Alpha cut-outs go on the shapes too.
@@ -601,9 +602,16 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
         const std::string xform = _MotionTransform(keys, keyTimes, &motionAttr);
         if (motionAttr.empty()) {
             os << "AttributeBegin\n  " << xform << "\n  " << matLine;
-            if (emissive)
-                os << "  AreaLightSource \"diffuse\" \"rgb L\" " << HdPbrt_Rgb(mat.emission)
-                   << "\n";
+            if (emissive) {
+                // A varying emission (pbrt patch 46): the texture replaces L
+                // (L still sets the color space's normalization).
+                const bool tex = !mat.emissionTexture.empty();
+                os << "  AreaLightSource \"diffuse\" \"rgb L\" "
+                   << HdPbrt_Rgb(tex ? GfVec3f(1.f) : mat.emission);
+                if (tex)
+                    os << " \"string hdpbrtltexture\" " << HdPbrt_Quote(mat.emissionTexture);
+                os << "\n";
+            }
             os << "  " << shapes << "AttributeEnd\n";
         } else {
             // N-key transform motion only exists for object instances.

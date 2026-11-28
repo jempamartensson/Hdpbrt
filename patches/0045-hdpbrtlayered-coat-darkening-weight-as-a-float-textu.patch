@@ -1,7 +1,7 @@
 From 06fe73553ce5584521b9815c85656c7cf96d606f Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sat, 28 Nov 2026 10:11:36 +0100
-Subject: [PATCH 45/45] hdpbrtlayered: coat darkening weight as a float
+Subject: [PATCH 45/46] hdpbrtlayered: coat darkening weight as a float
  texture, optional "texture hdpbrteta" for a varying specular IOR (for hdPbrt)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

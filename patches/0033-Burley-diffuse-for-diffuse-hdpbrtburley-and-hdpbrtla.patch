@@ -1,7 +1,7 @@
 From 5ec6cfc711fb91d0a9f3b47f778c5a426eae339d Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Wed, 25 Nov 2026 20:49:24 +0100
-Subject: [PATCH 33/45] Burley diffuse for diffuse "hdpbrtburley" and
+Subject: [PATCH 33/46] Burley diffuse for diffuse "hdpbrtburley" and
  hdpbrtlayered "diffuseburley" (for hdPbrt)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

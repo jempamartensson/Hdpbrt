@@ -1,0 +1,291 @@
+From b080373c2efcd9b03bacd03ee0ae707ab45773fb Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sat, 28 Nov 2026 10:25:45 +0100
+Subject: [PATCH 46/46] DiffuseAreaLight emission texture ("string
+ hdpbrtltexture", illuminant spectrum texture evaluated with the hit's or the
+ sampled point's mesh primvars and uv); power estimated from samples (for
+ hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/base/light.h    |  6 +++++-
+ src/pbrt/interaction.cpp |  2 +-
+ src/pbrt/lights.cpp      | 46 +++++++++++++++++++++++++++++++++++++---
+ src/pbrt/lights.h        | 28 +++++++++++++++++++-----
+ src/pbrt/scene.cpp       | 15 +++++++++++++
+ src/pbrt/shapes.h        | 24 +++++++++++++++++++--
+ 6 files changed, 109 insertions(+), 12 deletions(-)
+
+diff --git a/src/pbrt/base/light.h b/src/pbrt/base/light.h
+index 6fdf3da..9c78995 100644
+--- a/src/pbrt/base/light.h
++++ b/src/pbrt/base/light.h
+@@ -17,6 +17,8 @@
+ 
+ namespace pbrt {
+ 
++struct HdPbrtPrimvarHit;  // util/hdpbrtprimvar.h (hdPbrt)
++
+ // LightType Definition
+ enum class LightType { DeltaPosition, DeltaDirection, Area, Infinite };
+ 
+@@ -71,8 +73,10 @@ class Light : public TaggedPointer<  // Light Source Types
+     std::string ToString() const;
+ 
+     // AreaLights only
++    // hdPbrt: pv, the emitter's primvars at p (emission textures), if any.
+     PBRT_CPU_GPU inline SampledSpectrum L(Point3f p, Normal3f n, Point2f uv, Vector3f w,
+-                                          const SampledWavelengths &lambda) const;
++                                          const SampledWavelengths &lambda,
++                                          const HdPbrtPrimvarHit *pv = nullptr) const;
+ 
+     // InfiniteLights only
+     PBRT_CPU_GPU inline SampledSpectrum Le(const Ray &ray,
+diff --git a/src/pbrt/interaction.cpp b/src/pbrt/interaction.cpp
+index a0c7ecf..736f459 100644
+--- a/src/pbrt/interaction.cpp
++++ b/src/pbrt/interaction.cpp
+@@ -212,7 +212,7 @@ BSSRDF SurfaceInteraction::GetBSSRDF(const RayDifferential &ray,
+ 
+ PBRT_CPU_GPU SampledSpectrum SurfaceInteraction::Le(Vector3f w,
+                                        const SampledWavelengths &lambda) const {
+-    return areaLight ? areaLight.L(p(), n, uv, w, lambda) : SampledSpectrum(0.f);
++    return areaLight ? areaLight.L(p(), n, uv, w, lambda, &hdpbrtPrimvars) : SampledSpectrum(0.f);
+ }
+ 
+ std::string SurfaceInteraction::ToString() const {
+diff --git a/src/pbrt/lights.cpp b/src/pbrt/lights.cpp
+index 1c794ac..fbc1e89 100644
+--- a/src/pbrt/lights.cpp
++++ b/src/pbrt/lights.cpp
+@@ -821,7 +821,8 @@ PBRT_CPU_GPU pstd::optional<LightLiSample> DiffuseAreaLight::SampleLi(LightSampl
+ 
+     // Return _LightLiSample_ for sampled point on shape
+     Vector3f wi = Normalize(ss->intr.p() - ctx.p());
+-    SampledSpectrum Le = L(ss->intr.p(), ss->intr.n, ss->intr.uv, -wi, lambda);
++    SampledSpectrum Le = L(ss->intr.p(), ss->intr.n, ss->intr.uv, -wi, lambda,
++                           &ss->hdpbrtPrimvars);
+     if (!Le)
+         return {};
+     return LightLiSample(Le, wi, ss->pdf, ss->intr);
+@@ -833,6 +834,41 @@ PBRT_CPU_GPU Float DiffuseAreaLight::PDF_Li(LightSampleContext ctx, Vector3f wi,
+     return shape.PDF(shapeCtx, wi);
+ }
+ 
++void DiffuseAreaLight::SetHdPbrtTexture(SpectrumTexture tex) {
++    hdpbrtLTex = tex;
++    hdpbrtLMax = hdpbrtLAvg = 0;
++    if (!tex)
++        return;
++    // A few points of the shape (near the corners of a triangle, its middle,
++    // and some others) at a few wavelengths: the power for light sampling.
++    // Never 0 where the shape may emit, so it keeps being sampled.
++    const Point2f us[] = {{0.02f, 0.02f}, {0.98f, 0.02f}, {0.02f, 0.98f}, {0.5f, 0.5f},
++                          {0.25f, 0.75f}, {0.75f, 0.25f}, {0.3f, 0.3f}, {0.7f, 0.7f}};
++    int n = 0;
++    for (Point2f u : us) {
++        pstd::optional<ShapeSample> ss = shape.Sample(u);
++        if (!ss)
++            continue;
++        TextureEvalContext ctx;
++        ctx.p = ss->intr.p();
++        ctx.n = ss->intr.n;
++        ctx.uv = ss->intr.uv;
++        ctx.hdpbrtPrimvars = ss->hdpbrtPrimvars;
++        for (Float l : {0.1f, 0.5f, 0.9f}) {
++            SampledWavelengths lambda = SampledWavelengths::SampleVisible(l);
++            SampledSpectrum s = ClampZero(UniversalTextureEvaluator()(tex, ctx, lambda));
++            hdpbrtLMax = std::max(hdpbrtLMax, s.MaxComponentValue());
++            hdpbrtLAvg += s.Average();
++            ++n;
++        }
++    }
++    if (n)
++        hdpbrtLAvg /= n;
++    // Lights brighter than the samples show still need some power.
++    hdpbrtLMax = std::max(hdpbrtLMax, Float(1e-3));
++    hdpbrtLAvg = std::max(hdpbrtLAvg, Float(1e-3));
++}
++
+ SampledSpectrum DiffuseAreaLight::Phi(SampledWavelengths lambda) const {
+     SampledSpectrum L(0.f);
+     if (image) {
+@@ -847,7 +883,9 @@ SampledSpectrum DiffuseAreaLight::Phi(SampledWavelengths lambda) const {
+             }
+         L *= scale / (image.Resolution().x * image.Resolution().y);
+ 
+-    } else
++    } else if (hdpbrtLTex)
++        L = SampledSpectrum(hdpbrtLAvg * scale);  // estimate (hdPbrt)
++    else
+         L = Lemit->Sample(lambda) * scale;
+     return Pi * (twoSided ? 2 : 1) * area * L;
+ }
+@@ -864,7 +902,9 @@ pstd::optional<LightBounds> DiffuseAreaLight::Bounds() const {
+                     phi += image.GetChannel({x, y}, c);
+         phi /= 3 * image.Resolution().x * image.Resolution().y;
+ 
+-    } else
++    } else if (hdpbrtLTex)
++        phi = hdpbrtLMax;  // estimate (hdPbrt)
++    else
+         phi = Lemit->MaxValue();
+     phi *= scale * area * Pi;
+ 
+diff --git a/src/pbrt/lights.h b/src/pbrt/lights.h
+index 398a723..1da5562 100644
+--- a/src/pbrt/lights.h
++++ b/src/pbrt/lights.h
+@@ -164,7 +164,8 @@ class LightBase {
+ 
+     PBRT_CPU_GPU
+     SampledSpectrum L(Point3f p, Normal3f n, Point2f uv, Vector3f w,
+-                      const SampledWavelengths &lambda) const {
++                      const SampledWavelengths &lambda,
++                      const HdPbrtPrimvarHit *pv = nullptr) const {
+         return SampledSpectrum(0.f);
+     }
+ 
+@@ -544,7 +545,8 @@ class DiffuseAreaLight : public LightBase {
+ 
+     PBRT_CPU_GPU
+     SampledSpectrum L(Point3f p, Normal3f n, Point2f uv, Vector3f w,
+-                      const SampledWavelengths &lambda) const {
++                      const SampledWavelengths &lambda,
++                      const HdPbrtPrimvarHit *pv = nullptr) const {
+         // Check for zero emitted radiance from point on area light
+         if (!twoSided && Dot(n, w) < 0)
+             return SampledSpectrum(0.f);
+@@ -552,7 +554,16 @@ class DiffuseAreaLight : public LightBase {
+             return SampledSpectrum(0.f);
+ 
+         SampledSpectrum Le;
+-        if (image) {
++        if (hdpbrtLTex) {
++            // hdPbrt: emission texture (image or primvar) x scale.
++            TextureEvalContext ctx;
++            ctx.p = p;
++            ctx.n = n;
++            ctx.uv = uv;
++            if (pv)
++                ctx.hdpbrtPrimvars = *pv;
++            Le = scale * ClampZero(UniversalTextureEvaluator()(hdpbrtLTex, ctx, lambda));
++        } else if (image) {
+             // Return _DiffuseAreaLight_ emission using image
+             RGB rgb;
+             uv[1] = 1 - uv[1];
+@@ -574,6 +585,12 @@ class DiffuseAreaLight : public LightBase {
+     // an RGB tint multiplied into an emission image ("rgb hdpbrttint").
+     bool hdpbrtCameraVisible = true;
+     RGB hdpbrtTint = RGB(1, 1, 1);
++    // hdPbrt: emission from an illuminant spectrum texture ("string
++    // hdpbrtltexture" on the AreaLightSource) in place of L, and its maximum
++    // and mean over a few points of the shape (light sampling's power).
++    void SetHdPbrtTexture(SpectrumTexture tex);
++    SpectrumTexture hdpbrtLTex;
++    Float hdpbrtLMax = 0, hdpbrtLAvg = 0;
+ 
+     PBRT_CPU_GPU
+     pstd::optional<LightLiSample> SampleLi(LightSampleContext ctx, Point2f u,
+@@ -920,9 +937,10 @@ PBRT_CPU_GPU inline Float Light::PDF_Li(LightSampleContext ctx, Vector3f wi,
+ }
+ 
+ PBRT_CPU_GPU inline SampledSpectrum Light::L(Point3f p, Normal3f n, Point2f uv, Vector3f w,
+-                                const SampledWavelengths &lambda) const {
++                                const SampledWavelengths &lambda,
++                                const HdPbrtPrimvarHit *pv) const {
+     CHECK(Type() == LightType::Area);
+-    auto l = [&](auto ptr) { return ptr->L(p, n, uv, w, lambda); };
++    auto l = [&](auto ptr) { return ptr->L(p, n, uv, w, lambda, pv); };
+     return Dispatch(l);
+ }
+ 
+diff --git a/src/pbrt/scene.cpp b/src/pbrt/scene.cpp
+index df5179d..22eab1b 100644
+--- a/src/pbrt/scene.cpp
++++ b/src/pbrt/scene.cpp
+@@ -1443,10 +1443,25 @@ std::vector<Light> BasicScene::CreateLights(
+ 
+         pstd::vector<Light> *shapeLights = new pstd::vector<Light>(alloc);
+         const auto &areaLightEntity = areaLights[sh.lightIndex];
++        // hdPbrt: emission texture ("string hdpbrtltexture", an illuminant
++        // spectrum texture), e.g. a primvar or an image through the uvs.
++        SpectrumTexture hdpbrtLTex;
++        {
++            const std::string t =
++                areaLightEntity.parameters.GetOneString("hdpbrtltexture", "");
++            if (!t.empty()) {
++                auto it = textures.illuminantSpectrumTextures.find(t);
++                if (it == textures.illuminantSpectrumTextures.end())
++                    ErrorExit(&areaLightEntity.loc, "%s: no such spectrum texture.", t);
++                hdpbrtLTex = it->second;
++            }
++        }
+         for (pbrt::Shape ps : shapeObjects) {
+             Light area = Light::CreateArea(
+                 areaLightEntity.name, areaLightEntity.parameters, *sh.renderFromObject,
+                 mi, ps, alphaTex, &areaLightEntity.loc, alloc);
++            if (area && hdpbrtLTex && area.Is<DiffuseAreaLight>())
++                area.Cast<DiffuseAreaLight>()->SetHdPbrtTexture(hdpbrtLTex);
+             if (area) {
+                 lights.push_back(area);
+                 shapeLights->push_back(area);
+diff --git a/src/pbrt/shapes.h b/src/pbrt/shapes.h
+index 6dc4521..fd450b2 100644
+--- a/src/pbrt/shapes.h
++++ b/src/pbrt/shapes.h
+@@ -28,6 +28,8 @@ namespace pbrt {
+ struct ShapeSample {
+     Interaction intr;
+     Float pdf;
++    // hdPbrt: the mesh's per-vertex primvars at the sample (emission textures).
++    HdPbrtPrimvarHit hdpbrtPrimvars;
+     std::string ToString() const;
+ };
+ 
+@@ -880,6 +882,20 @@ class Triangle {
+                                      Normalize(p2 - p));
+     }
+ 
++    // hdPbrt: per-vertex primvars at barycentrics b of triangle v.
++    PBRT_CPU_GPU
++    static void HdPbrtSetPrimvarHit(const TriangleMesh *mesh, const int *v,
++                                    const pstd::array<Float, 3> &b, HdPbrtPrimvarHit *h) {
++        if (mesh->nHdPbrtPrimvars <= 0)
++            return;
++        h->primvars = mesh->hdpbrtPrimvars;
++        h->count = mesh->nHdPbrtPrimvars;
++        for (int i = 0; i < 3; ++i) {
++            h->v[i] = v[i];
++            h->b[i] = b[i];
++        }
++    }
++
+     PBRT_CPU_GPU
+     static SurfaceInteraction InteractionFromIntersection(const TriangleMesh *mesh,
+                                                           int triIndex,
+@@ -1077,7 +1093,9 @@ class Triangle {
+         Point3f pAbsSum = Abs(b[0] * p0) + Abs(b[1] * p1) + Abs((1 - b[0] - b[1]) * p2);
+         Vector3f pError = Vector3f(gamma(6) * pAbsSum);
+ 
+-        return ShapeSample{Interaction(Point3fi(p, pError), n, uvSample), 1 / Area()};
++        ShapeSample ss{Interaction(Point3fi(p, pError), n, uvSample), 1 / Area()};
++        HdPbrtSetPrimvarHit(mesh, v, b, &ss.hdpbrtPrimvars);
++        return ss;
+     }
+ 
+     PBRT_CPU_GPU
+@@ -1162,7 +1180,9 @@ class Triangle {
+ 
+         Point2f uvSample = b[0] * uv[0] + b[1] * uv[1] + b[2] * uv[2];
+ 
+-        return ShapeSample{Interaction(Point3fi(p, pError), n, ctx.time, uvSample), pdf};
++        ShapeSample ss{Interaction(Point3fi(p, pError), n, ctx.time, uvSample), pdf};
++        HdPbrtSetPrimvarHit(mesh, v, b, &ss.hdpbrtPrimvars);
++        return ss;
+     }
+ 
+     PBRT_CPU_GPU
+-- 
+2.43.0
+
