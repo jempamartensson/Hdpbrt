@@ -1,7 +1,7 @@
 From 74ef20807015ae6757e51c495c9142ebd86deb03 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sun, 22 Nov 2026 17:27:54 +0100
-Subject: [PATCH 03/42] Per-pixel prim and instance ids for selection ("bool
+Subject: [PATCH 03/43] Per-pixel prim and instance ids for selection ("bool
  hdpbrtids"), streamed as display channels primId and instanceId (for hdPbrt)
 
 Shapes take "integer hdpbrtprimid"; an ObjectInstance takes its id from

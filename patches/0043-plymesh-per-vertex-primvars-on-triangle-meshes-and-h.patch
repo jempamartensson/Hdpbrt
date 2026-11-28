@@ -1,0 +1,525 @@
+From cebecd834937e9286570021149323396a38ba0bb Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sat, 28 Nov 2026 09:18:23 +0100
+Subject: [PATCH 43/43] plymesh per-vertex primvars on triangle meshes and
+ "hdpbrtprimvar" float/spectrum textures that interpolate them at the hit;
+ graph primvar slots bind by name and width (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/base/texture.h       |  8 +++--
+ src/pbrt/interaction.h        |  3 ++
+ src/pbrt/shapes.cpp           | 54 +++++++++++++++---------------
+ src/pbrt/shapes.h             | 11 +++++++
+ src/pbrt/textures.cpp         | 49 +++++++++++++++++++++++++--
+ src/pbrt/textures.h           | 62 ++++++++++++++++++++++++++++++++++-
+ src/pbrt/util/hdpbrtgraph.cpp |  2 +-
+ src/pbrt/util/hdpbrtprimvar.h | 55 +++++++++++++++++++++++++++++++
+ src/pbrt/util/mesh.cpp        | 37 +++++++++++++++++++++
+ src/pbrt/util/mesh.h          |  9 +++++
+ src/pbrt/util/transform.cpp   |  2 ++
+ 11 files changed, 260 insertions(+), 32 deletions(-)
+ create mode 100644 src/pbrt/util/hdpbrtprimvar.h
+
+diff --git a/src/pbrt/base/texture.h b/src/pbrt/base/texture.h
+index 78e376c..c20df11 100644
+--- a/src/pbrt/base/texture.h
++++ b/src/pbrt/base/texture.h
+@@ -29,6 +29,7 @@ class GPUFloatPtexTexture;
+ class FloatScaledTexture;
+ class WindyTexture;
+ class WrinkledTexture;
++class FloatHdPbrtPrimvarTexture;
+ 
+ // FloatTexture Definition
+ class FloatTexture
+@@ -36,7 +37,8 @@ class FloatTexture
+           FloatImageTexture, GPUFloatImageTexture, FloatMixTexture,
+           FloatDirectionMixTexture, FloatScaledTexture, FloatConstantTexture,
+           FloatBilerpTexture, FloatCheckerboardTexture, FloatDotsTexture, FBmTexture,
+-          FloatPtexTexture, GPUFloatPtexTexture, WindyTexture, WrinkledTexture
++          FloatPtexTexture, GPUFloatPtexTexture, WindyTexture, WrinkledTexture,
++          FloatHdPbrtPrimvarTexture
+ 
+           > {
+   public:
+@@ -64,6 +66,7 @@ class MarbleTexture;
+ class SpectrumMixTexture;
+ class SpectrumDirectionMixTexture;
+ class SpectrumDotsTexture;
++class SpectrumHdPbrtPrimvarTexture;
+ class SpectrumPtexTexture;
+ class GPUSpectrumPtexTexture;
+ class SpectrumScaledTexture;
+@@ -74,7 +77,8 @@ class SpectrumTexture
+           SpectrumImageTexture, GPUSpectrumImageTexture, SpectrumMixTexture,
+           SpectrumDirectionMixTexture, SpectrumScaledTexture, SpectrumConstantTexture,
+           SpectrumBilerpTexture, SpectrumCheckerboardTexture, MarbleTexture,
+-          SpectrumDotsTexture, SpectrumPtexTexture, GPUSpectrumPtexTexture
++          SpectrumDotsTexture, SpectrumPtexTexture, GPUSpectrumPtexTexture,
++          SpectrumHdPbrtPrimvarTexture
+ 
+           > {
+   public:
+diff --git a/src/pbrt/interaction.h b/src/pbrt/interaction.h
+index 93a2744..198a77e 100644
+--- a/src/pbrt/interaction.h
++++ b/src/pbrt/interaction.h
+@@ -14,6 +14,7 @@
+ #include <pbrt/base/medium.h>
+ #include <pbrt/base/sampler.h>
+ #include <pbrt/ray.h>
++#include <pbrt/util/hdpbrtprimvar.h>
+ #include <pbrt/util/spectrum.h>
+ #include <pbrt/util/taggedptr.h>
+ #include <pbrt/util/vecmath.h>
+@@ -265,6 +266,8 @@ class SurfaceInteraction : public Interaction {
+     // hdPbrt: light-linking collections this surface belongs to (bit i =
+     // collection i; all bits = belongs to every collection).
+     uint64_t hdpbrtLinkMask = ~uint64_t(0);
++    // hdPbrt: the mesh's per-vertex primvars at the hit (hdpbrtprimvar textures).
++    HdPbrtPrimvarHit hdpbrtPrimvars;
+     Material material;
+     Light areaLight;
+     Vector3f dpdx, dpdy;
+diff --git a/src/pbrt/shapes.cpp b/src/pbrt/shapes.cpp
+index 2681368..8ebc793 100644
+--- a/src/pbrt/shapes.cpp
++++ b/src/pbrt/shapes.cpp
+@@ -1451,6 +1451,31 @@ pstd::vector<Shape> Shape::Create(
+         Float edgeLength = parameters.GetOneFloat("edgelength", 1.f);
+         edgeLength *= Options->displacementEdgeScale;
+ 
++        // hdPbrt: primvars, "string hdpbrtprimvars" [name width file ...]:
++        // raw little-endian float32, width values per PLY vertex. Displacement
++        // graphs read them; refinement averages them; the final triangles keep
++        // them for "hdpbrtprimvar" textures.
++        std::vector<std::string> primvarNames;
++        {
++            std::vector<std::string> pv = parameters.GetStringArray("hdpbrtprimvars");
++            for (size_t i = 0; i + 2 < pv.size(); i += 3) {
++                const int w = std::max(1, std::atoi(pv[i + 1].c_str()));
++                std::vector<float> raw(plyMesh.p.size() * size_t(w));
++                FILE *f = fopen(ResolveFilename(pv[i + 2]).c_str(), "rb");
++                size_t got = f ? fread(raw.data(), sizeof(float), raw.size(), f) : 0;
++                if (f)
++                    fclose(f);
++                if (got != raw.size()) {
++                    Warning(loc, "%s: primvar file %s has %zu values, need %zu.", filename,
++                            pv[i + 2], got, raw.size());
++                    continue;
++                }
++                plyMesh.attr.push_back(std::vector<Float>(raw.begin(), raw.end()));
++                plyMesh.attrWidth.push_back(w);
++                primvarNames.push_back(pv[i]);
++            }
++        }
++
+         std::string displacementTexName = parameters.GetTexture("displacement");
+         // hdPbrt: a procedural displacement graph (util/hdpbrtgraph.h) in
+         // place of the texture: "string hdpbrtgraph" (the program),
+@@ -1475,32 +1500,8 @@ pstd::vector<Shape> Shape::Create(
+                                            parameters.GetStringArray("hdpbrtgraphimages"),
+                                            parameters.GetStringArray("hdpbrtgraphprimvars"),
+                                            loc);
+-            // Primvars for the graph: "string hdpbrtprimvars" [name width file
+-            // ...], raw little-endian float32, width values per PLY vertex.
+-            {
+-                std::vector<std::string> pv = parameters.GetStringArray("hdpbrtprimvars");
+-                std::vector<std::string> names;
+-                for (size_t i = 0; i + 2 < pv.size(); i += 3) {
+-                    const int w = std::max(1, std::atoi(pv[i + 1].c_str()));
+-                    std::vector<Float> data(plyMesh.p.size() * size_t(w));
+-                    FILE *f = fopen(ResolveFilename(pv[i + 2]).c_str(), "rb");
+-                    std::vector<float> raw(data.size());
+-                    size_t got = f ? fread(raw.data(), sizeof(float), raw.size(), f) : 0;
+-                    if (f)
+-                        fclose(f);
+-                    if (got != raw.size()) {
+-                        Warning(loc, "%s: primvar file %s has %zu values, need %zu.", filename,
+-                                pv[i + 2], got, raw.size());
+-                        continue;
+-                    }
+-                    std::copy(raw.begin(), raw.end(), data.begin());
+-                    plyMesh.attr.push_back(std::move(data));
+-                    plyMesh.attrWidth.push_back(w);
+-                    names.push_back(pv[i]);
+-                }
+-                if (graph)
+-                    graph->BindPrimvars(names, plyMesh.attrWidth);
+-            }
++            if (graph)
++                graph->BindPrimvars(primvarNames, plyMesh.attrWidth);
+             // Deformation motion of the displaced mesh: the other poses are
+             // refined like this one and displaced each.
+             std::vector<TriQuadMesh::Pose> dispPoses;
+@@ -1707,6 +1708,7 @@ pstd::vector<Shape> Shape::Create(
+                 *renderFromObject, reverseOrientation, plyMesh.triIndices, plyMesh.p,
+                 std::vector<Vector3f>(), plyMesh.n, plyMesh.uv, plyMesh.faceIndices,
+                 alloc);
++            mesh->SetPrimvars(primvarNames, plyMesh.attr, plyMesh.attrWidth, alloc);
+             // hdPbrt: deformation motion blur. "string motionfilenames" are
+             // PLYs with the same vertices (and normals) at "float motiontimes"
+             // [1..N-1]; this file is the pose at motiontimes[0].
+diff --git a/src/pbrt/shapes.h b/src/pbrt/shapes.h
+index 8983e54..b710fd0 100644
+--- a/src/pbrt/shapes.h
++++ b/src/pbrt/shapes.h
+@@ -1029,6 +1029,17 @@ class Triangle {
+             }
+             isect.hdpbrtShadowLift = lift;
+         }
++        if (mesh->nHdPbrtPrimvars > 0) {
++            HdPbrtPrimvarHit &h = isect.hdpbrtPrimvars;
++            h.primvars = mesh->hdpbrtPrimvars;
++            h.count = mesh->nHdPbrtPrimvars;
++            h.v[0] = v[0];
++            h.v[1] = v[1];
++            h.v[2] = v[2];
++            h.b[0] = ti.b0;
++            h.b[1] = ti.b1;
++            h.b[2] = ti.b2;
++        }
+         return isect;
+     }
+ 
+diff --git a/src/pbrt/textures.cpp b/src/pbrt/textures.cpp
+index e75c82c..a302ce2 100644
+--- a/src/pbrt/textures.cpp
++++ b/src/pbrt/textures.cpp
+@@ -1453,6 +1453,46 @@ std::string GPUFloatImageTexture::ToString() const {
+ 
+ STAT_COUNTER("Scene/Textures", nTextures);
+ 
++// hdPbrt primvar textures
++FloatHdPbrtPrimvarTexture *FloatHdPbrtPrimvarTexture::Create(
++    const Transform &renderFromTexture, const TextureParameterDictionary &parameters,
++    const FileLoc *loc, Allocator alloc) {
++    const std::string name = parameters.GetOneString("primvar", "");
++    if (name.empty())
++        ErrorExit(loc, "hdpbrtprimvar: \"string primvar\" is required.");
++    const int component = Clamp(parameters.GetOneInt("component", 0), 0, 3);
++    return alloc.new_object<FloatHdPbrtPrimvarTexture>(
++        HdPbrtPrimvarId(name), component, parameters.GetOneFloat("default", 0.f),
++        parameters.GetOneFloat("scale", 1.f), parameters.GetOneFloat("power", 1.f));
++}
++
++std::string FloatHdPbrtPrimvarTexture::ToString() const {
++    return StringPrintf("[ FloatHdPbrtPrimvarTexture id: %d component: %d default: %f ]", id,
++                        component, def);
++}
++
++SpectrumHdPbrtPrimvarTexture *SpectrumHdPbrtPrimvarTexture::Create(
++    const Transform &renderFromTexture, const TextureParameterDictionary &parameters,
++    SpectrumType spectrumType, const FileLoc *loc, Allocator alloc) {
++    const std::string name = parameters.GetOneString("primvar", "");
++    if (name.empty())
++        ErrorExit(loc, "hdpbrtprimvar: \"string primvar\" is required.");
++    const ParameterDictionary &dict = parameters;
++    const RGBColorSpace *cs = dict.ColorSpace();
++    std::vector<Float> d = parameters.GetFloatArray("default");
++    RGB def(0.18f, 0.18f, 0.18f);
++    if (d.size() == 1)
++        def = RGB(d[0], d[0], d[0]);
++    else if (d.size() >= 3)
++        def = RGB(d[0], d[1], d[2]);
++    return alloc.new_object<SpectrumHdPbrtPrimvarTexture>(
++        HdPbrtPrimvarId(name), def, parameters.GetOneFloat("scale", 1.f), cs, spectrumType);
++}
++
++std::string SpectrumHdPbrtPrimvarTexture::ToString() const {
++    return StringPrintf("[ SpectrumHdPbrtPrimvarTexture id: %d default: %s ]", id, def);
++}
++
+ FloatTexture FloatTexture::Create(const std::string &name,
+                                   const Transform &renderFromTexture,
+                                   const TextureParameterDictionary &parameters,
+@@ -1488,7 +1528,9 @@ FloatTexture FloatTexture::Create(const std::string &name,
+             tex = GPUFloatPtexTexture::Create(renderFromTexture, parameters, loc, alloc);
+         else
+             tex = FloatPtexTexture::Create(renderFromTexture, parameters, loc, alloc);
+-    } else
++    } else if (name == "hdpbrtprimvar")
++        tex = FloatHdPbrtPrimvarTexture::Create(renderFromTexture, parameters, loc, alloc);
++    else
+         ErrorExit(loc, "%s: float texture type unknown.", name);
+ 
+     if (!tex)
+@@ -1543,7 +1585,10 @@ SpectrumTexture SpectrumTexture::Create(const std::string &name,
+         else
+             tex = SpectrumPtexTexture::Create(renderFromTexture, parameters, spectrumType,
+                                               loc, alloc);
+-    } else
++    } else if (name == "hdpbrtprimvar")
++        tex = SpectrumHdPbrtPrimvarTexture::Create(renderFromTexture, parameters,
++                                                   spectrumType, loc, alloc);
++    else
+         ErrorExit(loc, "%s: spectrum texture type unknown.", name);
+ 
+     if (!tex)
+diff --git a/src/pbrt/textures.h b/src/pbrt/textures.h
+index 6dd9d94..b52a86d 100644
+--- a/src/pbrt/textures.h
++++ b/src/pbrt/textures.h
+@@ -43,7 +43,8 @@ struct TextureEvalContext {
+           dudy(si.dudy),
+           dvdx(si.dvdx),
+           dvdy(si.dvdy),
+-          faceIndex(si.faceIndex) {}
++          faceIndex(si.faceIndex),
++          hdpbrtPrimvars(si.hdpbrtPrimvars) {}
+     PBRT_CPU_GPU
+     TextureEvalContext(Point3f p, Vector3f dpdx, Vector3f dpdy, Normal3f n, Point2f uv,
+                        Float dudx, Float dudy, Float dvdx, Float dvdy, int faceIndex)
+@@ -66,6 +67,8 @@ struct TextureEvalContext {
+     Point2f uv;
+     Float dudx = 0, dudy = 0, dvdx = 0, dvdy = 0;
+     int faceIndex = 0;
++    // hdPbrt: per-vertex primvars at the hit (empty off meshes).
++    HdPbrtPrimvarHit hdpbrtPrimvars;
+ };
+ 
+ // TexCoord2D Definition
+@@ -282,6 +285,63 @@ class FloatConstantTexture {
+     Float value;
+ };
+ 
++// hdPbrt: a mesh primvar at the hit point (per-vertex values interpolated
++// barycentrically; pbrt plymesh "hdpbrtprimvars"). Shapes without it give
++// "default". Float: one component ("integer component"); spectrum: the first
++// three as RGB in the texture's color space.
++class FloatHdPbrtPrimvarTexture {
++  public:
++    FloatHdPbrtPrimvarTexture(int id, int component, Float def, Float scale, Float power)
++        : id(id), component(component), def(def), scale(scale), power(power) {}
++    PBRT_CPU_GPU
++    Float Evaluate(TextureEvalContext ctx) const {
++        Float v[4] = {def, def, def, def};
++        Float x = ctx.hdpbrtPrimvars.Lookup(id, component + 1, v) ? scale * v[component] : def;
++        // "float power": e.g. 2 for MaterialX roughness -> GGX alpha.
++        return power == 1 ? x : std::pow(std::max<Float>(x, 0), power);
++    }
++    static FloatHdPbrtPrimvarTexture *Create(const Transform &renderFromTexture,
++                                             const TextureParameterDictionary &parameters,
++                                             const FileLoc *loc, Allocator alloc);
++    std::string ToString() const;
++
++  private:
++    int id, component;
++    Float def, scale, power;
++};
++
++class SpectrumHdPbrtPrimvarTexture {
++  public:
++    SpectrumHdPbrtPrimvarTexture(int id, RGB def, Float scale, const RGBColorSpace *cs,
++                                 SpectrumType spectrumType)
++        : id(id), def(def), scale(scale), cs(cs), spectrumType(spectrumType) {}
++    PBRT_CPU_GPU
++    SampledSpectrum Evaluate(TextureEvalContext ctx, SampledWavelengths lambda) const {
++        Float v[3] = {def.r, def.g, def.b};
++        RGB rgb = def;
++        if (ctx.hdpbrtPrimvars.Lookup(id, 3, v))
++            rgb = RGB(v[0], v[1], v[2]) * scale;
++        rgb = ClampZero(rgb);
++        if (spectrumType == SpectrumType::Unbounded)
++            return RGBUnboundedSpectrum(*cs, rgb).Sample(lambda);
++        else if (spectrumType == SpectrumType::Albedo)
++            return RGBAlbedoSpectrum(*cs, Clamp(rgb, 0, 1)).Sample(lambda);
++        return RGBIlluminantSpectrum(*cs, rgb).Sample(lambda);
++    }
++    static SpectrumHdPbrtPrimvarTexture *Create(const Transform &renderFromTexture,
++                                                const TextureParameterDictionary &parameters,
++                                                SpectrumType spectrumType, const FileLoc *loc,
++                                                Allocator alloc);
++    std::string ToString() const;
++
++  private:
++    int id;
++    RGB def;
++    Float scale;
++    const RGBColorSpace *cs;
++    SpectrumType spectrumType;
++};
++
+ // SpectrumConstantTexture Definition
+ class SpectrumConstantTexture {
+   public:
+diff --git a/src/pbrt/util/hdpbrtgraph.cpp b/src/pbrt/util/hdpbrtgraph.cpp
+index a593492..35bd045 100644
+--- a/src/pbrt/util/hdpbrtgraph.cpp
++++ b/src/pbrt/util/hdpbrtgraph.cpp
+@@ -432,7 +432,7 @@ void HdPbrtGraph::BindPrimvars(const std::vector<std::string> &attrNames,
+     for (size_t s = 0; s < pvNames.size(); ++s) {
+         pvAttr[s] = -1;
+         for (size_t a = 0; a < attrNames.size(); ++a)
+-            if (attrNames[a] == pvNames[s] && attrWidths[a] >= 1) {
++            if (attrNames[a] == pvNames[s] && attrWidths[a] == pvWidths[s]) {
+                 pvAttr[s] = int(a);
+                 break;
+             }
+diff --git a/src/pbrt/util/hdpbrtprimvar.h b/src/pbrt/util/hdpbrtprimvar.h
+new file mode 100644
+index 0000000..0fd0d27
+--- /dev/null
++++ b/src/pbrt/util/hdpbrtprimvar.h
+@@ -0,0 +1,55 @@
++// hdPbrt: per-vertex primvars on triangle meshes, read by "hdpbrtprimvar"
++// textures at the hit point (barycentric interpolation).
++
++#ifndef PBRT_UTIL_HDPBRTPRIMVAR_H
++#define PBRT_UTIL_HDPBRTPRIMVAR_H
++
++#include <pbrt/pbrt.h>
++
++#include <string>
++
++namespace pbrt {
++
++// One primvar of a mesh: `width` floats per vertex. `id` comes from
++// HdPbrtPrimvarId (names are interned so lookups compare integers).
++struct HdPbrtMeshPrimvar {
++    int id = -1;
++    int width = 0;
++    const Float *data = nullptr;
++};
++
++// The id of a primvar name (thread-safe; the same name gives the same id).
++int HdPbrtPrimvarId(const std::string &name);
++
++// What a surface hit carries for primvar lookups.
++struct HdPbrtPrimvarHit {
++    const HdPbrtMeshPrimvar *primvars = nullptr;
++    int count = 0;
++    int v[3] = {0, 0, 0};
++    Float b[3] = {0, 0, 0};
++
++    // The interpolated value of primvar `id` (up to `width` components into
++    // `out`; missing ones keep their value). False when the mesh lacks it.
++    PBRT_CPU_GPU
++    bool Lookup(int id, int width, Float *out) const {
++        for (int i = 0; i < count; ++i) {
++            const HdPbrtMeshPrimvar &pv = primvars[i];
++            if (pv.id != id)
++                continue;
++            const int w = width < pv.width ? width : pv.width;
++            for (int k = 0; k < w; ++k)
++                out[k] = b[0] * pv.data[size_t(v[0]) * pv.width + k] +
++                         b[1] * pv.data[size_t(v[1]) * pv.width + k] +
++                         b[2] * pv.data[size_t(v[2]) * pv.width + k];
++            // A one-component primvar read as a color: grey.
++            for (int k = w; k < width && pv.width == 1; ++k)
++                out[k] = out[0];
++            return true;
++        }
++        return false;
++    }
++};
++
++}  // namespace pbrt
++
++#endif  // PBRT_UTIL_HDPBRTPRIMVAR_H
+diff --git a/src/pbrt/util/mesh.cpp b/src/pbrt/util/mesh.cpp
+index e015aab..1ee573d 100644
+--- a/src/pbrt/util/mesh.cpp
++++ b/src/pbrt/util/mesh.cpp
+@@ -14,6 +14,9 @@
+ 
+ #include <rply/rply.h>
+ 
++#include <algorithm>
++#include <mutex>
++
+ namespace pbrt {
+ 
+ STAT_RATIO("Geometry/Triangles per mesh", nTris, nTriMeshes);
+@@ -76,6 +79,40 @@ TriangleMesh::TriangleMesh(const Transform &renderFromObject, bool reverseOrient
+     CHECK_LE(indices.size(), std::numeric_limits<int>::max());
+ }
+ 
++int HdPbrtPrimvarId(const std::string &name) {
++    static std::mutex mutex;
++    static std::unordered_map<std::string, int> ids;
++    std::lock_guard<std::mutex> lock(mutex);
++    auto it = ids.find(name);
++    if (it != ids.end())
++        return it->second;
++    const int id = int(ids.size());
++    ids[name] = id;
++    return id;
++}
++
++void TriangleMesh::SetPrimvars(const std::vector<std::string> &names,
++                               const std::vector<std::vector<Float>> &data,
++                               const std::vector<int> &widths, Allocator alloc) {
++    const size_t n = std::min({names.size(), data.size(), widths.size()});
++    if (n == 0)
++        return;
++    HdPbrtMeshPrimvar *pv = alloc.allocate_object<HdPbrtMeshPrimvar>(n);
++    int count = 0;
++    for (size_t i = 0; i < n; ++i) {
++        if (widths[i] <= 0 || data[i].size() != size_t(nVertices) * widths[i])
++            continue;
++        Float *d = alloc.allocate_object<Float>(data[i].size());
++        std::copy(data[i].begin(), data[i].end(), d);
++        pv[count].id = HdPbrtPrimvarId(names[i]);
++        pv[count].width = widths[i];
++        pv[count].data = d;
++        ++count;
++    }
++    hdpbrtPrimvars = pv;
++    nHdPbrtPrimvars = count;
++}
++
+ void TriangleMesh::SetMotion(const Transform &renderFromObject,
+                              std::vector<std::vector<Point3f>> P,
+                              std::vector<std::vector<Normal3f>> N, std::vector<Float> times,
+diff --git a/src/pbrt/util/mesh.h b/src/pbrt/util/mesh.h
+index 221e31d..ce0a464 100644
+--- a/src/pbrt/util/mesh.h
++++ b/src/pbrt/util/mesh.h
+@@ -10,6 +10,7 @@
+ #include <pbrt/util/containers.h>
+ #include <pbrt/util/error.h>
+ #include <pbrt/util/hash.h>
++#include <pbrt/util/hdpbrtprimvar.h>
+ #include <pbrt/util/parallel.h>
+ #include <pbrt/util/pstd.h>
+ #include <pbrt/util/vecmath.h>
+@@ -51,6 +52,14 @@ class TriangleMesh {
+     // (and normals, when poseN is set) are given at poseTimes[0..nPoses-1]
+     // (posesP[0] == p) and move linearly between neighboring poses by ray
+     // time; times outside the range clamp to the end poses.
++    // hdPbrt: per-vertex primvars (nVertices x width each), for
++    // "hdpbrtprimvar" textures. SetPrimvars copies the data.
++    int nHdPbrtPrimvars = 0;
++    const HdPbrtMeshPrimvar *hdpbrtPrimvars = nullptr;
++    void SetPrimvars(const std::vector<std::string> &names,
++                     const std::vector<std::vector<Float>> &data,
++                     const std::vector<int> &widths, Allocator alloc);
++
+     int nPoses = 1;
+     const Point3f *const *poseP = nullptr;
+     const Normal3f *const *poseN = nullptr;
+diff --git a/src/pbrt/util/transform.cpp b/src/pbrt/util/transform.cpp
+index d1a4570..a955940 100644
+--- a/src/pbrt/util/transform.cpp
++++ b/src/pbrt/util/transform.cpp
+@@ -271,6 +271,7 @@ PBRT_CPU_GPU SurfaceInteraction Transform::operator()(const SurfaceInteraction &
+     ret.hdpbrtInstanceId = si.hdpbrtInstanceId;
+     ret.hdpbrtLinkMask = si.hdpbrtLinkMask;
+     ret.hdpbrtShadowLift = t(si.hdpbrtShadowLift);
++    ret.hdpbrtPrimvars = si.hdpbrtPrimvars;
+ 
+     return ret;
+ }
+@@ -383,6 +384,7 @@ PBRT_CPU_GPU SurfaceInteraction Transform::ApplyInverse(const SurfaceInteraction
+     ret.hdpbrtInstanceId = si.hdpbrtInstanceId;
+     ret.hdpbrtLinkMask = si.hdpbrtLinkMask;
+     ret.hdpbrtShadowLift = t(si.hdpbrtShadowLift);
++    ret.hdpbrtPrimvars = si.hdpbrtPrimvars;
+     return ret;
+ }
+ 
+-- 
+2.43.0
+

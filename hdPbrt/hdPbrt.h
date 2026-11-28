@@ -227,6 +227,9 @@ struct HdPbrtMaterialDesc {
     std::vector<std::string> displacementGraphImages;
     // Primvars the graph reads (geompropvalue / geomcolor): name, width.
     std::vector<std::pair<std::string, int>> displacementGraphPrimvars;
+    // Primvars the surface textures read ("hdpbrtprimvar" textures): name,
+    // width. Meshes write them per vertex; other shapes get the defaults.
+    std::vector<std::pair<std::string, int>> surfacePrimvars;
 };
 
 class HdPbrtMaterial final : public HdMaterial {
@@ -266,8 +269,13 @@ bool HdPbrt_PyroVolume(const HdMaterialNetwork2 &net, const HdMaterialNode2 &n,
 
 // Writes the pbrt "Material" line for a material (or the default material).
 // irReflectance >= 0 overrides the material's (a geometry primvar).
+// displayColorTexture: a texture of the shape's per-vertex displayColor,
+// used in place of the constant when the base color reads displayColor.
 std::string HdPbrt_MaterialLine(const HdPbrtMaterialDesc &m,
-                                const GfVec3f *displayColor, float irReflectance = -1.f);
+                                const GfVec3f *displayColor, float irReflectance = -1.f,
+                                const std::string &displayColorTexture = std::string());
+// The shared "hdpbrtprimvar" texture of displayColor (HdPbrt_MaterialLine).
+extern const char *const HdPbrt_DisplayColorTexture;
 HdPbrtMaterialDesc HdPbrt_DefaultMaterial();
 
 // ---------------------------------------------------------------------------
@@ -376,6 +384,7 @@ protected:
     bool _visible = true;
     GfVec3f _displayColor{0.18f, 0.18f, 0.18f};
     bool _hasDisplayColor = false;
+    bool _displayColorVarying = false;  // not constant (meshes: per-vertex texture)
     float _displayOpacity = 1.f;
     float _irReflectance = -1.f;  // primvar pbrt:irReflectance, < 0: none
     // Per-object dicing primvars (pbrt:dicingRate, karma:object:dicingquality,

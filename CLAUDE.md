@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (42 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (43 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -189,6 +189,15 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    `"string hdpbrtprimvars"` [name width file ...] loads raw float32 files (width per PLY vertex),
    `"string hdpbrtgraphprimvars"` [name width ...] are the graph's slots ("pv slot default" op,
    `HdPbrtGraph::BindPrimvars`; a missing primvar gives the default).
+43. Surface primvars: `plymesh` keeps `hdpbrtprimvars` (now read for every plymesh, not only
+   displaced ones) on the final `TriangleMesh` (`SetPrimvars`; names interned by
+   `HdPbrtPrimvarId`, util/hdpbrtprimvar.h). Triangle hits carry `HdPbrtPrimvarHit` (vertex
+   indices + barycentrics) in SurfaceInteraction -> TextureEvalContext (copied through instance
+   transforms). Textures `"hdpbrtprimvar"`: float (`"string primvar"`, `"integer component"`,
+   `"float default"`, `"float scale"`, `"float power"`) and spectrum (`"float default"` [3],
+   RGB in the scene's color space, albedo/unbounded/illuminant by use). Not on quads (bilinear
+   patches), bump contexts or non-mesh shapes (default). Graph slots now bind by name and
+   width (merged primvar lists may hold one name at two widths).
 
 ## Done in the 2026-11-22 session
 
@@ -476,6 +485,27 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   displaced sphere's blur coverage correlates 0.991 with Karma's (mean 0.43 vs 0.50, the same
   without displacement); with near-zero deformation the blurred sphere equals the static one
   (every pose displaced). `tests/motion_scene.usda` still blurs.
+- Varying primvars in surface shading (2026-11-28, pbrt patch 43). `_Builder::Texture`: a
+  primvar reader (UsdPrimvarReader_* varname/fallback, ND_geompropvalue_* geomprop/default,
+  ND_geomcolor_*) on base color, roughness or opacity becomes an `hdpbrtprimvar` texture
+  (`PrimvarTexture`, listed in `HdPbrtMaterialDesc::surfacePrimvars`; width from the node type);
+  roughness ones square in pbrt (`"float power" 2`, remaproughness off: MaterialX alpha = r^2;
+  image roughness still goes through pbrt's remap). displayColor / Cd on the base color keeps
+  the constant path, except that a mesh with non-constant displayColor (also with no material)
+  uses the shared `hdpbrt_displayColor` texture (`HdPbrt_MaterialLine` displayColorTexture).
+  `HdPbrtGeom::Write` writes every needed primvar per PLY vertex with `_PrimvarFile` (merged with
+  the displacement graph's) as one `hdpbrtprimvars` list. The displacement builder keeps primvar
+  readers for its graph (`primvarTextures` false). Not yet: other inputs (metalness, coat, ...
+  aren't textured at all), primvars on curves/points/implicit prims (texture default; constant
+  displayColor still works there), per-instance primvars, varying displayOpacity without a
+  material. Check (`tests/primvars/run_primvars.sh`, vs Karma): vertex Cd on a subdivided sphere,
+  uniform checker faces, a displaced sphere's colors, UsdPreviewSurface reader color + opacity,
+  missing primvar -> default: patches within 1% of Karma; vertex roughness matches at r 0.05,
+  and primvar roughness equals the same constant exactly (rough metal at r 0.8 is 0.63x Karma
+  with or without primvars: a metal difference, not looked into). Karma shades unbound
+  displayColor ~2x darker than its value (its default material), so the unbound grid and
+  implicit sphere only check the pattern. Materials run42 34/8/0 identical to run41;
+  run_displacement.sh unchanged (0.83 / 1.54 / 1.40 / 2.57%, blur correlation 0.991).
 - Per-object dicing (2026-11-27, hdPbrt only): constant primvars `pbrt:dicingRate` /
   `pbrt_dicingRate` (pixels, over the render setting), `karma:object:dicingquality` (divides
   the rate, min 0.01; Karma's meaning: 2 = twice as fine) and `pbrt:dicingMaxTriangles` /

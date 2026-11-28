@@ -209,6 +209,7 @@ void HdPbrtGeom::_SyncDisplayColor(HdSceneDelegate *sd)
     _dicingMaxTriangles = diceMaxTris > 0 ? (int)std::min(diceMaxTris, 2e9f) : -1;
     _displayColor = col;
     _hasDisplayColor = ok;
+    _displayColorVarying = ok && c.interp != HdInterpolationConstant;
     _displayOpacity = op;
 }
 
@@ -335,8 +336,33 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
                 os << mat.textures;
         }
     }
-    std::string matLine =
-        HdPbrt_MaterialLine(mat, _hasDisplayColor ? &_displayColor : nullptr, _irReflectance);
+    // Per-vertex primvars for "hdpbrtprimvar" textures (meshes only; other
+    // shapes give _PrimvarFile nothing and the textures their defaults).
+    // name, width -> file; the displacement graph's are added below.
+    std::vector<std::pair<std::pair<std::string, int>, std::string>> pvFiles;
+    auto addPrimvar = [&](const std::string &name, int width) -> bool {
+        for (const auto &e : pvFiles)
+            if (e.first.first == name && e.first.second == width)
+                return true;
+        const std::string f = _PrimvarFile(name, width);
+        if (f.empty())
+            return false;
+        pvFiles.push_back({{name, width}, f});
+        return true;
+    };
+    for (const auto &pv : mat.surfacePrimvars)
+        addPrimvar(pv.first, pv.second);
+    // Varying displayColor on the base color: the shared texture over the file.
+    std::string displayColorTex;
+    if (mat.baseColorFromPrimvar && _displayColorVarying && mat.baseColorTexture.empty() &&
+        addPrimvar("displayColor", 3)) {
+        displayColorTex = HdPbrt_DisplayColorTexture;
+        if (ctx.texturesWritten.insert(SdfPath("/__hdpbrt_displayColor")).second)
+            os << "Texture " << HdPbrt_Quote(displayColorTex)
+               << " \"spectrum\" \"hdpbrtprimvar\" \"string primvar\" \"displayColor\"\n";
+    }
+    std::string matLine = HdPbrt_MaterialLine(mat, _hasDisplayColor ? &_displayColor : nullptr,
+                                              _irReflectance, displayColorTex);
     // Transmissive materials with an interior medium (pbrt's volpath).
     if (!mat.mediumName.empty())
         matLine += "  MediumInterface " + HdPbrt_Quote(mat.mediumName) + " \"\"\n";
@@ -377,17 +403,12 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
             }
             // Primvars the graph reads, as files per pbrt vertex.
             if (!mat.displacementGraphPrimvars.empty()) {
-                std::ostringstream slots, files;
+                std::ostringstream slots;
                 for (const auto &pv : mat.displacementGraphPrimvars) {
                     slots << " " << HdPbrt_Quote(pv.first) << " \"" << pv.second << "\"";
-                    const std::string f = _PrimvarFile(pv.first, pv.second);
-                    if (!f.empty())
-                        files << " " << HdPbrt_Quote(pv.first) << " \"" << pv.second << "\" "
-                              << HdPbrt_Quote(f);
+                    addPrimvar(pv.first, pv.second);
                 }
                 extra << " \"string hdpbrtgraphprimvars\" [" << slots.str() << " ]";
-                if (!files.str().empty())
-                    extra << " \"string hdpbrtprimvars\" [" << files.str() << " ]";
             }
         } else {
             extra << " \"texture displacement\" " << HdPbrt_Quote(mat.displacementTexture);
@@ -418,6 +439,13 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
             extra << " \"float hdpbrtdisplacementscale\" " << mat.displacementScale;
         if (mat.displacementOffset != 0.f)
             extra << " \"float hdpbrtdisplacementoffset\" " << mat.displacementOffset;
+    }
+    if (!pvFiles.empty()) {
+        extra << " \"string hdpbrtprimvars\" [";
+        for (const auto &e : pvFiles)
+            extra << " " << HdPbrt_Quote(e.first.first) << " \"" << e.first.second << "\" "
+                  << HdPbrt_Quote(e.second);
+        extra << " ]";
     }
     const std::string shapes = _Shapes(extra.str());
     if (shapes.empty())

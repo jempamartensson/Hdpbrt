@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <set>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -31,14 +32,18 @@ HdPbrtMaterialDesc HdPbrt_DefaultMaterial()
     return d;
 }
 
+const char *const HdPbrt_DisplayColorTexture = "hdpbrt_displayColor";
+
 std::string HdPbrt_MaterialLine(const HdPbrtMaterialDesc &m, const GfVec3f *displayColor,
-                                float irReflectance)
+                                float irReflectance, const std::string &displayColorTexture)
 {
     std::ostringstream os;
     os << "Material " << HdPbrt_Quote(m.type);
     if (m.type != "dielectric" && m.writeReflectance) {
         if (!m.baseColorTexture.empty())
             os << " \"texture reflectance\" " << HdPbrt_Quote(m.baseColorTexture);
+        else if (m.baseColorFromPrimvar && !displayColorTexture.empty())
+            os << " \"texture reflectance\" " << HdPbrt_Quote(displayColorTexture);
         else {
             GfVec3f c = (m.baseColorFromPrimvar && displayColor) ? *displayColor : m.baseColor;
             for (int i = 0; i < 3; ++i)
@@ -136,6 +141,47 @@ bool _IsPrimvarNode(const HdMaterialNode2 &n)
            TfStringStartsWith(t, "ND_geompropvalue") || TfStringStartsWith(t, "ND_geomcolor");
 }
 
+// A primvar reader's primvar name, width (from the node type) and default.
+// UsdPrimvarReader_*: varname / fallback; ND_geompropvalue_*: geomprop /
+// default; ND_geomcolor_*: displayColor.
+void _PrimvarReader(const HdMaterialNode2 &n, std::string *name, int *width, GfVec4f *def)
+{
+    const std::string t = n.nodeTypeId.GetString();
+    auto str = [&](const char *p) -> std::string {
+        auto it = n.parameters.find(TfToken(p));
+        if (it == n.parameters.end()) return {};
+        if (it->second.IsHolding<TfToken>()) return it->second.UncheckedGet<TfToken>().GetString();
+        if (it->second.IsHolding<std::string>()) return it->second.UncheckedGet<std::string>();
+        return {};
+    };
+    const bool usd = TfStringStartsWith(t, "UsdPrimvarReader");
+    *name = TfStringStartsWith(t, "ND_geomcolor") ? std::string("displayColor")
+                                                  : str(usd ? "varname" : "geomprop");
+    if (name->empty())
+        *name = "displayColor";
+    const std::string suffix = t.substr(t.rfind('_') + 1);
+    *width = (suffix == "float2" || suffix == "vector2") ? 2
+             : (suffix == "float4" || suffix == "color4" || suffix == "vector4") ? 4
+             : (suffix == "float" || suffix == "int" || suffix == "integer" || suffix == "boolean")
+                 ? 1
+                 : 3;
+    *def = GfVec4f(0.f);
+    if (TfStringStartsWith(t, "ND_geomcolor"))
+        *def = GfVec4f(0.18f, 0.18f, 0.18f, 1.f);
+    auto it = n.parameters.find(TfToken(usd ? "fallback" : "default"));
+    if (it != n.parameters.end()) {
+        const VtValue &v = it->second;
+        if (v.IsHolding<float>()) *def = GfVec4f(v.UncheckedGet<float>());
+        else if (v.IsHolding<double>()) *def = GfVec4f(float(v.UncheckedGet<double>()));
+        else if (v.IsHolding<int>()) *def = GfVec4f(float(v.UncheckedGet<int>()));
+        else if (v.IsHolding<GfVec2f>()) { auto c = v.UncheckedGet<GfVec2f>(); *def = GfVec4f(c[0], c[1], 0, 0); }
+        else if (v.IsHolding<GfVec3f>()) { auto c = v.UncheckedGet<GfVec3f>(); *def = GfVec4f(c[0], c[1], c[2], 0); }
+        else if (v.IsHolding<GfVec4f>()) *def = v.UncheckedGet<GfVec4f>();
+    }
+    if (*width == 1)
+        *def = GfVec4f((*def)[0]);
+}
+
 bool _SupportedImage(const std::string &path)
 {
     std::string ext = TfStringToLower(TfGetExtension(path));
@@ -154,11 +200,41 @@ struct _Builder {
     HdPbrtMaterialDesc desc;
     int texCount = 0;
     HdPbrtRenderDelegate *delegate = nullptr;  // for Houdini op: images
+    // Primvar readers become "hdpbrtprimvar" textures (surfaces); off for
+    // displacement, whose graphs read primvars per vertex themselves.
+    bool primvarTextures = true;
+    // Float textures that already give GGX alpha (squared roughness primvars).
+    std::set<std::string> alphaTextures;
 
     // Follow `input` on `node`: returns a named pbrt texture if it's driven by an
     // image, sets *fromPrimvar if it reads displayColor-like primvars.
+    // An "hdpbrtprimvar" texture (pbrt): the primvar interpolated over the
+    // mesh's triangles, `def` where a shape doesn't have it.
+    std::string PrimvarTexture(const std::string &pv, int width, const GfVec4f &def,
+                               const char *input, bool isColor, bool alpha = false) {
+        std::string name = prefix + "_" + input + std::to_string(texCount++);
+        std::ostringstream os;
+        os << "Texture " << HdPbrt_Quote(name) << (isColor ? " \"spectrum\"" : " \"float\"")
+           << " \"hdpbrtprimvar\" \"string primvar\" " << HdPbrt_Quote(pv);
+        if (isColor)
+            os << " \"float default\" [" << def[0] << " " << def[1] << " " << def[2] << "]";
+        else
+            os << " \"float default\" " << def[0];
+        if (alpha) {  // roughness r -> GGX alpha r^2 (no pbrt remap)
+            os << " \"float power\" 2";
+            alphaTextures.insert(name);
+        }
+        os << "\n";
+        desc.textures += os.str();
+        auto entry = std::make_pair(pv, width);
+        if (std::find(desc.surfacePrimvars.begin(), desc.surfacePrimvars.end(), entry) ==
+            desc.surfacePrimvars.end())
+            desc.surfacePrimvars.push_back(entry);
+        return name;
+    }
+
     std::string Texture(const HdMaterialNode2 &node, const char *input, bool isColor,
-                        bool *fromPrimvar = nullptr) {
+                        bool *fromPrimvar = nullptr, bool roughness = false) {
         TfToken output;
         const HdMaterialNode2 *up = net.Upstream(node, TfToken(input), &output);
         // Look through a single convert/dot pass-through node.
@@ -170,9 +246,19 @@ struct _Builder {
         if (!up)
             return {};
         if (_IsPrimvarNode(*up)) {
-            if (fromPrimvar)
+            std::string pv;
+            int width = 1;
+            GfVec4f def(0.f);
+            _PrimvarReader(*up, &pv, &width, &def);
+            // displayColor on the base color: the shape's constant color, or
+            // its per-vertex one (HdPbrt_MaterialLine's displayColorTexture).
+            if (fromPrimvar && isColor && (pv == "displayColor" || pv == "Cd")) {
                 *fromPrimvar = true;
-            return {};
+                return {};
+            }
+            if (!primvarTextures)
+                return {};
+            return PrimvarTexture(pv, width, def, input, isColor, roughness);
         }
         if (!_IsTextureNode(*up))
             return {};
@@ -973,7 +1059,7 @@ void HdPbrtMaterial::_BuildDisplacement(HdMaterialNetworkMap const &map,
         type != "UsdPreviewSurface")
         return;
     const std::string pfx = TfMakeValidIdentifier(GetId().GetString()) + "_disp";
-    _Builder b{_Net{net2}, pfx, HdPbrtMaterialDesc{}, 0, _delegate};
+    _Builder b{_Net{net2}, pfx, HdPbrtMaterialDesc{}, 0, _delegate, false};
     // Procedural graphs (anything the image folding below doesn't cover):
     // compiled for pbrt's graph evaluator (pbrt patch 41).
     auto procedural = [&]() {
@@ -1439,7 +1525,7 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
             }
             bool fromPrimvar = false;
             std::string baseTex = baseIn ? b.Texture(*surf, baseIn, true, &fromPrimvar) : "";
-            std::string roughTex = roughIn ? b.Texture(*surf, roughIn, false) : "";
+            std::string roughTex = roughIn ? b.Texture(*surf, roughIn, false, nullptr, true) : "";
             std::string opacityTex = opacityIn ? b.Texture(*surf, opacityIn, false) : "";
 
             HdPbrtMaterialDesc &d = b.desc;
@@ -1455,8 +1541,11 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 // "remaproughness" uses alpha = sqrt(r), so pass alpha
                 // directly for constants. (Textured roughness keeps pbrt's
                 // remap, which is too rough for glossy values.)
-                if (!roughTex.empty())
+                if (!roughTex.empty()) {
                     other << " \"texture " << name << "\" " << HdPbrt_Quote(roughTex);
+                    if (b.alphaTextures.count(roughTex))
+                        other << " \"bool remaproughness\" false";
+                }
                 else {
                     float r = std::min(std::max(rough, 0.f), 1.f);
                     other << " \"float " << name << "\" " << r * r

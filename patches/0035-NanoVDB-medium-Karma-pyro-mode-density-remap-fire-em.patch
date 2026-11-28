@@ -1,7 +1,7 @@
 From 292a1a22a7c5e26095624b80d0ef9c5fab0add39 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Wed, 25 Nov 2026 21:47:20 +0100
-Subject: [PATCH 35/42] NanoVDB medium: Karma pyro mode (density remap, fire
+Subject: [PATCH 35/43] NanoVDB medium: Karma pyro mode (density remap, fire
  emission coefficient from temperature, majorant floor in fire cells) (for
  hdPbrt)
 
