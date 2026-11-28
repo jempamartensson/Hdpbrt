@@ -1,7 +1,7 @@
 From fe3d84fa25626b321bdaf3d40878ed3b65b879e7 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Mon, 23 Nov 2026 19:00:14 +0100
-Subject: [PATCH 22/44] hdpbrtlayered: thin film on the specular layer (exact
+Subject: [PATCH 22/45] hdpbrtlayered: thin film on the specular layer (exact
  spectral Airy reflectance) (for hdPbrt)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

@@ -1,0 +1,93 @@
+From 06fe73553ce5584521b9815c85656c7cf96d606f Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sat, 28 Nov 2026 10:11:36 +0100
+Subject: [PATCH 45/45] hdpbrtlayered: coat darkening weight as a float
+ texture, optional "texture hdpbrteta" for a varying specular IOR (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/materials.cpp |  3 ++-
+ src/pbrt/materials.h   | 18 ++++++++++++------
+ 2 files changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/src/pbrt/materials.cpp b/src/pbrt/materials.cpp
+index 427c9db..451eff0 100644
+--- a/src/pbrt/materials.cpp
++++ b/src/pbrt/materials.cpp
+@@ -775,7 +775,8 @@ HdPbrtLayeredMaterial *HdPbrtLayeredMaterial::Create(
+                parameters.GetOneFloat("filmeta", 1.4f));
+     m->SetSubsurface(Clamp(parameters.GetOneFloat("subsurface", 0.f), 0, 1));
+     m->SetDiffuseBurley(parameters.GetOneBool("diffuseburley", false));
+-    m->SetCoatDarkening(Clamp(parameters.GetOneFloat("coatdarkening", 0.f), 0, 1),
++    m->SetEtaTexture(parameters.GetFloatTextureOrNull("hdpbrteta", alloc));
++    m->SetCoatDarkening(parameters.GetFloatTextureOrNull("coatdarkening", alloc),
+                         parameters.GetSpectrumTextureOrNull("coatdarkeningadd",
+                                                             SpectrumType::Albedo, alloc));
+     return m;
+diff --git a/src/pbrt/materials.h b/src/pbrt/materials.h
+index 6f4423f..10bad9d 100644
+--- a/src/pbrt/materials.h
++++ b/src/pbrt/materials.h
+@@ -718,7 +718,7 @@ class HdPbrtLayeredMaterial {
+     PBRT_CPU_GPU bool CanEvaluateTextures(TextureEvaluator texEval) const {
+         return texEval.CanEvaluate({uRoughness, vRoughness, specWeight, sheenWeight,
+                                     sheenRoughness, coatWeight, coatRoughness, metalWeight,
+-                                    diffuseRoughness},
++                                    diffuseRoughness, coatDarkening, etaTex},
+                                    {reflectance, transmittance, specTint, sheenColor,
+                                     coatTint, metalA, metalB, coatDarkeningAdd});
+     }
+@@ -739,7 +739,10 @@ class HdPbrtLayeredMaterial {
+         Float sw = Clamp(texEval(sheenWeight, ctx), 0, 1);
+         SampledSpectrum sc = Clamp(texEval(sheenColor, ctx, lambda), 0, 1) * sw;
+         Float sa = Clamp(texEval(sheenRoughness, ctx), 0, 1);
+-        HdPbrtDielectricLobe spec{w, eta, TrowbridgeReitzDistribution(urough, vrough)};
++        // "texture hdpbrteta": a varying specular IOR (e.g. relative to a
++        // varying coat), in place of the constant "eta".
++        const Float e = etaTex ? std::max<Float>(texEval(etaTex, ctx), 1.0001f) : eta;
++        HdPbrtDielectricLobe spec{w, e, TrowbridgeReitzDistribution(urough, vrough)};
+         Float cr = texEval(coatRoughness, ctx);
+         if (remapRoughness)
+             cr = TrowbridgeReitzDistribution::RoughnessToAlpha(cr);
+@@ -756,7 +759,8 @@ class HdPbrtLayeredMaterial {
+                 mb = Clamp(mb, 0, 1);
+             }
+         }
+-        if (coatDarkening > 0 && coat.weight > 0) {
++        const Float cd = coatDarkening ? Clamp(texEval(coatDarkening, ctx), 0, 1) : Float(0);
++        if (cd > 0 && coat.weight > 0) {
+             // OpenPBR coat darkening, per shading point: (1 - K) / (1 - E K),
+             // K the coat's internal reflection, E the base albedo (diffuse
+             // reflectance + "coatdarkeningadd", mixed by metalness with the
+@@ -773,7 +777,7 @@ class HdPbrtLayeredMaterial {
+                     Clamp(ma, 0, 1) * (mw * std::min<Float>(metalScale, 1));
+             for (int i = 0; i < NSpectrumSamples; ++i) {
+                 const Float dark = std::min<Float>((1 - K) / std::max<Float>(1 - e[i] * K, 1e-5f), 1);
+-                ct[i] *= 1 - coatDarkening + dark * coatDarkening;
++                ct[i] *= 1 - cd + dark * cd;
+             }
+         }
+         HdPbrtLayeredBxDF bxdf(r, t, tint, spec, sc, sw, sa, sheenOnTop, coat, ct, mw,
+@@ -802,7 +806,8 @@ class HdPbrtLayeredMaterial {
+     // OpenPBR coat darkening ("coatdarkening" = coat weight * coat_darkening,
+     // "coatdarkeningadd": albedo the diffuse reflectance lacks, e.g. the
+     // subsurface share).
+-    void SetCoatDarkening(Float w, SpectrumTexture add) {
++    void SetEtaTexture(FloatTexture t) { etaTex = t; }
++    void SetCoatDarkening(FloatTexture w, SpectrumTexture add) {
+         coatDarkening = w;
+         coatDarkeningAdd = add;
+     }
+@@ -847,7 +852,8 @@ class HdPbrtLayeredMaterial {
+     int metalMode;
+     bool sheenOnTop;
+     bool diffuseBurley = false;
+-    Float coatDarkening = 0;
++    FloatTexture coatDarkening;  // weight x coat_darkening (texture: it may vary)
++    FloatTexture etaTex;         // "hdpbrteta", or null: the constant eta
+     SpectrumTexture coatDarkeningAdd;
+     bool remapRoughness;
+ };
+-- 
+2.43.0
+

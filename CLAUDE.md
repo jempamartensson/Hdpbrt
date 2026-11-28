@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (44 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (45 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -205,6 +205,9 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    fill the hit's `HdPbrtPrimvarHit` (before the alpha test) when the shape has no per-vertex
    primvars of its own. Curves: `CurveCommon::hdpbrtSeg` (segment index) and the hit's u go in
    the hit (v[0], b[0]); values interpolate linearly between that segment's boundaries.
+45. hdpbrtlayered: `"coatdarkening"` (patch 34) is a float texture (weight x coat_darkening can
+   vary) and `"texture hdpbrteta"` optionally replaces the constant `"eta"` of the specular
+   lobe per shading point (clamped >= 1.0001; the albedo tables are indexed by eta anyway).
 
 ## Done in the 2026-11-22 session
 
@@ -527,6 +530,31 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   "cylinder" curves are ribbons with bent normals, Karma's round tubes); run43 34/8/0 and usdlux
   326/328 unchanged. Materials run42 34/8/0 identical to run41;
   run_displacement.sh unchanged (0.83 / 1.54 / 1.40 / 2.57%, blur correlation 0.991).
+- Primvars (and images) on every input pbrt can vary (2026-11-28, pbrt patch 45).
+  `_Builder::Val` (texture or constant) with `In` (Texture() of an input), `Mul` (pbrt "scale"
+  texture: value x float) and `Mix` (pbrt "mix"); `Param` writes either form. Varying:
+  base weight (reflectance = base color x weight x the subsurface walk's share; textured base
+  colors are now scaled by a constant weight too), metalness (forces the metal lobe), specular
+  weight / color, metal F0 (base x weight) and F82 edge (specular color x weight; any varying
+  edge or base uses F82-tint on standard_surface), coat weight / color (tint = mix(1, color,
+  weight)) / roughness (squared), sheen / fuzz weight, color, roughness, diffuse roughness,
+  transmission color (dielectric tint, thin-wall transmittance), and on UsdPreviewSurface
+  metallic, clearcoat, clearcoatRoughness. Couplings with a varying coat weight: OpenPBR
+  darkening = weight x coat_darkening (texture), specular IOR mix(uncoated, relative to the
+  coat) (`hdpbrteta`), specular GGX alpha mix(uncoated, coated) (both standard_surface
+  coat_affect_roughness and OpenPBR's r'). UsdPreviewSurface changes (constant ones too):
+  clearcoat is translated now (white coat, IOR 1.5; it was ignored), metallic uses
+  hdpbrtlayered's metal lobe (F0 = diffuseColor, white F82 edge, i.e. Schlick as the spec)
+  instead of pbrt's conductor fit. Still constant in pbrt (a varying input warns, also on
+  stderr under HDPBRT_DEBUG since hython drops Tf warnings): IOR (except the coat coupling),
+  coat IOR, thin film, subsurface, emission, transmission weight / depth / scatter, specular
+  anisotropy, coat_affect_color, metalscale (OpenPBR specular weight on metal), and pbrlib
+  BSDF-node graphs other than their diffuse color. Check (`tests/primvars/make_inputs_scene.py`,
+  in run_primvars.sh, hdPbrt only): 19 spheres, one input each driven by a primvar; with the
+  primvar holding A (B) everywhere the image equals the constant-A (-B) render within 0.2%
+  (before the coat couplings: OpenPBR coat weight 1.4-1.9x); split spheres agree up to
+  light from neighbours (transmission color: light crosses both tints). Materials run44 34/8/0
+  identical to run43; materials_extra (8 groups) unchanged.
 - Per-object dicing (2026-11-27, hdPbrt only): constant primvars `pbrt:dicingRate` /
   `pbrt_dicingRate` (pixels, over the render setting), `karma:object:dicingquality` (divides
   the rate, min 0.01; Karma's meaning: 2 = twice as fine) and `pbrt:dicingMaxTriangles` /

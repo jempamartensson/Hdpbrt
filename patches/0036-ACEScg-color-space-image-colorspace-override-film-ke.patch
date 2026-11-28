@@ -1,7 +1,7 @@
 From 79478dab269e0c12e3c1f4c97b46f961389da8a9 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Thu, 26 Nov 2026 07:50:47 +0100
-Subject: [PATCH 36/44] ACEScg color space; image "colorspace" override; film
+Subject: [PATCH 36/45] ACEScg color space; image "colorspace" override; film
  keeps its color space in PFMs (for hdPbrt)
 
 - RGBColorSpace::ACEScg ("acescg": AP1 primaries, ACES white, its own

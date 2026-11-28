@@ -233,6 +233,62 @@ struct _Builder {
         return name;
     }
 
+    // An input's value: a pbrt texture (image or primvar, or a product/mix
+    // of those) or a constant (c; floats in c[0]).
+    struct Val {
+        std::string tex;
+        GfVec3f c{0.f};
+        bool Varies() const { return !tex.empty(); }
+    };
+    Val In(const HdMaterialNode2 &n, const char *input, bool isColor, GfVec3f c,
+           bool roughness = false) {
+        Val v;
+        v.c = c;
+        if (input)
+            v.tex = Texture(n, input, isColor, nullptr, roughness);
+        return v;
+    }
+    static Val Const(GfVec3f c) { Val v; v.c = c; return v; }
+    static Val Const(float f) { return Const(GfVec3f(f)); }
+    // A value as the operand of a pbrt texture or material parameter `name`.
+    static std::string Param(const char *name, const Val &v, bool isColor) {
+        std::ostringstream os;
+        if (v.Varies())
+            os << " \"texture " << name << "\" " << HdPbrt_Quote(v.tex);
+        else if (isColor)
+            os << " \"rgb " << name << "\" " << HdPbrt_Rgb(v.c);
+        else
+            os << " \"float " << name << "\" " << v.c[0];
+        return os.str();
+    }
+    // a * s (s a float), as a pbrt "scale" texture when either varies.
+    Val Mul(const Val &a, const Val &s, bool isColor, const char *what) {
+        if (!a.Varies() && !s.Varies())
+            return Const(a.c * s.c[0]);
+        if (!s.Varies() && std::fabs(s.c[0] - 1.f) < 1e-6f)
+            return a;
+        Val r;
+        r.tex = prefix + "_" + what + std::to_string(texCount++);
+        r.c = a.c * s.c[0];
+        desc.textures += "Texture " + HdPbrt_Quote(r.tex) +
+                         (isColor ? " \"spectrum\"" : " \"float\"") + " \"scale\"" +
+                         Param("tex", a, isColor) + Param("scale", s, false) + "\n";
+        return r;
+    }
+    // lerp(a, b, t) (t a float), as a pbrt "mix" texture when any varies.
+    Val Mix(const Val &a, const Val &b, const Val &t, bool isColor, const char *what) {
+        if (!a.Varies() && !b.Varies() && !t.Varies())
+            return Const(a.c * (1 - t.c[0]) + b.c * t.c[0]);
+        Val r;
+        r.tex = prefix + "_" + what + std::to_string(texCount++);
+        r.c = a.c * (1 - t.c[0]) + b.c * t.c[0];
+        desc.textures += "Texture " + HdPbrt_Quote(r.tex) +
+                         (isColor ? " \"spectrum\"" : " \"float\"") + " \"mix\"" +
+                         Param("tex1", a, isColor) + Param("tex2", b, isColor) +
+                         Param("amount", t, false) + "\n";
+        return r;
+    }
+
     std::string Texture(const HdMaterialNode2 &node, const char *input, bool isColor,
                         bool *fromPrimvar = nullptr, bool roughness = false) {
         TfToken output;
@@ -1321,6 +1377,11 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
             // multiplies everything below it, and so does OpenPBR's darkening,
             // which pbrt computes per shading point (coatDark = its weight).
             float coatW = 0, coatRough = 0, coatIor = 1.5f, coatDark = 0;
+            // With a varying coat weight: the coat-independent specular
+            // roughness and the fully coated one (>= 0 when the coat changes
+            // it), and coat_darkening (OpenPBR; times the weight).
+            float roughUncoated = -1, roughCoated = -1, coatDarkK = 0;
+            float iorUncoated = -1, iorCoated = -1;  // OpenPBR: specular IOR without / under the coat
             GfVec3f coatTint(1.f);
             // Metal inside hdpbrtlayered (patch 18), mixed by metalness:
             // OpenPBR F82-tint, standard_surface artistic IOR. Other shaders
@@ -1352,6 +1413,13 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
             // i.e. no Fresnel reflection): a plain Lambertian "diffuse".
             bool noSpecular = false;
             const char *baseIn = nullptr, *roughIn = nullptr, *opacityIn = nullptr;
+            // Inputs that may vary (images, primvars): pbrt takes textures for
+            // these; formulas that combine them with others (coat roughening
+            // the specular, darkening, IOR) use their constant values.
+            const char *baseWIn = nullptr, *metalIn = nullptr, *specWIn = nullptr,
+                       *specColorIn = nullptr, *coatIn = nullptr, *coatColorIn = nullptr,
+                       *coatRoughIn = nullptr, *sheenIn = nullptr, *sheenColorIn = nullptr,
+                       *sheenRoughIn = nullptr, *diffRoughIn = nullptr, *transColorIn = nullptr;
             if (type == "UsdPreviewSurface") {
                 base = _Color(*surf, "diffuseColor", GfVec3f(0.18f));
                 metallic = _Float(*surf, "metallic", 0);
@@ -1360,6 +1428,17 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 opacity = _Float(*surf, "opacity", 1);
                 emission = _Color(*surf, "emissiveColor", GfVec3f(0));
                 baseIn = "diffuseColor"; roughIn = "roughness"; opacityIn = "opacity";
+                metalIn = "metallic"; coatIn = "clearcoat"; coatRoughIn = "clearcoatRoughness";
+                // Clearcoat: a white GGX coat of IOR 1.5 (UsdPreviewSurface spec).
+                coatW = std::min(std::max(_Float(*surf, "clearcoat", 0), 0.f), 1.f);
+                coatRough = _Float(*surf, "clearcoatRoughness", 0.01f);
+                coatIor = 1.5f;
+                // Metal: the metal lobe of hdpbrtlayered with F0 = diffuseColor
+                // and a white edge (the spec's Schlick Fresnel), constant or
+                // varying metallic alike.
+                layeredMetal = metalF82 = true;
+                metalBase = base;
+                metalEdge = GfVec3f(1.f);
                 const bool specWorkflow = _Float(*surf, "useSpecularWorkflow", 0) > 0.5f;
                 noSpecular = (specWorkflow &&
                               _Color(*surf, "specularColor", GfVec3f(0)) == GfVec3f(0)) ||
@@ -1382,6 +1461,11 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 opacity = _Float(*surf, "opacity", 1);
                 emission = _Color(*surf, "emission_color", GfVec3f(1)) * _Float(*surf, "emission", 0);
                 baseIn = "base_color"; roughIn = "specular_roughness"; opacityIn = "opacity";
+                baseWIn = "base"; metalIn = "metalness"; specWIn = "specular";
+                specColorIn = "specular_color"; coatIn = "coat"; coatColorIn = "coat_color";
+                coatRoughIn = "coat_roughness"; sheenIn = "sheen"; sheenColorIn = "sheen_color";
+                sheenRoughIn = "sheen_roughness"; diffRoughIn = "diffuse_roughness";
+                transColorIn = "transmission_color";
                 sssW = std::min(std::max(_Float(*surf, "subsurface", 0), 0.f), 1.f);
                 sssColor = _Color(*surf, "subsurface_color", GfVec3f(1));
                 sssRadius = _Color(*surf, "subsurface_radius", GfVec3f(1)) *
@@ -1407,7 +1491,7 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 metalBase = _Color(*surf, "base_color", GfVec3f(0.8f)) * _Float(*surf, "base", 1);
                 metalEdge = _Color(*surf, "specular_color", GfVec3f(1)) * _Float(*surf, "specular", 1);
                 coatW = std::min(std::max(_Float(*surf, "coat", 0), 0.f), 1.f);
-                if (coatW > 0) {
+                if (coatW > 0 || surf->inputConnections.count(TfToken("coat"))) {
                     coatRough = _Float(*surf, "coat_roughness", 0.1f);
                     coatIor = _Float(*surf, "coat_IOR", 1.5f);
                     const GfVec3f cc = _Clamp01(_Color(*surf, "coat_color", GfVec3f(1)));
@@ -1418,8 +1502,12 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                     for (int i = 0; i < 3; ++i)
                         base[i] = std::pow(std::max(base[i], 0.f), gamma);
                     // coat_affect_roughness pushes the specular toward rough.
-                    const float mix = std::min(std::max(_Float(*surf, "coat_affect_roughness", 0), 0.f), 1.f) *
-                                      coatW * std::min(std::max(coatRough, 0.f), 1.f);
+                    const float affect =
+                        std::min(std::max(_Float(*surf, "coat_affect_roughness", 0), 0.f), 1.f) *
+                        std::min(std::max(coatRough, 0.f), 1.f);
+                    roughUncoated = rough;
+                    roughCoated = rough * (1 - affect) + affect;
+                    const float mix = affect * coatW;
                     rough = rough * (1 - mix) + mix;
                 }
                 noSpecular = specWeight <= 0.f && _Float(*surf, "coat", 0) <= 0.f;
@@ -1433,6 +1521,11 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 emission = _Color(*surf, "emission_color", GfVec3f(1)) *
                            _Float(*surf, "emission_luminance", 0);
                 baseIn = "base_color"; roughIn = "specular_roughness"; opacityIn = "geometry_opacity";
+                baseWIn = "base_weight"; metalIn = "base_metalness"; specWIn = "specular_weight";
+                specColorIn = "specular_color"; coatIn = "coat_weight"; coatColorIn = "coat_color";
+                coatRoughIn = "coat_roughness"; sheenIn = "fuzz_weight"; sheenColorIn = "fuzz_color";
+                sheenRoughIn = "fuzz_roughness"; diffRoughIn = "base_diffuse_roughness";
+                transColorIn = "transmission_color";
                 sssW = std::min(std::max(_Float(*surf, "subsurface_weight", 0), 0.f), 1.f);
                 sssColor = _Color(*surf, "subsurface_color", GfVec3f(0.8f));
                 {
@@ -1472,7 +1565,7 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 metalScale = std::max(specWeight, 0.f);
                 metalEdge = _Color(*surf, "specular_color", GfVec3f(1)) * std::min(metalScale, 1.f);
                 coatW = std::min(std::max(_Float(*surf, "coat_weight", 0), 0.f), 1.f);
-                if (coatW > 0) {
+                if (coatW > 0 || surf->inputConnections.count(TfToken("coat_weight"))) {
                     // OpenPBR spec: the coat roughens the specular below,
                     // r' = (r^4 + 2 c^4)^(1/4), and the specular's IOR becomes
                     // relative to the coat's, both blended by the coat weight.
@@ -1480,14 +1573,19 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                     coatIor = std::max(_Float(*surf, "coat_ior", 1.6f), 1.f);
                     const float r4 = std::pow(std::max(rough, 0.f), 4.f);
                     const float c4 = std::pow(std::max(coatRough, 0.f), 4.f);
-                    rough = rough * (1 - coatW) + std::pow(std::min(1.f, 2 * c4 + r4), 0.25f) * coatW;
+                    roughUncoated = rough;
+                    roughCoated = std::pow(std::min(1.f, 2 * c4 + r4), 0.25f);
+                    rough = rough * (1 - coatW) + roughCoated * coatW;
                     const float iorS = std::max(ior, 1.f);
-                    ior = iorS * (1 - coatW) + std::max(iorS / coatIor, coatIor / iorS) * coatW;
+                    iorUncoated = iorS;
+                    iorCoated = std::max(iorS / coatIor, coatIor / iorS);
+                    ior = iorS * (1 - coatW) + iorCoated * coatW;
                     // Darkening from light trapped under the coat,
                     // (1 - K) / (1 - E K) blended by weight * coat_darkening:
                     // pbrt evaluates it per shading point from the (textured)
                     // base, the metal F0 and the subsurface share.
-                    coatDark = coatW * std::min(std::max(_Float(*surf, "coat_darkening", 1), 0.f), 1.f);
+                    coatDarkK = std::min(std::max(_Float(*surf, "coat_darkening", 1), 0.f), 1.f);
+                    coatDark = coatW * coatDarkK;
                     const GfVec3f cc = _Clamp01(_Color(*surf, "coat_color", GfVec3f(1)));
                     for (int i = 0; i < 3; ++i)
                         coatTint[i] = 1 - coatW + cc[i] * coatW;
@@ -1516,9 +1614,9 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
             }
             // Coat darkening (OpenPBR): its weight, and the subsurface albedo
             // the walk took out of the diffuse reflectance.
+            // (The darkening weight itself: darkening() below.)
             std::string coatDarkParams;
-            if (coatW > 0 && coatDark > 0) {
-                coatDarkParams = " \"float coatdarkening\" " + TfStringify(coatDark);
+            if (coatDarkK > 0) {
                 if (sssWalk)
                     coatDarkParams += " \"rgb coatdarkeningadd\" " +
                                       HdPbrt_Rgb(_Clamp01(sssColor * sssW));
@@ -1528,9 +1626,47 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
             std::string roughTex = roughIn ? b.Texture(*surf, roughIn, false, nullptr, true) : "";
             std::string opacityTex = opacityIn ? b.Texture(*surf, opacityIn, false) : "";
 
+            // Varying inputs (constants where they don't vary).
+            using Val = _Builder::Val;
+            const float baseWC = baseWIn ? _Float(*surf, baseWIn, 1) : 1.f;
+            const float baseK = sssWalk ? 1 - sssW : 1.f;  // the walk's share
+            const Val vBaseW = b.In(*surf, baseWIn, false, GfVec3f(baseWC));
+            const Val vMetal =
+                b.In(*surf, metalIn, false, GfVec3f(std::min(std::max(metallic, 0.f), 1.f)));
+            const Val vSpecW = b.In(*surf, specWIn, false, GfVec3f(specWeight));
+            const Val vSpecColor = b.In(*surf, specColorIn, true, _Clamp01(specTint));
+            const Val vCoat = b.In(*surf, coatIn, false, GfVec3f(coatW));
+            const Val vCoatColor = b.In(
+                *surf, coatColorIn, true,
+                _Clamp01(coatColorIn ? _Color(*surf, coatColorIn, GfVec3f(1)) : GfVec3f(1)));
+            const Val vCoatRough = b.In(*surf, coatRoughIn, false,
+                                        GfVec3f(std::pow(std::min(std::max(coatRough, 0.f), 1.f), 2.f)),
+                                        true);
+            const Val vSheen = b.In(*surf, sheenIn, false, GfVec3f(std::min(std::max(sheenW, 0.f), 1.f)));
+            const Val vSheenColor = b.In(*surf, sheenColorIn, true, _Clamp01(sheenColor));
+            const Val vSheenRough = b.In(*surf, sheenRoughIn, false,
+                                         GfVec3f(std::min(std::max(sheenRough, 0.f), 1.f)));
+            const Val vDiffRough = b.In(*surf, diffRoughIn, false,
+                                        GfVec3f(std::min(std::max(diffRough, 0.f), 1.f)));
+            const Val vTransColor = b.In(*surf, transColorIn, true, _Clamp01(transColor));
+            // Base color x weight (no subsurface or thin-wall share).
+            Val vBase;
+            if (!baseTex.empty()) {
+                vBase.tex = baseTex;
+                vBase.c = base;
+            } else {
+                const float k = baseWC * baseK;
+                vBase.c = k > 1e-6f ? base / k : base;
+            }
+            vBase = b.Mul(vBase, vBaseW, true, "base");
+            const bool coatOn = coatW > 0 || vCoat.Varies();
+            const bool sheenOn = sheenW > 0 || vSheen.Varies();
+
             HdPbrtMaterialDesc &d = b.desc;
             d.baseColor = base;
             d.baseColorTexture = baseTex;
+            if (vBase.Varies())
+                d.baseColorTexture = b.Mul(vBase, Val{"", GfVec3f(baseK)}, true, "refl").tex;
             d.baseColorFromPrimvar = fromPrimvar;
             d.emission = emission;
             d.opacity = std::min(std::max(opacity, 0.f), 1.f);
@@ -1546,32 +1682,82 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                     if (b.alphaTextures.count(roughTex))
                         other << " \"bool remaproughness\" false";
                 }
+                else if (vCoat.Varies() && roughCoated >= 0) {
+                    // The coat roughens the specular by its (varying) weight:
+                    // GGX alpha blended between uncoated and coated.
+                    const float r0 = std::min(std::max(roughUncoated, 0.f), 1.f);
+                    const float r1 = std::min(std::max(roughCoated, 0.f), 1.f);
+                    other << _Builder::Param(name,
+                                             b.Mix(Val{"", GfVec3f(r0 * r0)}, Val{"", GfVec3f(r1 * r1)},
+                                                   vCoat, false, "coatrough"),
+                                             false)
+                          << " \"bool remaproughness\" false";
+                }
                 else {
                     float r = std::min(std::max(rough, 0.f), 1.f);
                     other << " \"float " << name << "\" " << r * r
                           << " \"bool remaproughness\" false";
                 }
             };
-            if (layeredMetal && metallic > 0 && (metallic >= 0.5f || transmission < 0.5f)) {
+            // Coat: weight, roughness (alpha), IOR, tint lerp(1, color, weight)
+            // (times OpenPBR's darkening, per shading point in pbrt).
+            // The specular IOR blended by a varying coat weight (OpenPBR).
+            auto layeredEta = [&]() -> std::string {
+                if (!vCoat.Varies() || iorCoated <= 0)
+                    return {};
+                return _Builder::Param("hdpbrteta",
+                                       b.Mix(Val{"", GfVec3f(iorUncoated)}, Val{"", GfVec3f(iorCoated)},
+                                             vCoat, false, "eta"),
+                                       false);
+            };
+            // OpenPBR darkening weight = coat weight x coat_darkening.
+            auto darkening = [&]() -> std::string {
+                if (coatDarkK <= 0)
+                    return {};
+                if (vCoat.Varies())
+                    return _Builder::Param(
+                        "coatdarkening", b.Mul(vCoat, Val{"", GfVec3f(coatDarkK)}, false, "dark"),
+                        false);
+                return coatDark > 0 ? " \"float coatdarkening\" " + TfStringify(coatDark)
+                                    : std::string();
+            };
+            auto coatParams = [&]() {
+                const Val tint = (vCoat.Varies() || vCoatColor.Varies())
+                                     ? b.Mix(Val{"", GfVec3f(1.f)}, vCoatColor, vCoat, true, "coattint")
+                                     : Val{"", _Clamp01(coatTint)};
+                return _Builder::Param("coatweight", vCoat, false) +
+                       _Builder::Param("coatroughness", vCoatRough, false) +
+                       " \"float coateta\" " + TfStringify(coatIor) +
+                       _Builder::Param("coattint", tint, true) + darkening() + coatDarkParams;
+            };
+            if (layeredMetal && (metallic > 0 || vMetal.Varies()) &&
+                (metallic >= 0.5f || transmission < 0.5f)) {
                 d.type = "hdpbrtlayered";
                 roughParam("roughness");
-                other << " \"float eta\" " << ior;
+                other << " \"float eta\" " << ior << layeredEta();
                 if (noSpecular || metallic >= 1.f)
                     specWeight = 0;
-                if (std::fabs(specWeight - 1.f) > 1e-6f)
+                if (vSpecW.Varies() && specWeight > 0)
+                    other << _Builder::Param("specularweight", vSpecW, false);
+                else if (std::fabs(specWeight - 1.f) > 1e-6f)
                     other << " \"float specularweight\" " << std::min(std::max(specWeight, 0.f), 1.f);
-                if (specTint != GfVec3f(1.f))
+                if (vSpecColor.Varies())
+                    other << _Builder::Param("speculartint", vSpecColor, true);
+                else if (specTint != GfVec3f(1.f))
                     other << " \"rgb speculartint\" " << HdPbrt_Rgb(_Clamp01(specTint));
-                other << " \"float metalweight\" " << std::min(metallic, 1.f);
+                other << _Builder::Param("metalweight", vMetal, false);
                 if (std::fabs(metalScale - 1.f) > 1e-6f)
                     other << " \"float metalscale\" " << metalScale;
-                if (metalF82 || !baseTex.empty()) {
-                    // F0 = base color (its texture if any), F82 tint = edge.
-                    if (!baseTex.empty())
-                        other << " \"texture metalf0\" " << HdPbrt_Quote(baseTex);
-                    else
-                        other << " \"rgb metalf0\" " << HdPbrt_Rgb(_Clamp01(metalBase));
-                    other << " \"rgb metalf82\" " << HdPbrt_Rgb(_Clamp01(metalEdge));
+                // The edge color: specular color x weight (OpenPBR clamps the
+                // weight to 1 there; pbrt's albedo spectra clamp to [0, 1]).
+                const bool edgeVaries = specColorIn && (vSpecColor.Varies() || vSpecW.Varies());
+                if (metalF82 || vBase.Varies() || edgeVaries) {
+                    // F0 = base color (textured or primvar if so), F82 tint = edge.
+                    const Val f0 = vBase.Varies() ? vBase : Val{"", _Clamp01(metalBase)};
+                    const Val edge = edgeVaries ? b.Mul(vSpecColor, vSpecW, true, "edge")
+                                                : Val{"", _Clamp01(metalEdge)};
+                    other << _Builder::Param("metalf0", f0, true)
+                          << _Builder::Param("metalf82", edge, true);
                 } else {
                     // Artistic IOR (Gulbrandsen 2014): n between
                     // (1+sqrt r)/(1-sqrt r) and (1-r)/(1+r) by edge tint g,
@@ -1589,18 +1775,15 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                     }
                     other << " \"rgb metaleta\" " << HdPbrt_Rgb(n) << " \"rgb metalk\" " << HdPbrt_Rgb(k);
                 }
-                if (sheenW > 0) {
-                    other << " \"float sheenweight\" " << std::min(sheenW, 1.f)
-                          << " \"rgb sheencolor\" " << HdPbrt_Rgb(_Clamp01(sheenColor))
-                          << " \"float sheenroughness\" " << std::min(std::max(sheenRough, 0.f), 1.f);
+                if (sheenOn) {
+                    other << _Builder::Param("sheenweight", vSheen, false)
+                          << _Builder::Param("sheencolor", vSheenColor, true)
+                          << _Builder::Param("sheenroughness", vSheenRough, false);
                     if (sheenOnTop)
                         other << " \"bool sheenontop\" true";
                 }
-                if (coatW > 0)
-                    other << " \"float coatweight\" " << coatW << " \"float coatroughness\" "
-                          << std::pow(std::min(std::max(coatRough, 0.f), 1.f), 2.f)
-                          << " \"float coateta\" " << coatIor
-                          << " \"rgb coattint\" " << HdPbrt_Rgb(_Clamp01(coatTint)) << coatDarkParams;
+                if (coatOn)
+                    other << coatParams();
             } else if (metallic >= 0.5f) {
                 d.type = "conductor";
                 roughParam("roughness");
@@ -1657,26 +1840,25 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                       << " \"float g\" " << std::min(std::max(transAniso, -0.99f), 0.99f) << "\n";
                     d.textures += m.str();
                 }
-                if ((!medium || tintWithMedium) && transColor != GfVec3f(1.f))
+                if ((!medium || tintWithMedium) && vTransColor.Varies())
+                    other << _Builder::Param("transmissiontint", vTransColor, true);
+                else if ((!medium || tintWithMedium) && transColor != GfVec3f(1.f))
                     other << " \"rgb transmissiontint\" " << HdPbrt_Rgb(_Clamp01(transColor));
-            } else if (noSpecular && sheenW <= 0 && coatW <= 0 && !sssWalk &&
+            } else if (noSpecular && !sheenOn && !coatOn && !sssWalk &&
                        !(thinWalled && transmission > 0)) {
                 d.type = "diffuse";
             } else {
                 d.type = "hdpbrtlayered";
                 roughParam("roughness");
-                other << " \"float eta\" " << ior;
+                other << " \"float eta\" " << ior << layeredEta();
                 if (noSpecular)
                     specWeight = 0;
-                if (coatW > 0)
-                    other << " \"float coatweight\" " << coatW << " \"float coatroughness\" "
-                          << std::pow(std::min(std::max(coatRough, 0.f), 1.f), 2.f)
-                          << " \"float coateta\" " << coatIor
-                          << " \"rgb coattint\" " << HdPbrt_Rgb(_Clamp01(coatTint)) << coatDarkParams;
-                if (sheenW > 0) {
-                    other << " \"float sheenweight\" " << std::min(sheenW, 1.f)
-                          << " \"rgb sheencolor\" " << HdPbrt_Rgb(_Clamp01(sheenColor))
-                          << " \"float sheenroughness\" " << std::min(std::max(sheenRough, 0.f), 1.f);
+                if (coatOn)
+                    other << coatParams();
+                if (sheenOn) {
+                    other << _Builder::Param("sheenweight", vSheen, false)
+                          << _Builder::Param("sheencolor", vSheenColor, true)
+                          << _Builder::Param("sheenroughness", vSheenRough, false);
                     if (sheenOnTop)
                         other << " \"bool sheenontop\" true";
                 }
@@ -1685,11 +1867,21 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 if (thinWalled && transmission > 0) {
                     const float t = std::min(transmission, 1.f);
                     d.baseColor *= 1 - t;
-                    other << " \"rgb transmittance\" " << HdPbrt_Rgb(_Clamp01(transColor * t));
+                    if (!d.baseColorTexture.empty())
+                        d.baseColorTexture =
+                            b.Mul(Val{d.baseColorTexture, d.baseColor}, Val{"", GfVec3f(1 - t)},
+                                  true, "thin").tex;
+                    other << _Builder::Param("transmittance",
+                                             b.Mul(vTransColor, Val{"", GfVec3f(t)}, true, "trans"),
+                                             true);
                 }
-                if (std::fabs(specWeight - 1.f) > 1e-6f)
+                if (vSpecW.Varies() && specWeight > 0)
+                    other << _Builder::Param("specularweight", vSpecW, false);
+                else if (std::fabs(specWeight - 1.f) > 1e-6f)
                     other << " \"float specularweight\" " << std::min(std::max(specWeight, 0.f), 1.f);
-                if (specTint != GfVec3f(1.f)) {
+                if (vSpecColor.Varies()) {
+                    other << _Builder::Param("speculartint", vSpecColor, true);
+                } else if (specTint != GfVec3f(1.f)) {
                     GfVec3f t = specTint;
                     for (int i = 0; i < 3; ++i)
                         t[i] = std::min(std::max(t[i], 0.f), 1.f);
@@ -1697,10 +1889,10 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 }
             }
             diffRough = std::min(std::max(diffRough, 0.f), 1.f);
-            if (diffRough > 0 && d.type == "diffuse")
-                other << " \"float roughness\" " << diffRough;
-            else if (diffRough > 0 && d.type == "hdpbrtlayered")
-                other << " \"float diffuseroughness\" " << diffRough;
+            if ((diffRough > 0 || vDiffRough.Varies()) && d.type == "diffuse")
+                other << _Builder::Param("roughness", vDiffRough, false);
+            else if ((diffRough > 0 || vDiffRough.Varies()) && d.type == "hdpbrtlayered")
+                other << _Builder::Param("diffuseroughness", vDiffRough, false);
             if (sssWalk && d.type == "hdpbrtlayered" && d.mediumName.empty()) {
                 other << " \"float subsurface\" " << sssW;
                 d.mediumName = pfx + "_sss";
@@ -1710,6 +1902,38 @@ HdPbrtMaterialDesc HdPbrtMaterial::_Build(VtValue const &res) const
                 other << " \"float filmweight\" " << filmW << " \"float filmthickness\" " << filmNm
                       << " \"float filmeta\" " << filmIor;
             d.otherParams = other.str();
+            // Inputs driven by images or primvars that pbrt takes as constants
+            // here (IOR, thin film, subsurface, emission, transmission weight,
+            // ...): their constant value is used. Warn once per material.
+            {
+                const char *handled[] = {baseIn,      roughIn,      opacityIn,   baseWIn,
+                                         metalIn,     specWIn,      specColorIn, coatIn,
+                                         coatColorIn, coatRoughIn,  sheenIn,     sheenColorIn,
+                                         sheenRoughIn, diffRoughIn, transColorIn};
+                std::vector<std::string> fixed;
+                for (const auto &c : surf->inputConnections) {
+                    bool ok = false;
+                    for (const char *h : handled)
+                        ok = ok || (h && c.first == h);
+                    if (ok || c.first == "normal" || c.second.empty())
+                        continue;
+                    const HdMaterialNode2 *up = b.net.Node(c.second[0].upstreamNode);
+                    if (up && !_IsTextureNode(*up) && !_IsPrimvarNode(*up) &&
+                        (TfStringStartsWith(up->nodeTypeId.GetString(), "ND_convert") ||
+                         TfStringStartsWith(up->nodeTypeId.GetString(), "ND_dot")))
+                        up = b.net.Upstream(*up, TfToken("in"));
+                    if (up && (_IsTextureNode(*up) || _IsPrimvarNode(*up)))
+                        fixed.push_back(c.first.GetString());
+                }
+                if (!fixed.empty()) {
+                    TF_WARN("hdPbrt: %s: %s vary (images or primvars) but are constant in "
+                            "pbrt's material; using their constant values.",
+                            GetId().GetText(), TfStringJoin(fixed, ", ").c_str());
+                    if (getenv("HDPBRT_DEBUG"))  // (hython drops Tf warnings)
+                        fprintf(stderr, "hdPbrt %s: constant in pbrt, not varied: %s\n",
+                                GetId().GetText(), TfStringJoin(fixed, ", ").c_str());
+                }
+            }
             result = d;
             }  // !mtlxGraph
         }

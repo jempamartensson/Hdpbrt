@@ -82,3 +82,27 @@ for label, x, y, col in json.load(open(sys.argv[3])):
     print('  %-20s value %-18s karma %-22s hdPbrt %-22s ratio %s'
           % (label, np.round(col, 2), pk.round(3), ph.round(3), (ph / np.maximum(pk, 1e-4)).round(2)))
 PY
+
+# Every texturable input from a primvar: equals the same input set as a
+# constant (hdPbrt only). make_inputs_scene.py.
+$HYTHON "$here/make_inputs_scene.py" "$OUT" > "$OUT/make_inputs.log" 2>&1
+for v in a b pva pvb pv; do
+  ( cd "$OUT" && $HYTHON "$here/../typhoon/render_hdpbrt.py" inputs_$v.usda 1:1 "$OUT/hdpbrt" \
+      "pbrt:pixelSamples=$SPP" > hdpbrt_inputs_$v.log 2>&1 )
+done
+python3 - "$OUT" <<'PY'
+import json, sys, numpy as np
+def pfm(p):
+    with open(p, 'rb') as f:
+        f.readline(); w, h = map(int, f.readline().split()); f.readline()
+        return np.frombuffer(f.read(), dtype='<f4').reshape(h, w, 3)[::-1]
+I = {v: pfm('%s/hdpbrt/inputs_%s-hdpbrt.0001.pfm' % (sys.argv[1], v)) for v in ('a', 'b', 'pva', 'pvb', 'pv')}
+pt = lambda im, xy: im[xy[1] - 3:xy[1] + 4, xy[0] - 3:xy[0] + 4].mean((0, 1))
+print('inputs: primvar at A / constant A, at B / constant B (both patches), split sphere top / A, bottom / B:')
+for label, u, d in json.load(open('%s/inputs_patches.json' % sys.argv[1])):
+    ra = max(np.abs(pt(I['pva'], x) / pt(I['a'], x) - 1).max() for x in (u, d))
+    rb = max(np.abs(pt(I['pvb'], x) / pt(I['b'], x) - 1).max() for x in (u, d))
+    print('  %-30s |pvA/A - 1| %.3f  |pvB/B - 1| %.3f   split %s %s'
+          % (label, ra, rb, (pt(I['pv'], u) / pt(I['a'], u)).round(3),
+             (pt(I['pv'], d) / pt(I['b'], d)).round(3)))
+PY

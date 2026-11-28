@@ -1,7 +1,7 @@
 From 7da480bb5ead8dab736d6fba589db612fceedf70 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Mon, 23 Nov 2026 18:21:26 +0100
-Subject: [PATCH 18/44] hdpbrtlayered: metal lobe (F82-tint or conductor eta/k,
+Subject: [PATCH 18/45] hdpbrtlayered: metal lobe (F82-tint or conductor eta/k,
  mixed by metalweight, under coat/sheen) (for hdPbrt)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

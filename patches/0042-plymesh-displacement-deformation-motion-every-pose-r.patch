@@ -1,7 +1,7 @@
 From 3e7449f7d5679e9d4f1a63698fd1d9f4e3b63c99 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Fri, 27 Nov 2026 08:47:54 +0100
-Subject: [PATCH 42/44] plymesh displacement: deformation motion (every pose
+Subject: [PATCH 42/45] plymesh displacement: deformation motion (every pose
  refined like the first and displaced) and per-vertex primvars for
  displacement graphs (for hdPbrt)
 

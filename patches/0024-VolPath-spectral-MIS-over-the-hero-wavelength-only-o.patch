@@ -1,7 +1,7 @@
 From 4111b8d95af1cdd84abad41ae54baeff5ca8ccc8 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Mon, 23 Nov 2026 19:18:08 +0100
-Subject: [PATCH 24/44] VolPath: spectral MIS over the hero wavelength only
+Subject: [PATCH 24/45] VolPath: spectral MIS over the hero wavelength only
  once secondaries are terminated (for hdPbrt)
 
 A dispersive eta terminates the secondary wavelengths; averaging all four

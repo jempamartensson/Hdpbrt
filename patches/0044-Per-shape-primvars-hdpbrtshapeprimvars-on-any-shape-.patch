@@ -1,7 +1,7 @@
 From dacb5a98803874830c4c7d63a9983e694ceaebfd Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sat, 28 Nov 2026 09:33:24 +0100
-Subject: [PATCH 44/44] Per-shape primvars ("hdpbrtshapeprimvars") on any shape
+Subject: [PATCH 44/45] Per-shape primvars ("hdpbrtshapeprimvars") on any shape
  for hdpbrtprimvar textures: constant values, or curve values at segment
  boundaries interpolated by the hit's segment and u (for hdPbrt)
 
