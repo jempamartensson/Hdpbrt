@@ -1,0 +1,360 @@
+From f2f3ed52246d2be9929082a95867bbf1132543af Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sat, 28 Nov 2026 11:06:23 +0100
+Subject: [PATCH 48/48] Per-instance primvars: ObjectInstance Attribute "shape"
+ "string hdpbrtinstanceprimvars" / "float hdpbrtinstanceprimvarvalues";
+ instance primitives (and instanced emitters) put them in the hit's primvar
+ lookup ahead of the prototype's (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/cpu/primitive.cpp    | 12 ++++++
+ src/pbrt/cpu/primitive.h      | 21 ++++++++++
+ src/pbrt/lights.cpp           |  2 +
+ src/pbrt/lights.h             |  3 ++
+ src/pbrt/scene.cpp            | 76 ++++++++++++++++++++++++++++++++---
+ src/pbrt/scene.h              |  8 ++++
+ src/pbrt/util/hdpbrtprimvar.h | 15 +++++++
+ 7 files changed, 131 insertions(+), 6 deletions(-)
+
+diff --git a/src/pbrt/cpu/primitive.cpp b/src/pbrt/cpu/primitive.cpp
+index 85964d5..1756ca7 100644
+--- a/src/pbrt/cpu/primitive.cpp
++++ b/src/pbrt/cpu/primitive.cpp
+@@ -159,6 +159,10 @@ pstd::optional<ShapeIntersection> TransformedPrimitive::Intersect(const Ray &r,
+         si->intr.hdpbrtInstanceId = hdpbrtInstanceId;
+     si->intr.hdpbrtLinkMask |= hdpbrtInstanceLinks;
+     HdPbrtInstanceEmitter(si->intr, hdpbrtLights);
++    if (hdpbrtInstPvCount > 0) {
++        si->intr.hdpbrtPrimvars.inst = hdpbrtInstPv;
++        si->intr.hdpbrtPrimvars.instCount = hdpbrtInstPvCount;
++    }
+     return si;
+ }
+ 
+@@ -191,6 +195,10 @@ pstd::optional<ShapeIntersection> AnimatedPrimitive::Intersect(const Ray &r,
+         si->intr.hdpbrtInstanceId = hdpbrtInstanceId;
+     si->intr.hdpbrtLinkMask |= hdpbrtInstanceLinks;
+     HdPbrtInstanceEmitter(si->intr, hdpbrtLights);
++    if (hdpbrtInstPvCount > 0) {
++        si->intr.hdpbrtPrimvars.inst = hdpbrtInstPv;
++        si->intr.hdpbrtPrimvars.instCount = hdpbrtInstPvCount;
++    }
+     return si;
+ }
+ 
+@@ -238,6 +246,10 @@ pstd::optional<ShapeIntersection> MotionPrimitive::Intersect(const Ray &r,
+         si->intr.hdpbrtInstanceId = hdpbrtInstanceId;
+     si->intr.hdpbrtLinkMask |= hdpbrtInstanceLinks;
+     HdPbrtInstanceEmitter(si->intr, hdpbrtLights);
++    if (hdpbrtInstPvCount > 0) {
++        si->intr.hdpbrtPrimvars.inst = hdpbrtInstPv;
++        si->intr.hdpbrtPrimvars.instCount = hdpbrtInstPvCount;
++    }
+     return si;
+ }
+ 
+diff --git a/src/pbrt/cpu/primitive.h b/src/pbrt/cpu/primitive.h
+index f31d9db..84fad48 100644
+--- a/src/pbrt/cpu/primitive.h
++++ b/src/pbrt/cpu/primitive.h
+@@ -118,6 +118,11 @@ class TransformedPrimitive {
+     // hdPbrt (patch 47): this instance's lights, one per emissive shape of
+     // its definition (hits on prototype emitters use them).
+     void SetHdPbrtLights(const Light *l) { hdpbrtLights = l; }
++    // hdPbrt (patch 48): this instance's primvars (override the prototype's).
++    void SetHdPbrtInstancePrimvars(const HdPbrtMeshPrimvar *pv, int n) {
++        hdpbrtInstPv = pv;
++        hdpbrtInstPvCount = n;
++    }
+ 
+   private:
+     // TransformedPrimitive Private Members
+@@ -126,6 +131,8 @@ class TransformedPrimitive {
+     int hdpbrtInstanceId = -1;
+     uint64_t hdpbrtInstanceLinks = 0;
+     const Light *hdpbrtLights = nullptr;
++    const HdPbrtMeshPrimvar *hdpbrtInstPv = nullptr;
++    int hdpbrtInstPvCount = 0;
+ };
+ 
+ // AnimatedPrimitive Definition
+@@ -146,6 +153,11 @@ class AnimatedPrimitive {
+     // hdPbrt (patch 47): this instance's lights, one per emissive shape of
+     // its definition (hits on prototype emitters use them).
+     void SetHdPbrtLights(const Light *l) { hdpbrtLights = l; }
++    // hdPbrt (patch 48): this instance's primvars (override the prototype's).
++    void SetHdPbrtInstancePrimvars(const HdPbrtMeshPrimvar *pv, int n) {
++        hdpbrtInstPv = pv;
++        hdpbrtInstPvCount = n;
++    }
+ 
+   private:
+     // AnimatedPrimitive Private Members
+@@ -154,6 +166,8 @@ class AnimatedPrimitive {
+     int hdpbrtInstanceId = -1;
+     uint64_t hdpbrtInstanceLinks = 0;
+     const Light *hdpbrtLights = nullptr;
++    const HdPbrtMeshPrimvar *hdpbrtInstPv = nullptr;
++    int hdpbrtInstPvCount = 0;
+ };
+ 
+ // hdPbrt: MotionPrimitive Definition
+@@ -175,6 +189,11 @@ class MotionPrimitive {
+     // hdPbrt (patch 47): this instance's lights, one per emissive shape of
+     // its definition (hits on prototype emitters use them).
+     void SetHdPbrtLights(const Light *l) { hdpbrtLights = l; }
++    // hdPbrt (patch 48): this instance's primvars (override the prototype's).
++    void SetHdPbrtInstancePrimvars(const HdPbrtMeshPrimvar *pv, int n) {
++        hdpbrtInstPv = pv;
++        hdpbrtInstPvCount = n;
++    }
+ 
+   private:
+     const AnimatedTransform &Segment(Float time) const;
+@@ -185,6 +204,8 @@ class MotionPrimitive {
+     int hdpbrtInstanceId = -1;
+     uint64_t hdpbrtInstanceLinks = 0;
+     const Light *hdpbrtLights = nullptr;
++    const HdPbrtMeshPrimvar *hdpbrtInstPv = nullptr;
++    int hdpbrtInstPvCount = 0;
+ };
+ 
+ }  // namespace pbrt
+diff --git a/src/pbrt/lights.cpp b/src/pbrt/lights.cpp
+index 6941d9d..35bee65 100644
+--- a/src/pbrt/lights.cpp
++++ b/src/pbrt/lights.cpp
+@@ -817,6 +817,8 @@ PBRT_CPU_GPU pstd::optional<LightLiSample> DiffuseAreaLight::SampleLi(LightSampl
+             tl->shape.Sample(Point2f(std::min<Float>(ur, OneMinusEpsilon), u[1]));
+         if (!ss || pmf == 0)
+             return {};
++        ss->hdpbrtPrimvars.inst = hdpbrtInstPv;
++        ss->hdpbrtPrimvars.instCount = hdpbrtInstPvCount;
+         const Transform t = hdpbrtXform->At(ctx.time);
+         const Point3fi pi = t(ss->intr.pi);
+         const Normal3f nt = t(ss->intr.n);
+diff --git a/src/pbrt/lights.h b/src/pbrt/lights.h
+index cf3bfd3..2831a77 100644
+--- a/src/pbrt/lights.h
++++ b/src/pbrt/lights.h
+@@ -655,6 +655,9 @@ class DiffuseAreaLight : public LightBase {
+     // Mesh mode (an instance's light for one emissive shape).
+     const HdPbrtMeshEmitter *hdpbrtMesh = nullptr;
+     const HdPbrtLightXform *hdpbrtXform = nullptr;
++    // The instance's primvars (patch 48), for its emission texture.
++    const HdPbrtMeshPrimvar *hdpbrtInstPv = nullptr;
++    int hdpbrtInstPvCount = 0;
+     void SetHdPbrtMesh(const HdPbrtMeshEmitter *mesh, const HdPbrtLightXform *xform) {
+         hdpbrtMesh = mesh;
+         hdpbrtXform = xform;
+diff --git a/src/pbrt/scene.cpp b/src/pbrt/scene.cpp
+index 545c3ef..5561d6c 100644
+--- a/src/pbrt/scene.cpp
++++ b/src/pbrt/scene.cpp
+@@ -447,6 +447,44 @@ void BasicSceneBuilder::ObjectInstance(const std::string &origName, FileLoc loc)
+             p->lookedUp = true;
+         }
+ 
++    // hdPbrt: per-instance primvars (patch 48).
++    std::vector<std::string> hdpbrtPvNames;
++    std::vector<int> hdpbrtPvWidths;
++    std::vector<Float> hdpbrtPvValues;
++    {
++        const ParsedParameter *names = nullptr, *values = nullptr;
++        for (const ParsedParameter *p : graphicsState.shapeAttributes) {
++            if (p->name == "hdpbrtinstanceprimvars" && p->type == "string")
++                names = p;
++            else if (p->name == "hdpbrtinstanceprimvarvalues" && p->type == "float")
++                values = p;
++        }
++        if (names && values) {
++            names->lookedUp = values->lookedUp = true;
++            size_t need = 0;
++            for (size_t i = 0; i + 1 < names->strings.size(); i += 2) {
++                const int w = std::max(1, std::atoi(names->strings[i + 1].c_str()));
++                hdpbrtPvNames.push_back(names->strings[i]);
++                hdpbrtPvWidths.push_back(w);
++                need += w;
++            }
++            if (values->floats.size() < need) {
++                Warning(&loc, "hdpbrtinstanceprimvarvalues: need %d values; ignored.",
++                        int(need));
++                hdpbrtPvNames.clear();
++                hdpbrtPvWidths.clear();
++            } else
++                hdpbrtPvValues.assign(values->floats.begin(), values->floats.begin() + need);
++        }
++    }
++    auto hdpbrtTag = [&](InstanceSceneEntity &e) {
++        e.hdpbrtInstanceId = hdpbrtInstanceId;
++        e.hdpbrtInstanceLinks = hdpbrtInstanceLinks;
++        e.hdpbrtPvNames = hdpbrtPvNames;
++        e.hdpbrtPvWidths = hdpbrtPvWidths;
++        e.hdpbrtPvValues = hdpbrtPvValues;
++    };
++
+     // hdPbrt: N transform keys, Attribute "shape" "float hdpbrtmotionxforms"
+     // [16 * N] (world from instance, like Transform) "float hdpbrtmotiontimes" [N].
+     {
+@@ -478,8 +516,7 @@ void BasicSceneBuilder::ObjectInstance(const std::string &origName, FileLoc loc)
+                 instanceUses.push_back(InstanceSceneEntity(name, loc, (const class Transform *)nullptr));
+                 instanceUses.back().renderFromInstanceKeys = keys;
+                 instanceUses.back().keyTimes = std::move(times);
+-                instanceUses.back().hdpbrtInstanceId = hdpbrtInstanceId;
+-                instanceUses.back().hdpbrtInstanceLinks = hdpbrtInstanceLinks;
++                hdpbrtTag(instanceUses.back());
+                 return;
+             }
+         }
+@@ -496,8 +533,7 @@ void BasicSceneBuilder::ObjectInstance(const std::string &origName, FileLoc loc)
+         if (animatedRenderFromInstance.IsAnimated()) {
+             instanceUses.push_back(
+                 InstanceSceneEntity(name, loc, animatedRenderFromInstance));
+-            instanceUses.back().hdpbrtInstanceId = hdpbrtInstanceId;
+-            instanceUses.back().hdpbrtInstanceLinks = hdpbrtInstanceLinks;
++            hdpbrtTag(instanceUses.back());
+             return;
+         }
+     }
+@@ -505,8 +541,7 @@ void BasicSceneBuilder::ObjectInstance(const std::string &origName, FileLoc loc)
+     const class Transform *renderFromInstance =
+         transformCache.Lookup(RenderFromObject(0) * worldFromRender);
+     instanceUses.push_back(InstanceSceneEntity(name, loc, renderFromInstance));
+-    instanceUses.back().hdpbrtInstanceId = hdpbrtInstanceId;
+-    instanceUses.back().hdpbrtInstanceLinks = hdpbrtInstanceLinks;
++    hdpbrtTag(instanceUses.back());
+ }
+ 
+ void BasicSceneBuilder::EndOfFiles() {
+@@ -1523,6 +1558,27 @@ std::vector<Light> BasicScene::CreateLights(
+             if (!slots.empty())
+                 definitionEmitters[def.first] = std::move(slots);
+         }
++        // Per-instance primvars (patch 48), for the instances' hits and lights.
++        hdpbrtInstancePrimvars.assign(instances.size(), {nullptr, 0});
++        for (size_t i = 0; i < instances.size(); ++i) {
++            const InstanceSceneEntity &inst = instances[i];
++            const size_t n = inst.hdpbrtPvNames.size();
++            if (n == 0)
++                continue;
++            HdPbrtMeshPrimvar *pv = alloc.allocate_object<HdPbrtMeshPrimvar>(n);
++            size_t off = 0;
++            for (size_t j = 0; j < n; ++j) {
++                const int w = inst.hdpbrtPvWidths[j];
++                Float *d = alloc.allocate_object<Float>(w);
++                for (int k = 0; k < w; ++k)
++                    d[k] = inst.hdpbrtPvValues[off + k];
++                off += w;
++                pv[j].id = HdPbrtPrimvarId(inst.hdpbrtPvNames[j]);
++                pv[j].width = w;
++                pv[j].data = d;
++            }
++            hdpbrtInstancePrimvars[i] = {pv, int(n)};
++        }
+         hdpbrtInstanceLights.assign(instances.size(), nullptr);
+         size_t nInstanceLights = 0;
+         for (size_t i = 0; i < instances.size(); ++i) {
+@@ -1549,6 +1605,8 @@ std::vector<Light> BasicScene::CreateLights(
+                 DiffuseAreaLight *l =
+                     alloc.new_object<DiffuseAreaLight>(*it->second[j]->lights[0]);
+                 l->SetHdPbrtMesh(it->second[j], x);
++                l->hdpbrtInstPv = hdpbrtInstancePrimvars[i].first;
++                l->hdpbrtInstPvCount = hdpbrtInstancePrimvars[i].second;
+                 arr[j] = l;
+                 lights.push_back(l);
+                 ++nInstanceLights;
+@@ -1814,6 +1872,9 @@ Primitive BasicScene::CreateAggregate(
+         const Light *instLights = instIndex < hdpbrtInstanceLights.size()
+                                       ? hdpbrtInstanceLights[instIndex]
+                                       : nullptr;
++        const std::pair<const HdPbrtMeshPrimvar *, int> instPv =
++            instIndex < hdpbrtInstancePrimvars.size() ? hdpbrtInstancePrimvars[instIndex]
++                                                      : std::make_pair(nullptr, 0);
+         auto iter = instanceDefinitions.find(inst.name);
+         if (iter == instanceDefinitions.end())
+             ErrorExit(&inst.loc, "%s: object instance not defined", inst.name);
+@@ -1828,6 +1889,7 @@ Primitive BasicScene::CreateAggregate(
+             mp->SetHdPbrtInstanceId(inst.hdpbrtInstanceId);
+             mp->SetHdPbrtInstanceLinks(inst.hdpbrtInstanceLinks);
+             mp->SetHdPbrtLights(instLights);
++            mp->SetHdPbrtInstancePrimvars(instPv.first, instPv.second);
+             primitives.push_back(mp);
+             delete inst.renderFromInstanceKeys;
+         } else if (inst.renderFromInstance) {
+@@ -1836,6 +1898,7 @@ Primitive BasicScene::CreateAggregate(
+             tp->SetHdPbrtInstanceId(inst.hdpbrtInstanceId);
+             tp->SetHdPbrtInstanceLinks(inst.hdpbrtInstanceLinks);
+             tp->SetHdPbrtLights(instLights);
++            tp->SetHdPbrtInstancePrimvars(instPv.first, instPv.second);
+             primitives.push_back(tp);
+         } else {
+             AnimatedPrimitive *ap =
+@@ -1843,6 +1906,7 @@ Primitive BasicScene::CreateAggregate(
+             ap->SetHdPbrtInstanceId(inst.hdpbrtInstanceId);
+             ap->SetHdPbrtInstanceLinks(inst.hdpbrtInstanceLinks);
+             ap->SetHdPbrtLights(instLights);
++            ap->SetHdPbrtInstancePrimvars(instPv.first, instPv.second);
+             primitives.push_back(ap);
+             delete inst.renderFromInstanceAnim;
+         }
+diff --git a/src/pbrt/scene.h b/src/pbrt/scene.h
+index 91829c9..4e2f3eb 100644
+--- a/src/pbrt/scene.h
++++ b/src/pbrt/scene.h
+@@ -230,6 +230,12 @@ struct InstanceSceneEntity {
+     // hdpbrtmotionxforms" / "hdpbrtmotiontimes"); overrides the others.
+     std::vector<Transform> *renderFromInstanceKeys = nullptr;
+     std::vector<Float> keyTimes;
++    // hdPbrt: per-instance primvars (Attribute "shape" "string
++    // hdpbrtinstanceprimvars" [name width ...] "float
++    // hdpbrtinstanceprimvarvalues" [...], one value each).
++    std::vector<std::string> hdpbrtPvNames;
++    std::vector<int> hdpbrtPvWidths;
++    std::vector<Float> hdpbrtPvValues;
+ };
+ 
+ // MaxTransforms Definition
+@@ -347,6 +353,8 @@ class BasicScene {
+     // emissive shape of its definition (or null).
+     std::map<InternedString, std::map<int, pstd::vector<Light> *>> hdpbrtDefinitionLights;
+     std::vector<const Light *> hdpbrtInstanceLights;
++    // hdPbrt (patch 48): per instance, its primvars (array, count).
++    std::vector<std::pair<const HdPbrtMeshPrimvar *, int>> hdpbrtInstancePrimvars;
+     std::map<InternedString, InstanceDefinitionSceneEntity *> instanceDefinitions;
+ 
+   private:
+diff --git a/src/pbrt/util/hdpbrtprimvar.h b/src/pbrt/util/hdpbrtprimvar.h
+index 0fd0d27..2a42d11 100644
+--- a/src/pbrt/util/hdpbrtprimvar.h
++++ b/src/pbrt/util/hdpbrtprimvar.h
+@@ -27,11 +27,26 @@ struct HdPbrtPrimvarHit {
+     int count = 0;
+     int v[3] = {0, 0, 0};
+     Float b[3] = {0, 0, 0};
++    // The object instance's own primvars (one value each), which override
++    // the shape's (USD: instance primvars win over the prototype's).
++    const HdPbrtMeshPrimvar *inst = nullptr;
++    int instCount = 0;
+ 
+     // The interpolated value of primvar `id` (up to `width` components into
+     // `out`; missing ones keep their value). False when the mesh lacks it.
+     PBRT_CPU_GPU
+     bool Lookup(int id, int width, Float *out) const {
++        for (int i = 0; i < instCount; ++i) {
++            const HdPbrtMeshPrimvar &pv = inst[i];
++            if (pv.id != id)
++                continue;
++            const int w = width < pv.width ? width : pv.width;
++            for (int k = 0; k < w; ++k)
++                out[k] = pv.data[k];
++            for (int k = w; k < width && pv.width == 1; ++k)
++                out[k] = out[0];
++            return true;
++        }
+         for (int i = 0; i < count; ++i) {
+             const HdPbrtMeshPrimvar &pv = primvars[i];
+             if (pv.id != id)
+-- 
+2.43.0
+

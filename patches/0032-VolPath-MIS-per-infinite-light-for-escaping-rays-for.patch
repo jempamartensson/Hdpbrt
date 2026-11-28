@@ -1,7 +1,7 @@
 From bb598af7734538ac3a65aa23f71894c094553051 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Wed, 25 Nov 2026 07:54:29 +0100
-Subject: [PATCH 32/47] VolPath: MIS per infinite light for escaping rays (for
+Subject: [PATCH 32/48] VolPath: MIS per infinite light for escaping rays (for
  hdPbrt)
 
 The escaped-ray loop multiplied r_l by each infinite light's pdf in place,

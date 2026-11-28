@@ -1,7 +1,7 @@
 From d6058365f9672a61682c4bfd2e2e1b9c24af5568 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sun, 22 Nov 2026 18:21:06 +0100
-Subject: [PATCH 05/47] Deformation motion blur for triangle meshes (for
+Subject: [PATCH 05/48] Deformation motion blur for triangle meshes (for
  hdPbrt)
 
 TriangleMesh can hold a second set of vertex positions (and normals) at the end of a

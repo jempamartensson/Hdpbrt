@@ -1,7 +1,7 @@
 From b080373c2efcd9b03bacd03ee0ae707ab45773fb Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sat, 28 Nov 2026 10:25:45 +0100
-Subject: [PATCH 46/47] DiffuseAreaLight emission texture ("string
+Subject: [PATCH 46/48] DiffuseAreaLight emission texture ("string
  hdpbrtltexture", illuminant spectrum texture evaluated with the hit's or the
  sampled point's mesh primvars and uv); power estimated from samples (for
  hdPbrt)

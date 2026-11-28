@@ -100,7 +100,7 @@ HdPbrtPrimvar HdPbrt_FindPrimvar(HdSceneDelegate *sd, SdfPath const &id,
 
 // A primvar value as `width` floats per element (fewer components are
 // broadcast from one, else padded with zeros).
-static bool _FlattenPrimvar(const VtValue &v, int width, std::vector<float> *out)
+bool HdPbrt_FlattenPrimvar(const VtValue &v, int width, std::vector<float> *out)
 {
     out->clear();
     auto put = [&](const float *c, int n) {
@@ -157,7 +157,7 @@ bool HdPbrt_FetchPrimvar(HdSceneDelegate *sd, SdfPath const &id, std::string con
     }
     if (*interp == HdInterpolationCount)
         return false;
-    if (!_FlattenPrimvar(sd->Get(id, token), width, vals)) {
+    if (!HdPbrt_FlattenPrimvar(sd->Get(id, token), width, vals)) {
         if (unsupported)
             *unsupported = true;
         return false;
@@ -431,8 +431,10 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
         xf[k] = HdPbrt_XformAt(_xform, xTimes[k]);
     std::vector<VtMatrix4dArray> inst;
     std::vector<VtArray<TfToken>> instCats;  // light linking, per instance
+    HdPbrtInstancer *instancer = nullptr;      // (per-instance primvars below)
     if (_instanced) {
         if (auto *pi = static_cast<HdPbrtInstancer *>(index.GetInstancer(prim.GetInstancerId()))) {
+            instancer = pi;
             for (size_t k = 0; k < nx; ++k)
                 inst.push_back(pi->ComputeInstanceTransforms(prim.GetId(), xTimes[k]));
             instCats = pi->ComputeInstanceCategories(prim.GetId());
@@ -485,6 +487,47 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
             _shapePv = _ShapePrimvars(pvs, &found);
         if (varyingCd && found.count("displayColor"))
             haveCd = true;
+    }
+    // Per-instance primvars (pbrt patch 48): the instancer's values of the
+    // primvars the material reads, written on each ObjectInstance; they win
+    // over the prototype's. displayColor on the base color through the
+    // shared texture; instances without one keep the prototype's color.
+    struct InstPv {
+        std::string name;
+        int width;
+        std::vector<float> values;
+        std::vector<char> has;
+    };
+    std::vector<InstPv> instPvs;
+    const bool protoCdVaries = haveCd;  // the prototype's own varying displayColor
+    if (instancer) {
+        PrimvarList pvs = mat.surfacePrimvars;
+        const bool cdBase = mat.baseColorFromPrimvar && mat.baseColorTexture.empty();
+        if (cdBase)
+            pvs.push_back({"displayColor", 3});
+        for (const auto &pv : pvs) {
+            InstPv ip{pv.first, pv.second, {}, {}};
+            if (!instancer->ComputeInstancePrimvar(prim.GetId(), pv.first, pv.second, &ip.values,
+                                                   &ip.has) ||
+                ip.has.size() != inst[0].size())
+                continue;
+            if (cdBase && pv.first == "displayColor") {
+                haveCd = true;
+                // Without a per-vertex displayColor on the prototype,
+                // instances lacking one get its constant (else the texture's
+                // default would show).
+                if (!protoCdVaries) {
+                    const GfVec3f c = _hasDisplayColor ? _displayColor : mat.baseColor;
+                    for (size_t i = 0; i < ip.has.size(); ++i)
+                        if (!ip.has[i]) {
+                            for (int k = 0; k < 3; ++k)
+                                ip.values[i * 3 + k] = c[k];
+                            ip.has[i] = 1;
+                        }
+                }
+            }
+            instPvs.push_back(std::move(ip));
+        }
     }
     std::string displayColorTex;
     if (haveCd) {
@@ -657,6 +700,20 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
                 _delegate->LinkParam(i < instCats.size() ? instCats[i] : VtArray<TfToken>());
             if (!links.empty())
                 os << " Attribute \"shape\"" << links;
+            // Per-instance primvars (pbrt patch 48).
+            {
+                std::ostringstream names, vals;
+                for (const InstPv &ip : instPvs) {
+                    if (!ip.has[i])
+                        continue;
+                    names << " " << HdPbrt_Quote(ip.name) << " \"" << ip.width << "\"";
+                    for (int k = 0; k < ip.width; ++k)
+                        vals << " " << ip.values[i * ip.width + k];
+                }
+                if (!names.str().empty())
+                    os << " Attribute \"shape\" \"string hdpbrtinstanceprimvars\" [" << names.str()
+                       << " ] \"float hdpbrtinstanceprimvarvalues\" [" << vals.str() << " ]";
+            }
             os << " ObjectInstance " << HdPbrt_Quote(name) << " AttributeEnd\n";
         }
         ctx.numInstances += inst[0].size();

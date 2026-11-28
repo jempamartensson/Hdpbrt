@@ -1,7 +1,7 @@
 From 120039420fa811bc9483e593f8c72c6db3908fd2 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Mon, 23 Nov 2026 06:48:51 +0100
-Subject: [PATCH 12/47] MaterialX-style layered material "hdpbrtlayered": GGX
+Subject: [PATCH 12/48] MaterialX-style layered material "hdpbrtlayered": GGX
  dielectric specular over diffuse scaled by 1 - E_spec(wo) (for hdPbrt)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

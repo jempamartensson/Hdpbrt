@@ -198,6 +198,72 @@ VtMatrix4dArray HdPbrtInstancer::ComputeInstanceTransforms(SdfPath const &protot
     return result;
 }
 
+bool HdPbrtInstancer::ComputeInstancePrimvar(SdfPath const &prototypeId,
+                                             std::string const &name, int width,
+                                             std::vector<float> *values, std::vector<char> *has)
+{
+    size_t n = 0;
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!_visible)
+            return false;
+        auto it = _indices.find(prototypeId);
+        if (it == _indices.end())
+            return false;
+        const VtIntArray &indices = it->second;
+        n = indices.size();
+        values->assign(n * width, 0.f);
+        has->assign(n, 0);
+        auto pv = _primvars.find(TfToken(name));
+        if (pv == _primvars.end() && name == "Cd")
+            pv = _primvars.find(HdTokens->displayColor);
+        std::vector<float> flat;
+        if (pv != _primvars.end() && HdPbrt_FlattenPrimvar(_ValueAt(pv->second, 0.f), width, &flat)) {
+            const size_t count = flat.size() / width;
+            for (size_t i = 0; i < n; ++i) {
+                const int e = indices[i];
+                if (e < 0 || size_t(e) >= count)
+                    continue;
+                std::copy(flat.begin() + size_t(e) * width, flat.begin() + size_t(e + 1) * width,
+                          values->begin() + i * width);
+                (*has)[i] = 1;
+                found = true;
+            }
+        }
+    }
+    if (GetParentId().IsEmpty())
+        return found;
+    HdInstancer *parent = GetDelegate()->GetRenderIndex().GetInstancer(GetParentId());
+    if (!parent)
+        return found;
+    std::vector<float> pvals;
+    std::vector<char> phas;
+    const bool pfound = static_cast<HdPbrtInstancer *>(parent)->ComputeInstancePrimvar(
+        GetId(), name, width, &pvals, &phas);
+    const size_t np = phas.size();
+    if (np == 0)
+        return found;
+    std::vector<float> rv(np * n * width, 0.f);
+    std::vector<char> rh(np * n, 0);
+    for (size_t i = 0; i < np; ++i)
+        for (size_t j = 0; j < n; ++j) {
+            const size_t r = i * n + j;
+            if ((*has)[j]) {
+                std::copy(values->begin() + j * width, values->begin() + (j + 1) * width,
+                          rv.begin() + r * width);
+                rh[r] = 1;
+            } else if (phas[i]) {
+                std::copy(pvals.begin() + i * width, pvals.begin() + (i + 1) * width,
+                          rv.begin() + r * width);
+                rh[r] = 1;
+            }
+        }
+    *values = std::move(rv);
+    *has = std::move(rh);
+    return found || pfound;
+}
+
 std::vector<VtArray<TfToken>> HdPbrtInstancer::ComputeInstanceCategories(
     SdfPath const &prototypeId)
 {

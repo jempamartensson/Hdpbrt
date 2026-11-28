@@ -298,6 +298,12 @@ public:
     // Light-linking categories per instance, flattened like the transforms
     // (a nested instance is in its own and its parents' collections).
     std::vector<VtArray<TfToken>> ComputeInstanceCategories(SdfPath const &prototypeId);
+    // Instance-rate primvar `name` (Cd falls back to displayColor) as `width`
+    // floats per instance, flattened like the transforms (a nested
+    // instancer's own value wins over its parents'); has[i]: instance i has
+    // a value. False when no instancer in the chain has the primvar.
+    bool ComputeInstancePrimvar(SdfPath const &prototypeId, std::string const &name, int width,
+                                std::vector<float> *values, std::vector<char> *has);
 
 private:
     std::mutex _mutex;
@@ -323,6 +329,9 @@ GfVec3f HdPbrt_AverageColor(VtValue const &v, bool *ok);
 // Primvar `name` (Houdini's Cd falls back to displayColor) as `width` floats
 // per element, with its interpolation. False when the prim doesn't have it
 // (*unsupported: it has it, in a type that can't be read as floats).
+// A primvar value as `width` floats per element (fewer components broadcast
+// from one, else padded with zeros). False for types that aren't numbers.
+bool HdPbrt_FlattenPrimvar(const VtValue &v, int width, std::vector<float> *out);
 bool HdPbrt_FetchPrimvar(HdSceneDelegate *sd, SdfPath const &id, std::string const &name,
                          int width, HdInterpolation *interp, std::vector<float> *vals,
                          bool *unsupported = nullptr);

@@ -1,7 +1,7 @@
 From 9faadfa8e2c79d9e99ca0eed37ac6eb84bc97e68 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sat, 28 Nov 2026 10:56:15 +0100
-Subject: [PATCH 47/47] Instanced and moving emitters: area lights in object
+Subject: [PATCH 47/48] Instanced and moving emitters: area lights in object
  instance definitions become one mesh-mode DiffuseAreaLight per instance
  (shared per-prototype triangle table, sampled through the instance transform
  at the reference time); LightSampleContext time; hit-aware MIS pdf (for

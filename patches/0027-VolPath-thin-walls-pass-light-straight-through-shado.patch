@@ -1,7 +1,7 @@
 From dc32bb70cf8b29aed23e3fa8fc085097d8bc9725 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Tue, 24 Nov 2026 07:29:29 +0100
-Subject: [PATCH 27/47] VolPath: thin walls pass light straight through, shadow
+Subject: [PATCH 27/48] VolPath: thin walls pass light straight through, shadow
  rays included (for hdPbrt)
 
 HdPbrtLayeredBxDF's straight (eta 1) transmission now acts like a medium

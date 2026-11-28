@@ -1,7 +1,7 @@
 From 6a28b699e9c01c9f2e6c8e38ab227774da96467e Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Mon, 23 Nov 2026 07:52:48 +0100
-Subject: [PATCH 17/47] Dielectric: "hdpbrttopweight" scales transmission by a
+Subject: [PATCH 17/48] Dielectric: "hdpbrttopweight" scales transmission by a
  reflection layer's 1 - w E_R (MaterialX layering) (for hdPbrt)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

@@ -106,3 +106,25 @@ for label, u, d in json.load(open('%s/inputs_patches.json' % sys.argv[1])):
           % (label, ra, rb, (pt(I['pv'], u) / pt(I['a'], u)).round(3),
              (pt(I['pv'], d) / pt(I['b'], d)).round(3)))
 PY
+
+# Per-instance primvars (pbrt patch 48): PointInstancers with instance-rate
+# displayColor / tint / rough / glow vs the same values as constant primvars
+# on separate meshes (hdPbrt only; must agree within noise).
+for m in "" flat; do $HYTHON "$here/make_instance_primvars_scene.py" "$OUT" $m > /dev/null; done
+for f in instance_primvars instance_primvars_flat; do
+  ( cd "$OUT" && $HYTHON "$here/../typhoon/render_hdpbrt.py" $f.usda 1:1 "$OUT/hdpbrt" \
+      "pbrt:pixelSamples=$SPP" > hdpbrt_$f.log 2>&1 )
+done
+python3 - "$OUT" <<'PY'
+import json, sys, numpy as np
+def pfm(p):
+    with open(p, 'rb') as f:
+        f.readline(); w, h = map(int, f.readline().split()); f.readline()
+        return np.frombuffer(f.read(), dtype='<f4').reshape(h, w, 3)[::-1].astype(float)
+a = pfm(sys.argv[1] + '/hdpbrt/instance_primvars_flat-hdpbrt.0001.pfm')
+b = pfm(sys.argv[1] + '/hdpbrt/instance_primvars-hdpbrt.0001.pfm')
+print('instance primvars: mean ratio %.4f (instanced / separate meshes)' % (b.mean() / a.mean()))
+for l, (x, y), c in json.load(open(sys.argv[1] + '/instance_primvars_patches.json')):
+    pa, pb = a[y - 3:y + 4, x - 3:x + 4].mean((0, 1)), b[y - 3:y + 4, x - 3:x + 4].mean((0, 1))
+    print('  %-20s separate %s instanced %s' % (l, pa.round(3), pb.round(3)))
+PY

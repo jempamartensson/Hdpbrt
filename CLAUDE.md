@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (47 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (48 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -234,6 +234,14 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    (from the interaction): area lights sample deforming shapes at the right time too.
    `CreatePrimitivesForShapes` takes the area-light map, definitions use their own. Not for
    SampleLe (light-path integrators) or AnimatedShape area lights inside definitions.
+48. Per-instance primvars: `ObjectInstance` reads Attribute "shape" `"string
+   hdpbrtinstanceprimvars"` [name width ...] + `"float hdpbrtinstanceprimvarvalues"` (one value
+   each) into `InstanceSceneEntity::hdpbrtPv*` (the `hdpbrtTag` lambda tags all three instance
+   kinds); `CreateLights` builds `BasicScene::hdpbrtInstancePrimvars`; the instance
+   primitives set `HdPbrtPrimvarHit::inst/instCount` on hits, which `Lookup` checks before the
+   shape's (USD: instance primvars override the prototype's); instanced emitters pass them to
+   their samples (`DiffuseAreaLight::hdpbrtInstPv`). Alpha textures are evaluated inside the
+   prototype (before the instance adds its primvars): per-instance opacity doesn't cut out.
 
 ## Done in the 2026-11-22 session
 
@@ -600,6 +608,20 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   PointInstancer of 100 / 10k emissive quads vs separate meshes: means within 0.02%, noise
   vs a 1024 spp reference the same (0.141 vs 0.140); 100k instances render in ~4 s, pbrt peak
   RSS 219 MB (10k: 44 MB instanced vs 76 MB as meshes).
+- Per-instance primvars (2026-11-28, pbrt patch 48). `HdPbrtInstancer::ComputeInstancePrimvar`
+  (instance-rate primvars it already sampled at sync, Cd -> displayColor, flattened like the
+  transforms; a nested instancer's own value wins) feeds `HdPbrtGeom::Write`: for every primvar
+  the material reads (and displayColor when the base color reads it, also with no material)
+  each ObjectInstance gets its values; per-instance displayColor uses `hdpbrt_displayColor`
+  (instances without one get the prototype's constant, unless the prototype has a varying
+  one). `HdPbrt_FlattenPrimvar` is shared now. Works for every instanced shape type and for
+  instanced emitters (emission color per instance). Check (`tests/primvars/
+  make_instance_primvars_scene.py`, in run_primvars.sh): PointInstancers with per-instance
+  displayColor (no material), tint + rough (MaterialX), glow (emission) equal separate meshes
+  with constant primvars pixel for pixel (bright lamp pools within noise); vs Karma the tinted
+  spheres 1.01-1.04x, lamp pools 0.96-0.99x (unbound displayColor: Karma's darker default as
+  before). Not per instance: displacement (one diced prototype), alpha cutouts. Materials run47
+  34/8/0 identical, linking identical, run_instanced_lights.sh unchanged.
 - Per-object dicing (2026-11-27, hdPbrt only): constant primvars `pbrt:dicingRate` /
   `pbrt_dicingRate` (pixels, over the render setting), `karma:object:dicingquality` (divides
   the rate, min 0.01; Karma's meaning: 2 = twice as fine) and `pbrt:dicingMaxTriangles` /
