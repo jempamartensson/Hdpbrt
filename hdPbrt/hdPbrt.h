@@ -317,6 +317,16 @@ struct HdPbrtPrimvar {
 HdPbrtPrimvar HdPbrt_FindPrimvar(HdSceneDelegate *sd, SdfPath const &id,
                                  const std::vector<TfToken> &names, bool anyVec2 = false);
 GfVec3f HdPbrt_AverageColor(VtValue const &v, bool *ok);
+// Primvar `name` (Houdini's Cd falls back to displayColor) as `width` floats
+// per element, with its interpolation. False when the prim doesn't have it
+// (*unsupported: it has it, in a type that can't be read as floats).
+bool HdPbrt_FetchPrimvar(HdSceneDelegate *sd, SdfPath const &id, std::string const &name,
+                         int width, HdInterpolation *interp, std::vector<float> *vals,
+                         bool *unsupported = nullptr);
+// pbrt shape parameters for per-shape primvars (pbrt patch 44): `count`
+// values (x width) of each primvar in `values`, named by `names`.
+std::string HdPbrt_ShapePrimvarParams(std::vector<std::pair<std::string, int>> const &names,
+                                      std::vector<std::vector<float>> const &values, int count);
 // N evenly spaced times over the shutter (N >= 2), or {open} without blur.
 std::vector<float> HdPbrt_ShutterTimes(GfVec2f shutter, int n);
 
@@ -370,6 +380,20 @@ protected:
     // A file of `width` floats per pbrt vertex of primvar `name` for
     // displacement graphs ("" when the prim lacks it). Called with _mutex held.
     virtual std::string _PrimvarFile(std::string const &name, int width) const { return {}; }
+    // Primvars for "hdpbrtprimvar" textures on shapes other than meshes
+    // (pbrt "hdpbrtshapeprimvars"): one parameter string per pbrt Shape line
+    // that _Shapes writes, or a single one for all; `found` gets the names
+    // the prim has. Called with _mutex held, when the scene is written.
+    using PrimvarList = std::vector<std::pair<std::string, int>>;
+    virtual std::vector<std::string> _ShapePrimvars(PrimvarList const &pvs,
+                                                    std::set<std::string> *found) const {
+        return {};
+    }
+    // Constant primvars only, the same for every shape (implicit prims).
+    std::vector<std::string> _ConstantShapePrimvars(PrimvarList const &pvs,
+                                                    std::set<std::string> *found) const;
+    // The shape primvar parameters of pbrt Shape line i (for _Shapes).
+    std::string const &_ShapePv(size_t i) const;
 
     void _SyncTransform(HdSceneDelegate *sd);
     void _SyncInstancing(HdSceneDelegate *sd);  // after the instancer synced
@@ -394,6 +418,10 @@ protected:
     mutable bool _warnedNoUV = false;  // displacement without uvs
     bool _instanced = false;
     VtArray<TfToken> _categories;
+    // The scene delegate from the last sync (_SyncDisplayColor), for primvars
+    // fetched when the scene is written.
+    HdSceneDelegate *_sd = nullptr;
+    mutable std::vector<std::string> _shapePv;  // see _ShapePrimvars
 };
 
 // ---------------------------------------------------------------------------
@@ -475,12 +503,24 @@ public:
 protected:
     HdRprim const &_Prim() const override { return *this; }
     std::string _Shapes(std::string const &extra) const override;
+    std::vector<std::string> _ShapePrimvars(PrimvarList const &pvs,
+                                            std::set<std::string> *found) const override;
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override { return bits; }
     void _InitRepr(TfToken const &reprToken, HdDirtyBits *dirtyBits) override {}
 
 private:
     void _BuildShapes(HdSceneDelegate *sceneDelegate);
     std::vector<std::string> _shapes;  // one pbrt curve per USD curve, object space
+    // Per pbrt curve, for shape primvars: its USD curve, the point index of
+    // each of its vertices and its Bezier segment count.
+    struct _CurveShape {
+        size_t curve = 0;
+        std::vector<int> points;
+        int segments = 0;
+    };
+    std::vector<_CurveShape> _curveShapes;
+    size_t _numPoints = 0, _numCurves = 0;
+    TfToken _curveType, _curveBasis, _curveWrap;
 };
 
 // ---------------------------------------------------------------------------
@@ -496,11 +536,15 @@ public:
 protected:
     HdRprim const &_Prim() const override { return *this; }
     std::string _Shapes(std::string const &extra) const override;
+    std::vector<std::string> _ShapePrimvars(PrimvarList const &pvs,
+                                            std::set<std::string> *found) const override;
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override { return bits; }
     void _InitRepr(TfToken const &reprToken, HdDirtyBits *dirtyBits) override {}
 
 private:
     std::vector<std::string> _shapes;  // one sphere per point, object space
+    std::vector<int> _pointIndex;      // per sphere: its point (shape primvars)
+    size_t _numPoints = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -518,6 +562,8 @@ public:
 protected:
     HdRprim const &_Prim() const override { return *this; }
     std::string _Shapes(std::string const &extra) const override;
+    std::vector<std::string> _ShapePrimvars(PrimvarList const &pvs,
+                                            std::set<std::string> *found) const override;
     bool _CanEmit() const override { return true; }
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override { return bits; }
     void _InitRepr(TfToken const &reprToken, HdDirtyBits *dirtyBits) override {}

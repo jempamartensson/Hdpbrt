@@ -1,7 +1,7 @@
 From 519afad74e66cbcd6d55060835b57f0fffd47525 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sun, 22 Nov 2026 19:40:47 +0100
-Subject: [PATCH 09/43] Light linking and shadow linking in volpath (for
+Subject: [PATCH 09/44] Light linking and shadow linking in volpath (for
  hdPbrt)
 
 Shapes take "integer hdpbrtlinks" [collection indices 0..63] (their membership; [-1] for

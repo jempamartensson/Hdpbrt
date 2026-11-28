@@ -1,7 +1,7 @@
 From ee1479bb439e0f26db621e6bcfe5be602e13c013 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Fri, 27 Nov 2026 08:17:11 +0100
-Subject: [PATCH 41/43] plymesh procedural displacement: "string hdpbrtgraph"
+Subject: [PATCH 41/44] plymesh procedural displacement: "string hdpbrtgraph"
  register program (MaterialX graphs compiled by hdPbrt), MaterialX reference
  noise (for hdPbrt)
 

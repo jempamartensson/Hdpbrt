@@ -1,7 +1,7 @@
 From 573f3d271804e21c6bf9032cafdc49f7dd5cab9a Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sun, 22 Nov 2026 19:22:50 +0100
-Subject: [PATCH 07/43] Transform::Decompose: handle reflections (for hdPbrt)
+Subject: [PATCH 07/44] Transform::Decompose: handle reflections (for hdPbrt)
 
 A transform with a negative determinant (a mirrored object, or a camera that flips z)
 left an improper rotation that the quaternion conversion cannot represent, so animated

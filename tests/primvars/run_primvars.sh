@@ -60,3 +60,25 @@ for name, fx, fy in (('unbound_grid', 0.12, 0.12), ('unbound_grid', 0.88, 0.88),
     pk, ph = patch(name, fx, fy)
     print('  %-15s (%.2f, %.2f) karma %s hdPbrt %s' % (name, fx, fy, pk.round(3), ph.round(3)))
 PY
+
+# Curves, points and implicit prims (pbrt shape primvars).
+$HYTHON "$here/make_curve_point_scene.py" "$OUT" > "$OUT/make_curves.log" 2>&1
+( cd "$OUT" && $HUSK_ENV husk -R BRAY_HdKarma --frame 1 --pixel-samples "$SPP" \
+    -o karma/curves_points.exr curves_points.usda > husk_curves.log 2>&1 )
+"$IMGTOOL" convert --channels R,G,B "$OUT/karma/curves_points.exr" --outfile "$OUT/karma/curves_points.pfm"
+( cd "$OUT" && $HYTHON "$here/../typhoon/render_hdpbrt.py" curves_points.usda 1:1 "$OUT/hdpbrt" \
+    "pbrt:pixelSamples=$SPP" > hdpbrt_curves.log 2>&1 )
+python3 - "$OUT/karma/curves_points.pfm" "$OUT/hdpbrt/curves_points-hdpbrt.0001.pfm" \
+    "$OUT/curves_points_patches.json" <<'PY'
+import json, sys, numpy as np
+def pfm(p):
+    with open(p, 'rb') as f:
+        f.readline(); w, h = map(int, f.readline().split()); f.readline()
+        return np.frombuffer(f.read(), dtype='<f4').reshape(h, w, 3)[::-1]
+k, h = pfm(sys.argv[1]), pfm(sys.argv[2])
+print('curves/points patches (value: the primvar there; ratio hdPbrt / Karma):')
+for label, x, y, col in json.load(open(sys.argv[3])):
+    pk = k[y - 2:y + 3, x - 2:x + 3].mean((0, 1)); ph = h[y - 2:y + 3, x - 2:x + 3].mean((0, 1))
+    print('  %-20s value %-18s karma %-22s hdPbrt %-22s ratio %s'
+          % (label, np.round(col, 2), pk.round(3), ph.round(3), (ph / np.maximum(pk, 1e-4)).round(2)))
+PY

@@ -288,8 +288,14 @@ std::string HdPbrtImplicit::_Shapes(std::string const &extra) const
 {
     std::string out;
     for (const std::string &s : _shapes)
-        out += "AttributeBegin " + _axis + s + extra + " AttributeEnd\n";
+        out += "AttributeBegin " + _axis + s + extra + _ShapePv(0) + " AttributeEnd\n";
     return out;
+}
+
+std::vector<std::string> HdPbrtImplicit::_ShapePrimvars(PrimvarList const &pvs,
+                                                        std::set<std::string> *found) const
+{
+    return _ConstantShapePrimvars(pvs, found);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

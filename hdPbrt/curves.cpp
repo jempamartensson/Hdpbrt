@@ -185,12 +185,14 @@ void HdPbrtCurves::_BuildShapes(HdSceneDelegate *sd)
         normals = nPv.value.UncheckedGet<VtVec3fArray>();
 
     std::vector<std::string> shapes;
+    std::vector<_CurveShape> curveShapes;
     size_t vtx = 0;  // first vertex of the current curve
     for (size_t ci = 0; ci < counts.size(); ++ci) {
         const int count = counts[ci];
         if (count <= 0)
             continue;
         std::vector<GfVec3f> p(count);
+        std::vector<int> pis(count);
         bool ok = true;
         for (int k = 0; k < count; ++k) {
             size_t vi = vtx + k;
@@ -200,6 +202,7 @@ void HdPbrtCurves::_BuildShapes(HdSceneDelegate *sd)
                 break;
             }
             p[k] = points[pi];
+            pis[k] = pi;
         }
         auto vertexValue = [&](auto const &arr, size_t k, auto fallback) {
             if (arr.empty())
@@ -244,17 +247,146 @@ void HdPbrtCurves::_BuildShapes(HdSceneDelegate *sd)
             s += " \"string type\" \"cylinder\"";
         }
         shapes.push_back(std::move(s));
+        _CurveShape cs;
+        cs.curve = ci;
+        cs.points = std::move(pis);
+        cs.segments = int(c.bspline ? c.cp.size() - 3 : (c.cp.size() - 1) / 3);
+        curveShapes.push_back(std::move(cs));
     }
 
     std::lock_guard<std::mutex> lock(_mutex);
     _shapes = std::move(shapes);
+    _curveShapes = std::move(curveShapes);
+    _numPoints = points.size();
+    _numCurves = counts.size();
+    _curveType = topo.GetCurveType();
+    _curveBasis = topo.GetCurveBasis();
+    _curveWrap = topo.GetCurveWrap();
 }
 
 std::string HdPbrtCurves::_Shapes(std::string const &extra) const
 {
     std::string out;
-    for (const std::string &s : _shapes)
-        out += s + extra + "\n";
+    for (size_t i = 0; i < _shapes.size(); ++i)
+        out += _shapes[i] + extra + _ShapePv(i) + "\n";
+    return out;
+}
+
+// Per pbrt curve: each primvar's values at its Bezier segment boundaries
+// (pbrt interpolates linearly within a segment). Vertex primvars go through
+// the same basis conversion as the points (it is linear) and are evaluated
+// at the boundaries; varying ones with one value per boundary are used as
+// they are (else resampled by index); uniform and constant ones repeat.
+std::vector<std::string> HdPbrtCurves::_ShapePrimvars(PrimvarList const &pvs,
+                                                      std::set<std::string> *found) const
+{
+    struct Src {
+        std::pair<std::string, int> pv;
+        HdInterpolation interp;
+        std::vector<float> v;
+    };
+    std::vector<Src> srcs;
+    for (const auto &pv : pvs) {
+        Src s{pv, HdInterpolationConstant, {}};
+        if (!HdPbrt_FetchPrimvar(_sd, GetId(), pv.first, pv.second, &s.interp, &s.v) ||
+            s.v.size() < size_t(pv.second))
+            continue;
+        found->insert(pv.first);
+        srcs.push_back(std::move(s));
+    }
+    if (srcs.empty())
+        return {};
+    PrimvarList names;
+    for (const Src &s : srcs)
+        names.push_back(s.pv);
+    // Linear resampling of m values to n (by index fraction).
+    auto resample = [](const std::vector<float> &in, int w, size_t n) {
+        const size_t m = in.size() / w;
+        std::vector<float> out(n * w);
+        for (size_t j = 0; j < n; ++j) {
+            const double x = n > 1 ? double(j) * (m - 1) / (n - 1) : 0.0;
+            const size_t a = std::min(size_t(x), m - 1), b = std::min(a + 1, m - 1);
+            const float f = float(x - a);
+            for (int k = 0; k < w; ++k)
+                out[j * w + k] = in[a * w + k] * (1 - f) + in[b * w + k] * f;
+        }
+        return out;
+    };
+    // Varying values per curve, laid out curve after curve.
+    std::vector<size_t> varyingStart;
+    size_t varyingTotal = 0;
+    {
+        // Count per curve as USD defines it: linear = vertices; cubic
+        // non-periodic: bezier (n - 4) / 3 + 2, others n - 2; periodic:
+        // bezier n / 3, others n.
+        const bool periodic = _curveWrap == HdTokens->periodic;
+        const bool linear = _curveType == HdTokens->linear;
+        const bool bezier = _curveBasis == HdTokens->bezier;
+        std::vector<size_t> perCurve(_numCurves, 0);
+        for (const _CurveShape &cs : _curveShapes) {
+            const size_t n = cs.points.size();
+            perCurve[cs.curve] = linear ? n
+                                 : periodic ? (bezier ? n / 3 : n)
+                                 : bezier ? (n >= 4 ? (n - 4) / 3 + 2 : n)
+                                          : (n >= 2 ? n - 2 : n);
+        }
+        varyingStart.resize(_numCurves + 1, 0);
+        for (size_t c = 0; c < _numCurves; ++c)
+            varyingStart[c + 1] = varyingStart[c] + perCurve[c];
+        varyingTotal = varyingStart[_numCurves];
+    }
+    std::vector<std::string> out;
+    out.reserve(_curveShapes.size());
+    for (const _CurveShape &cs : _curveShapes) {
+        const size_t nb = size_t(cs.segments) + 1;
+        std::vector<std::vector<float>> values;
+        for (const Src &s : srcs) {
+            const int w = s.pv.second;
+            const size_t count = s.v.size() / w;
+            std::vector<float> b;
+            if ((s.interp == HdInterpolationVertex ||
+                 (s.interp == HdInterpolationVarying && count != varyingTotal)) &&
+                count == _numPoints) {
+                // Through the basis conversion, three channels at a time.
+                b.assign(nb * w, 0.f);
+                for (int c0 = 0; c0 < w; c0 += 3) {
+                    std::vector<GfVec3f> p(cs.points.size());
+                    for (size_t k = 0; k < cs.points.size(); ++k)
+                        for (int j = 0; j < 3; ++j)
+                            p[k][j] = c0 + j < w ? s.v[size_t(cs.points[k]) * w + c0 + j] : 0.f;
+                    _PbrtCurve c = _Convert(std::move(p), _curveType, _curveBasis, _curveWrap);
+                    for (size_t seg = 0; seg < nb; ++seg) {
+                        GfVec3f e;
+                        if (c.bspline) {
+                            const size_t i = std::min(seg, c.cp.size() - 3);
+                            e = (c.cp[i] + 4.f * c.cp[i + 1] + c.cp[i + 2]) / 6.f;
+                        } else {
+                            e = c.cp[std::min(seg * 3, c.cp.size() - 1)];
+                        }
+                        for (int j = 0; j < 3 && c0 + j < w; ++j)
+                            b[seg * w + c0 + j] = e[j];
+                    }
+                }
+            } else if (s.interp == HdInterpolationVarying && count == varyingTotal) {
+                const size_t a = varyingStart[cs.curve], e = varyingStart[cs.curve + 1];
+                std::vector<float> in(s.v.begin() + a * w, s.v.begin() + e * w);
+                if (_curveWrap == HdTokens->periodic && !in.empty())
+                    in.insert(in.end(), in.begin(), in.begin() + w);  // closes the loop
+                b = in.size() / w == nb ? in : (in.empty() ? std::vector<float>(nb * w, 0.f)
+                                                           : resample(in, w, nb));
+            } else {
+                // Uniform (per curve) or constant.
+                const size_t e = (s.interp == HdInterpolationUniform && count == _numCurves)
+                                     ? cs.curve : 0;
+                b.resize(nb * w);
+                for (size_t j = 0; j < nb; ++j)
+                    for (int k = 0; k < w; ++k)
+                        b[j * w + k] = s.v[e * w + k];
+            }
+            values.push_back(std::move(b));
+        }
+        out.push_back(HdPbrt_ShapePrimvarParams(names, values, int(nb)));
+    }
     return out;
 }
 

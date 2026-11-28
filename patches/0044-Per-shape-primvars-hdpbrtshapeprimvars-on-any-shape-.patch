@@ -1,0 +1,234 @@
+From dacb5a98803874830c4c7d63a9983e694ceaebfd Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sat, 28 Nov 2026 09:33:24 +0100
+Subject: [PATCH 44/44] Per-shape primvars ("hdpbrtshapeprimvars") on any shape
+ for hdpbrtprimvar textures: constant values, or curve values at segment
+ boundaries interpolated by the hit's segment and u (for hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/cpu/primitive.cpp | 19 +++++++++++++++
+ src/pbrt/cpu/primitive.h   | 10 ++++++++
+ src/pbrt/scene.cpp         | 50 ++++++++++++++++++++++++++++++++++++--
+ src/pbrt/shapes.cpp        |  9 +++++--
+ src/pbrt/shapes.h          |  2 ++
+ 5 files changed, 86 insertions(+), 4 deletions(-)
+
+diff --git a/src/pbrt/cpu/primitive.cpp b/src/pbrt/cpu/primitive.cpp
+index 01f06b2..fcfcb48 100644
+--- a/src/pbrt/cpu/primitive.cpp
++++ b/src/pbrt/cpu/primitive.cpp
+@@ -53,6 +53,25 @@ pstd::optional<ShapeIntersection> GeometricPrimitive::Intersect(const Ray &r,
+     if (!si)
+         return {};
+     CHECK_LT(si->tHit, 1.001 * tMax);
++    // hdPbrt: shape primvars (where the shape has none of its own: meshes).
++    if (nHdPbrtShapePv > 0 && si->intr.hdpbrtPrimvars.count == 0) {
++        HdPbrtPrimvarHit &h = si->intr.hdpbrtPrimvars;
++        int k = 0;
++        Float f = 0;
++        if (hdpbrtShapePvCount > 1) {
++            // Curves: segment index in v[0], its u in b[0].
++            k = Clamp(h.v[0], 0, hdpbrtShapePvCount - 2);
++            f = Clamp(h.b[0], 0, 1);
++        }
++        h.primvars = hdpbrtShapePv;
++        h.count = nHdPbrtShapePv;
++        h.v[0] = k;
++        h.v[1] = std::min(k + 1, hdpbrtShapePvCount - 1);
++        h.v[2] = k;
++        h.b[0] = 1 - f;
++        h.b[1] = f;
++        h.b[2] = 0;
++    }
+     // Test intersection against alpha texture, if present
+     if (alpha) {
+         if (Float a = alpha.Evaluate(si->intr); a < 1) {
+diff --git a/src/pbrt/cpu/primitive.h b/src/pbrt/cpu/primitive.h
+index 2c162e0..a8ec7d6 100644
+--- a/src/pbrt/cpu/primitive.h
++++ b/src/pbrt/cpu/primitive.h
+@@ -12,6 +12,7 @@
+ #include <pbrt/base/medium.h>
+ #include <pbrt/base/shape.h>
+ #include <pbrt/base/texture.h>
++#include <pbrt/util/hdpbrtprimvar.h>
+ #include <pbrt/util/stats.h>
+ #include <pbrt/util/taggedptr.h>
+ #include <pbrt/util/transform.h>
+@@ -60,6 +61,13 @@ class GeometricPrimitive {
+     void SetHdPbrtPrimId(int id) { hdpbrtPrimId = id; }
+     // hdPbrt: light-linking collection membership reported for hits.
+     void SetHdPbrtLinkMask(uint64_t m) { hdpbrtLinkMask = m; }
++    // hdPbrt: primvars of the shape statement ("hdpbrtshapeprimvars"): `count`
++    // values each, one (constant) or one per curve segment boundary.
++    void SetHdPbrtShapePrimvars(const HdPbrtMeshPrimvar *pv, int n, int count) {
++        hdpbrtShapePv = pv;
++        nHdPbrtShapePv = n;
++        hdpbrtShapePvCount = count;
++    }
+ 
+   private:
+     // GeometricPrimitive Private Members
+@@ -70,6 +78,8 @@ class GeometricPrimitive {
+     FloatTexture alpha;
+     int hdpbrtPrimId = -1;
+     uint64_t hdpbrtLinkMask = ~uint64_t(0);
++    const HdPbrtMeshPrimvar *hdpbrtShapePv = nullptr;
++    int nHdPbrtShapePv = 0, hdpbrtShapePvCount = 1;
+ };
+ 
+ // SimplePrimitive Definition
+diff --git a/src/pbrt/scene.cpp b/src/pbrt/scene.cpp
+index 171054f..df5179d 100644
+--- a/src/pbrt/scene.cpp
++++ b/src/pbrt/scene.cpp
+@@ -45,6 +45,46 @@ static uint64_t HdPbrtLinkMask(const ParameterDictionary &parameters) {
+     return m;
+ }
+ 
++// hdPbrt: per-shape primvars, "string hdpbrtshapeprimvars" [name width ...]
++// with "float hdpbrtshapeprimvarvalues" (per primvar: count x width values)
++// and "integer hdpbrtshapeprimvarcount" (values per primvar: 1, or a curve's
++// segment count + 1). hdpbrtprimvar textures read them at hits on any shape
++// without per-vertex primvars of its own.
++struct HdPbrtShapePrimvars {
++    const HdPbrtMeshPrimvar *pv = nullptr;
++    int n = 0, count = 1;
++};
++static HdPbrtShapePrimvars HdPbrtReadShapePrimvars(const ParameterDictionary &parameters,
++                                                   const FileLoc *loc, Allocator alloc) {
++    HdPbrtShapePrimvars r;
++    std::vector<std::string> names = parameters.GetStringArray("hdpbrtshapeprimvars");
++    std::vector<Float> values = parameters.GetFloatArray("hdpbrtshapeprimvarvalues");
++    const int count = std::max(1, parameters.GetOneInt("hdpbrtshapeprimvarcount", 1));
++    if (names.size() < 2)
++        return r;
++    const size_t n = names.size() / 2;
++    HdPbrtMeshPrimvar *pv = alloc.allocate_object<HdPbrtMeshPrimvar>(n);
++    size_t off = 0;
++    for (size_t i = 0; i < n; ++i) {
++        const int w = std::max(1, std::atoi(names[2 * i + 1].c_str()));
++        const size_t len = size_t(w) * count;
++        if (off + len > values.size()) {
++            Warning(loc, "hdpbrtshapeprimvarvalues: too few values.");
++            break;
++        }
++        Float *d = alloc.allocate_object<Float>(len);
++        std::copy(values.begin() + off, values.begin() + off + len, d);
++        off += len;
++        pv[r.n].id = HdPbrtPrimvarId(names[2 * i]);
++        pv[r.n].width = w;
++        pv[r.n].data = d;
++        ++r.n;
++    }
++    r.pv = pv;
++    r.count = count;
++    return r;
++}
++
+ 
+ InternCache<std::string> SceneEntity::internedStrings(Allocator{});
+ 
+@@ -1485,6 +1525,8 @@ Primitive BasicScene::CreateAggregate(
+             // hdPbrt: id reported for hits on this shape.
+             const int hdpbrtPrimId = sh.parameters.GetOneInt("hdpbrtprimid", -1);
+             const uint64_t hdpbrtLinkMask = HdPbrtLinkMask(sh.parameters);
++            const HdPbrtShapePrimvars hdpbrtPv =
++                HdPbrtReadShapePrimvars(sh.parameters, &sh.loc, alloc);
+             sh.parameters.ReportUnused();  // do now so can grab alpha...
+ 
+             pbrt::Material mtl = nullptr;
+@@ -1511,13 +1553,14 @@ Primitive BasicScene::CreateAggregate(
+                     area = (*iter->second)[j];
+ 
+                 if (!area && !mi.IsMediumTransition() && !alphaTex && hdpbrtPrimId < 0 &&
+-                    hdpbrtLinkMask == ~uint64_t(0))
++                    hdpbrtLinkMask == ~uint64_t(0) && hdpbrtPv.n == 0)
+                     primitives.push_back(new SimplePrimitive(shapes[j], mtl));
+                 else {
+                     GeometricPrimitive *gp =
+                         new GeometricPrimitive(shapes[j], mtl, area, mi, alphaTex);
+                     gp->SetHdPbrtPrimId(hdpbrtPrimId);
+                     gp->SetHdPbrtLinkMask(hdpbrtLinkMask);
++                    gp->SetHdPbrtShapePrimvars(hdpbrtPv.pv, hdpbrtPv.n, hdpbrtPv.count);
+                     primitives.push_back(gp);
+                 }
+             }
+@@ -1549,6 +1592,8 @@ Primitive BasicScene::CreateAggregate(
+             FloatTexture alphaTex = getAlphaTexture(sh.parameters, &sh.loc);
+             const int hdpbrtPrimId = sh.parameters.GetOneInt("hdpbrtprimid", -1);
+             const uint64_t hdpbrtLinkMask = HdPbrtLinkMask(sh.parameters);
++            const HdPbrtShapePrimvars hdpbrtPv =
++                HdPbrtReadShapePrimvars(sh.parameters, &sh.loc, alloc);
+             sh.parameters.ReportUnused();  // do now so can grab alpha...
+ 
+             // Create initial shape or shapes for animated shape
+@@ -1575,13 +1620,14 @@ Primitive BasicScene::CreateAggregate(
+                 }
+ 
+                 if (!mi.IsMediumTransition() && !alphaTex && hdpbrtPrimId < 0 &&
+-                    hdpbrtLinkMask == ~uint64_t(0))
++                    hdpbrtLinkMask == ~uint64_t(0) && hdpbrtPv.n == 0)
+                     prims.push_back(new SimplePrimitive(s, mtl));
+                 else {
+                     GeometricPrimitive *gp = new GeometricPrimitive(
+                         s, mtl, nullptr /* area light */, mi, alphaTex);
+                     gp->SetHdPbrtPrimId(hdpbrtPrimId);
+                     gp->SetHdPbrtLinkMask(hdpbrtLinkMask);
++                    gp->SetHdPbrtShapePrimvars(hdpbrtPv.pv, hdpbrtPv.n, hdpbrtPv.count);
+                     prims.push_back(gp);
+                 }
+             }
+diff --git a/src/pbrt/shapes.cpp b/src/pbrt/shapes.cpp
+index 8ebc793..eb9cd1d 100644
+--- a/src/pbrt/shapes.cpp
++++ b/src/pbrt/shapes.cpp
+@@ -528,9 +528,10 @@ pstd::vector<Shape> CreateCurve(const Transform *renderFromObject,
+                                 bool reverseOrientation, pstd::span<const Point3f> c,
+                                 Float w0, Float w1, CurveType type,
+                                 pstd::span<const Normal3f> norm, int splitDepth,
+-                                Allocator alloc) {
++                                Allocator alloc, int hdpbrtSeg = 0) {
+     CurveCommon *common = alloc.new_object<CurveCommon>(
+         c, w0, w1, type, norm, renderFromObject, objectFromRender, reverseOrientation);
++    common->hdpbrtSeg = hdpbrtSeg;
+ 
+     const int nSegments = 1 << splitDepth;
+     pstd::vector<Shape> segments(nSegments, alloc);
+@@ -755,6 +756,10 @@ bool Curve::RecursiveIntersect(const Ray &ray, Float tMax, pstd::span<const Poin
+             SurfaceInteraction intr(pi, {u, v}, -ray.d, dpdu, dpdv, Normal3f(),
+                                     Normal3f(), ray.time, flipNormal);
+             intr = (*common->renderFromObject)(intr);
++            // hdPbrt: shape primvars interpolate between segment boundaries
++            // (GeometricPrimitive reads these two fields).
++            intr.hdpbrtPrimvars.v[0] = common->hdpbrtSeg;
++            intr.hdpbrtPrimvars.b[0] = u;
+ 
+             *si = ShapeIntersection{intr, tHit};
+         }
+@@ -925,7 +930,7 @@ pstd::vector<Shape> Curve::Create(const Transform *renderFromObject,
+             CreateCurve(renderFromObject, objectFromRender, reverseOrientation,
+                         segCpBezier, Lerp(Float(seg) / Float(nSegments), width0, width1),
+                         Lerp(Float(seg + 1) / Float(nSegments), width0, width1), type,
+-                        nspan, sd, alloc);
++                        nspan, sd, alloc, seg);
+         curves.insert(curves.end(), c.begin(), c.end());
+     }
+     return curves;
+diff --git a/src/pbrt/shapes.h b/src/pbrt/shapes.h
+index b710fd0..6dc4521 100644
+--- a/src/pbrt/shapes.h
++++ b/src/pbrt/shapes.h
+@@ -1250,6 +1250,8 @@ struct CurveCommon {
+     Float normalAngle, invSinNormalAngle;
+     const Transform *renderFromObject, *objectFromRender;
+     bool reverseOrientation, transformSwapsHandedness;
++    // hdPbrt: index of this Bezier segment in its curve (shape primvars).
++    int hdpbrtSeg = 0;
+ };
+ 
+ // Curve Definition
+-- 
+2.43.0
+

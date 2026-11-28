@@ -1,7 +1,7 @@
 From 7831f176547dffa83c95c81a54c1a3b46e88030b Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Wed, 25 Nov 2026 21:14:02 +0100
-Subject: [PATCH 34/43] hdpbrtlayered: OpenPBR coat darkening per shading
+Subject: [PATCH 34/44] hdpbrtlayered: OpenPBR coat darkening per shading
  point, "coatdarkening" / "coatdarkeningadd" (for hdPbrt)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

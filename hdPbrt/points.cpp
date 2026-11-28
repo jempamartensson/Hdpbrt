@@ -63,6 +63,7 @@ void HdPbrtPoints::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderPar
         else if (wPv.valid && wPv.value.IsHolding<float>())
             widths = VtFloatArray(1, wPv.value.UncheckedGet<float>());
         std::vector<std::string> shapes;
+        std::vector<int> pointIndex;
         shapes.reserve(points.size());
         char buf[160];
         for (size_t i = 0; i < points.size(); ++i) {
@@ -75,9 +76,12 @@ void HdPbrtPoints::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderPar
                      "AttributeBegin Translate %.7g %.7g %.7g Shape \"sphere\" \"float radius\" %.7g",
                      p[0], p[1], p[2], 0.5f * w);
             shapes.push_back(buf);
+            pointIndex.push_back(int(i));
         }
         std::lock_guard<std::mutex> lock(_mutex);
         _shapes = std::move(shapes);
+        _pointIndex = std::move(pointIndex);
+        _numPoints = points.size();
     }
 
     _UpdateInstancer(sceneDelegate, dirtyBits);
@@ -90,8 +94,55 @@ void HdPbrtPoints::Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderPar
 std::string HdPbrtPoints::_Shapes(std::string const &extra) const
 {
     std::string out;
-    for (const std::string &s : _shapes)
-        out += s + extra + " AttributeEnd\n";
+    for (size_t i = 0; i < _shapes.size(); ++i)
+        out += _shapes[i] + extra + _ShapePv(i) + " AttributeEnd\n";
+    return out;
+}
+
+// Per point: vertex / varying (and uniform, one per point) values; constant
+// ones go on every sphere.
+std::vector<std::string> HdPbrtPoints::_ShapePrimvars(PrimvarList const &pvs,
+                                                      std::set<std::string> *found) const
+{
+    PrimvarList names, perPoint;
+    std::vector<std::vector<float>> constant, varying;
+    for (const auto &pv : pvs) {
+        HdInterpolation interp;
+        std::vector<float> v;
+        if (!HdPbrt_FetchPrimvar(_sd, GetId(), pv.first, pv.second, &interp, &v))
+            continue;
+        const size_t count = v.size() / pv.second;
+        if (count == _numPoints && _numPoints > 1) {
+            perPoint.push_back(pv);
+            varying.push_back(std::move(v));
+        } else if (count >= 1) {
+            v.resize(pv.second);
+            names.push_back(pv);
+            constant.push_back(std::move(v));
+        } else {
+            continue;
+        }
+        found->insert(pv.first);
+    }
+    if (names.empty() && perPoint.empty())
+        return {};
+    if (perPoint.empty())
+        return {HdPbrt_ShapePrimvarParams(names, constant, 1)};
+    PrimvarList all = names;
+    all.insert(all.end(), perPoint.begin(), perPoint.end());
+    std::vector<std::string> out;
+    out.reserve(_shapes.size());
+    std::vector<std::vector<float>> values = constant;
+    values.resize(all.size());
+    for (size_t i = 0; i < _shapes.size(); ++i) {
+        const size_t p = size_t(_pointIndex[i]);
+        for (size_t k = 0; k < perPoint.size(); ++k) {
+            const int w = perPoint[k].second;
+            values[names.size() + k].assign(varying[k].begin() + p * w,
+                                            varying[k].begin() + (p + 1) * w);
+        }
+        out.push_back(HdPbrt_ShapePrimvarParams(all, values, 1));
+    }
     return out;
 }
 

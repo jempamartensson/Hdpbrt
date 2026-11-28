@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (43 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (44 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -198,6 +198,13 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    RGB in the scene's color space, albedo/unbounded/illuminant by use). Not on quads (bilinear
    patches), bump contexts or non-mesh shapes (default). Graph slots now bind by name and
    width (merged primvar lists may hold one name at two widths).
+44. Per-shape primvars on any shape: `"string hdpbrtshapeprimvars"` [name width ...],
+   `"float hdpbrtshapeprimvarvalues"` (per primvar count x width), `"integer
+   hdpbrtshapeprimvarcount"` (1, or a curve's Bezier segment count + 1). Read once per Shape
+   statement (scene.cpp `HdPbrtReadShapePrimvars`) and set on its GeometricPrimitives, which
+   fill the hit's `HdPbrtPrimvarHit` (before the alpha test) when the shape has no per-vertex
+   primvars of its own. Curves: `CurveCommon::hdpbrtSeg` (segment index) and the hit's u go in
+   the hit (v[0], b[0]); values interpolate linearly between that segment's boundaries.
 
 ## Done in the 2026-11-22 session
 
@@ -495,16 +502,30 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   uses the shared `hdpbrt_displayColor` texture (`HdPbrt_MaterialLine` displayColorTexture).
   `HdPbrtGeom::Write` writes every needed primvar per PLY vertex with `_PrimvarFile` (merged with
   the displacement graph's) as one `hdpbrtprimvars` list. The displacement builder keeps primvar
-  readers for its graph (`primvarTextures` false). Not yet: other inputs (metalness, coat, ...
-  aren't textured at all), primvars on curves/points/implicit prims (texture default; constant
-  displayColor still works there), per-instance primvars, varying displayOpacity without a
-  material. Check (`tests/primvars/run_primvars.sh`, vs Karma): vertex Cd on a subdivided sphere,
+  readers for its graph (`primvarTextures` false). Curves, points and implicit prims
+  (2026-11-28, pbrt patch 44): `HdPbrtGeom::_ShapePrimvars` (when the scene is written, from
+  `_sd` kept by `_SyncDisplayColor`; meshes keep their files) gives one parameter string per
+  pbrt Shape line (`_ShapePv(i)` in `_Shapes`): points one value per sphere (vertex/varying by
+  point index via `_pointIndex`, else constant); curves (`_curveShapes`: point indices, segment
+  count) values at Bezier segment boundaries: vertex primvars through `_Convert` like the
+  points (linear; bspline boundary = (c0 + 4 c1 + c2) / 6), varying with one value per
+  boundary as they are (else resampled), uniform per curve, constant; implicit prims constant
+  only (`_ConstantShapePrimvars`). Varying displayColor uses `hdpbrt_displayColor` there too.
+  `HdPbrt_FetchPrimvar` (geom.cpp, Cd -> displayColor) is shared with the mesh path. Not yet:
+  other inputs (metalness, coat, ... aren't textured at all), per-instance primvars, varying
+  displayOpacity without a material; cubic curves interpolate linearly within a segment.
+  Check (`tests/primvars/run_primvars.sh`, vs Karma): vertex Cd on a subdivided sphere,
   uniform checker faces, a displaced sphere's colors, UsdPreviewSurface reader color + opacity,
   missing primvar -> default: patches within 1% of Karma; vertex roughness matches at r 0.05,
   and primvar roughness equals the same constant exactly (rough metal at r 0.8 is 0.63x Karma
   with or without primvars: a metal difference, not looked into). Karma shades unbound
   displayColor ~2x darker than its value (its default material), so the unbound grid and
-  implicit sphere only check the pattern. Materials run42 34/8/0 identical to run41;
+  implicit sphere only check the pattern. Second scene (`make_curve_point_scene.py`, same
+  script): points (vertex Cd) and implicit Sphere/Cylinder (constant tint) within 1-3% of
+  Karma per patch; linear, bspline (boundary value = 2/3 of its vertex) and uniform-per-curve
+  curves have the right colors, levels 0.8-1.08x Karma, as with a constant color (pbrt's
+  "cylinder" curves are ribbons with bent normals, Karma's round tubes); run43 34/8/0 and usdlux
+  326/328 unchanged. Materials run42 34/8/0 identical to run41;
   run_displacement.sh unchanged (0.83 / 1.54 / 1.40 / 2.57%, blur correlation 0.991).
 - Per-object dicing (2026-11-27, hdPbrt only): constant primvars `pbrt:dicingRate` /
   `pbrt_dicingRate` (pixels, over the render setting), `karma:object:dicingquality` (divides

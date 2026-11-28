@@ -98,6 +98,123 @@ HdPbrtPrimvar HdPbrt_FindPrimvar(HdSceneDelegate *sd, SdfPath const &id,
     return {};
 }
 
+// A primvar value as `width` floats per element (fewer components are
+// broadcast from one, else padded with zeros).
+static bool _FlattenPrimvar(const VtValue &v, int width, std::vector<float> *out)
+{
+    out->clear();
+    auto put = [&](const float *c, int n) {
+        for (int k = 0; k < width; ++k)
+            out->push_back(k < n ? c[k] : n == 1 ? c[0] : 0.f);
+    };
+    auto putArray = [&](auto const &arr, int n) {
+        for (const auto &e : arr) {
+            float c[4] = {0, 0, 0, 0};
+            if constexpr (std::is_arithmetic_v<std::decay_t<decltype(e)>>)
+                c[0] = float(e);
+            else
+                for (int k = 0; k < n; ++k)
+                    c[k] = float(e[k]);
+            put(c, n);
+        }
+    };
+    if (v.IsHolding<VtFloatArray>()) putArray(v.UncheckedGet<VtFloatArray>(), 1);
+    else if (v.IsHolding<VtDoubleArray>()) putArray(v.UncheckedGet<VtDoubleArray>(), 1);
+    else if (v.IsHolding<VtIntArray>()) putArray(v.UncheckedGet<VtIntArray>(), 1);
+    else if (v.IsHolding<VtVec2fArray>()) putArray(v.UncheckedGet<VtVec2fArray>(), 2);
+    else if (v.IsHolding<VtVec3fArray>()) putArray(v.UncheckedGet<VtVec3fArray>(), 3);
+    else if (v.IsHolding<VtVec4fArray>()) putArray(v.UncheckedGet<VtVec4fArray>(), 4);
+    else if (v.IsHolding<VtVec3dArray>()) putArray(v.UncheckedGet<VtVec3dArray>(), 3);
+    else if (v.IsHolding<float>()) { float c = v.UncheckedGet<float>(); put(&c, 1); }
+    else if (v.IsHolding<double>()) { float c = float(v.UncheckedGet<double>()); put(&c, 1); }
+    else if (v.IsHolding<int>()) { float c = float(v.UncheckedGet<int>()); put(&c, 1); }
+    else if (v.IsHolding<GfVec2f>()) put(v.UncheckedGet<GfVec2f>().data(), 2);
+    else if (v.IsHolding<GfVec3f>()) put(v.UncheckedGet<GfVec3f>().data(), 3);
+    else if (v.IsHolding<GfVec4f>()) put(v.UncheckedGet<GfVec4f>().data(), 4);
+    else return false;
+    return !out->empty();
+}
+
+bool HdPbrt_FetchPrimvar(HdSceneDelegate *sd, SdfPath const &id, std::string const &name,
+                         int width, HdInterpolation *interp, std::vector<float> *vals,
+                         bool *unsupported)
+{
+    if (unsupported)
+        *unsupported = false;
+    if (!sd)
+        return false;
+    TfToken token(name);
+    *interp = HdInterpolationCount;
+    for (int pass = 0; pass < 2 && *interp == HdInterpolationCount; ++pass) {
+        for (int i = 0; i < HdInterpolationCount && *interp == HdInterpolationCount; ++i)
+            for (const HdPrimvarDescriptor &d : sd->GetPrimvarDescriptors(id, HdInterpolation(i)))
+                if (d.name == token)
+                    *interp = HdInterpolation(i);
+        if (*interp == HdInterpolationCount && name == "Cd")
+            token = HdTokens->displayColor;
+        else
+            break;
+    }
+    if (*interp == HdInterpolationCount)
+        return false;
+    if (!_FlattenPrimvar(sd->Get(id, token), width, vals)) {
+        if (unsupported)
+            *unsupported = true;
+        return false;
+    }
+    return true;
+}
+
+std::string HdPbrt_ShapePrimvarParams(std::vector<std::pair<std::string, int>> const &names,
+                                      std::vector<std::vector<float>> const &values, int count)
+{
+    std::ostringstream os;
+    os << " \"string hdpbrtshapeprimvars\" [";
+    for (const auto &n : names)
+        os << " " << HdPbrt_Quote(n.first) << " \"" << n.second << "\"";
+    os << " ]";
+    if (count != 1)
+        os << " \"integer hdpbrtshapeprimvarcount\" " << count;
+    os << " \"float hdpbrtshapeprimvarvalues\" [";
+    char buf[32];
+    for (const auto &v : values)
+        for (float f : v) {
+            snprintf(buf, sizeof(buf), " %.7g", f);
+            os << buf;
+        }
+    os << " ]";
+    return os.str();
+}
+
+std::vector<std::string> HdPbrtGeom::_ConstantShapePrimvars(PrimvarList const &pvs,
+                                                            std::set<std::string> *found) const
+{
+    PrimvarList names;
+    std::vector<std::vector<float>> values;
+    for (const auto &pv : pvs) {
+        HdInterpolation interp;
+        std::vector<float> v;
+        if (!HdPbrt_FetchPrimvar(_sd, _Prim().GetId(), pv.first, pv.second, &interp, &v) ||
+            v.size() < size_t(pv.second))
+            continue;
+        v.resize(pv.second);  // constant (or the first element of another)
+        names.push_back(pv);
+        values.push_back(std::move(v));
+        found->insert(pv.first);
+    }
+    if (names.empty())
+        return {};
+    return {HdPbrt_ShapePrimvarParams(names, values, 1)};
+}
+
+std::string const &HdPbrtGeom::_ShapePv(size_t i) const
+{
+    static const std::string none;
+    if (_shapePv.size() == 1)
+        return _shapePv[0];
+    return i < _shapePv.size() ? _shapePv[i] : none;
+}
+
 GfVec3f HdPbrt_AverageColor(VtValue const &v, bool *ok)
 {
     *ok = false;
@@ -210,6 +327,7 @@ void HdPbrtGeom::_SyncDisplayColor(HdSceneDelegate *sd)
     _displayColor = col;
     _hasDisplayColor = ok;
     _displayColorVarying = ok && c.interp != HdInterpolationConstant;
+    _sd = sd;
     _displayOpacity = op;
 }
 
@@ -353,9 +471,23 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
     for (const auto &pv : mat.surfacePrimvars)
         addPrimvar(pv.first, pv.second);
     // Varying displayColor on the base color: the shared texture over the file.
+    const bool varyingCd =
+        mat.baseColorFromPrimvar && _displayColorVarying && mat.baseColorTexture.empty();
+    bool haveCd = varyingCd && addPrimvar("displayColor", 3);
+    // Other shapes (curves, points, implicit prims): per-shape values.
+    _shapePv.clear();
+    {
+        PrimvarList pvs = mat.surfacePrimvars;
+        if (varyingCd)
+            pvs.push_back({"displayColor", 3});
+        std::set<std::string> found;
+        if (!pvs.empty() && pvFiles.empty())
+            _shapePv = _ShapePrimvars(pvs, &found);
+        if (varyingCd && found.count("displayColor"))
+            haveCd = true;
+    }
     std::string displayColorTex;
-    if (mat.baseColorFromPrimvar && _displayColorVarying && mat.baseColorTexture.empty() &&
-        addPrimvar("displayColor", 3)) {
+    if (haveCd) {
         displayColorTex = HdPbrt_DisplayColorTexture;
         if (ctx.texturesWritten.insert(SdfPath("/__hdpbrt_displayColor")).second)
             os << "Texture " << HdPbrt_Quote(displayColorTex)

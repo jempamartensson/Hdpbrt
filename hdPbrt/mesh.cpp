@@ -494,43 +494,6 @@ void HdPbrtMesh::_UpdateMotionPlys(std::vector<float> const &times) const
     _motionPlys = paths;
 }
 
-// A primvar value as `width` floats per element (fewer components are
-// broadcast from one, else padded with zeros).
-static bool _FlattenPrimvar(const VtValue &v, int width, std::vector<float> *out)
-{
-    out->clear();
-    auto put = [&](const float *c, int n) {
-        for (int k = 0; k < width; ++k)
-            out->push_back(k < n ? c[k] : n == 1 ? c[0] : 0.f);
-    };
-    auto putArray = [&](auto const &arr, int n) {
-        for (const auto &e : arr) {
-            float c[4] = {0, 0, 0, 0};
-            if constexpr (std::is_arithmetic_v<std::decay_t<decltype(e)>>)
-                c[0] = float(e);
-            else
-                for (int k = 0; k < n; ++k)
-                    c[k] = float(e[k]);
-            put(c, n);
-        }
-    };
-    if (v.IsHolding<VtFloatArray>()) putArray(v.UncheckedGet<VtFloatArray>(), 1);
-    else if (v.IsHolding<VtDoubleArray>()) putArray(v.UncheckedGet<VtDoubleArray>(), 1);
-    else if (v.IsHolding<VtIntArray>()) putArray(v.UncheckedGet<VtIntArray>(), 1);
-    else if (v.IsHolding<VtVec2fArray>()) putArray(v.UncheckedGet<VtVec2fArray>(), 2);
-    else if (v.IsHolding<VtVec3fArray>()) putArray(v.UncheckedGet<VtVec3fArray>(), 3);
-    else if (v.IsHolding<VtVec4fArray>()) putArray(v.UncheckedGet<VtVec4fArray>(), 4);
-    else if (v.IsHolding<VtVec3dArray>()) putArray(v.UncheckedGet<VtVec3dArray>(), 3);
-    else if (v.IsHolding<float>()) { float c = v.UncheckedGet<float>(); put(&c, 1); }
-    else if (v.IsHolding<double>()) { float c = float(v.UncheckedGet<double>()); put(&c, 1); }
-    else if (v.IsHolding<int>()) { float c = float(v.UncheckedGet<int>()); put(&c, 1); }
-    else if (v.IsHolding<GfVec2f>()) put(v.UncheckedGet<GfVec2f>().data(), 2);
-    else if (v.IsHolding<GfVec3f>()) put(v.UncheckedGet<GfVec3f>().data(), 3);
-    else if (v.IsHolding<GfVec4f>()) put(v.UncheckedGet<GfVec4f>().data(), 4);
-    else return false;
-    return !out->empty();
-}
-
 std::string HdPbrtMesh::_PrimvarFile(std::string const &name, int width) const
 {
     const std::string key = name + "#" + std::to_string(width);
@@ -544,29 +507,17 @@ std::string HdPbrtMesh::_PrimvarFile(std::string const &name, int width) const
     SdfPath const &id = GetId();
     auto warn = [&](const char *why) {
         if (_pvWarned.insert(key).second)
-            TF_WARN("hdPbrt: %s primvar %s: %s; the displacement graph uses its default.",
+            TF_WARN("hdPbrt: %s primvar %s: %s; the material uses its default.",
                     id.GetText(), name.c_str(), why);
     };
     // The primvar and its interpolation (Houdini's Cd is displayColor).
-    TfToken token(name);
     HdInterpolation interp = HdInterpolationCount;
-    for (int pass = 0; pass < 2 && interp == HdInterpolationCount; ++pass) {
-        for (int i = 0; i < HdInterpolationCount && interp == HdInterpolationCount; ++i)
-            for (const HdPrimvarDescriptor &d :
-                 pv.sd->GetPrimvarDescriptors(id, HdInterpolation(i)))
-                if (d.name == token)
-                    interp = HdInterpolation(i);
-        if (interp == HdInterpolationCount && name == "Cd")
-            token = HdTokens->displayColor;
-        else
-            break;
-    }
-    if (interp == HdInterpolationCount)
-        return file;  // absent: the default, silently
     std::vector<float> vals;
-    if (!_FlattenPrimvar(pv.sd->Get(id, token), width, &vals)) {
-        warn("unsupported value type");
-        return file;
+    bool unsupported = false;
+    if (!HdPbrt_FetchPrimvar(pv.sd, id, name, width, &interp, &vals, &unsupported)) {
+        if (unsupported)
+            warn("unsupported value type");
+        return file;  // absent: the default, silently
     }
     const size_t count = vals.size() / width;
     const size_t nv = pv.source.size();
