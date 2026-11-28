@@ -1,7 +1,7 @@
 From d344fa6f7f65a0377ddcc4e0063ff8b0d54fcb99 Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Thu, 26 Nov 2026 21:19:39 +0100
-Subject: [PATCH 39/46] plymesh displacement: screen-space dicing (pixel size,
+Subject: [PATCH 39/47] plymesh displacement: screen-space dicing (pixel size,
  off-screen 4x coarser, instance placement), triangle budget, crack-free
  seams, scale/offset (for hdPbrt)
 

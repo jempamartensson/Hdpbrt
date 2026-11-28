@@ -1,7 +1,7 @@
 From cebecd834937e9286570021149323396a38ba0bb Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Sat, 28 Nov 2026 09:18:23 +0100
-Subject: [PATCH 43/46] plymesh per-vertex primvars on triangle meshes and
+Subject: [PATCH 43/47] plymesh per-vertex primvars on triangle meshes and
  "hdpbrtprimvar" float/spectrum textures that interpolate them at the hit;
  graph primvar slots bind by name and width (for hdPbrt)
 

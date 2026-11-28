@@ -1,0 +1,683 @@
+From 9faadfa8e2c79d9e99ca0eed37ac6eb84bc97e68 Mon Sep 17 00:00:00 2001
+From: jempa <jempamartensson@gmail.com>
+Date: Sat, 28 Nov 2026 10:56:15 +0100
+Subject: [PATCH 47/47] Instanced and moving emitters: area lights in object
+ instance definitions become one mesh-mode DiffuseAreaLight per instance
+ (shared per-prototype triangle table, sampled through the instance transform
+ at the reference time); LightSampleContext time; hit-aware MIS pdf (for
+ hdPbrt)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pbrt/cpu/integrators.cpp |   4 +-
+ src/pbrt/cpu/primitive.cpp   |  16 ++++
+ src/pbrt/cpu/primitive.h     |  12 +++
+ src/pbrt/interaction.h       |   3 +
+ src/pbrt/lights.cpp          |  89 ++++++++++++++++++++++-
+ src/pbrt/lights.h            |  90 ++++++++++++++++++++++-
+ src/pbrt/scene.cpp           | 137 +++++++++++++++++++++++++++++++----
+ src/pbrt/scene.h             |   6 ++
+ 8 files changed, 335 insertions(+), 22 deletions(-)
+
+diff --git a/src/pbrt/cpu/integrators.cpp b/src/pbrt/cpu/integrators.cpp
+index a815a89..a9714e3 100644
+--- a/src/pbrt/cpu/integrators.cpp
++++ b/src/pbrt/cpu/integrators.cpp
+@@ -709,7 +709,7 @@ SampledSpectrum PathIntegrator::Li(RayDifferential ray, SampledWavelengths &lamb
+                 // Compute MIS weight for area light
+                 Light areaLight(si->intr.areaLight);
+                 Float p_l = lightSampler.PMF(prevIntrCtx, areaLight) *
+-                            areaLight.PDF_Li(prevIntrCtx, ray.d, true);
++                            HdPbrtAreaPDF(areaLight, prevIntrCtx, ray.d, si->intr);
+                 Float w_l = PowerHeuristic(1, p_b, 1, p_l);
+ 
+                 L += beta * w_l * Le;
+@@ -1253,7 +1253,7 @@ SampledSpectrum VolPathIntegrator::Li(RayDifferential ray, SampledWavelengths &l
+                 // Add surface light contribution using both PDFs with MIS
+                 Light areaLight(isect.areaLight);
+                 Float p_l = lightSampler.PMF(prevIntrContext, areaLight) *
+-                            areaLight.PDF_Li(prevIntrContext, ray.d, true);
++                            HdPbrtAreaPDF(areaLight, prevIntrContext, ray.d, isect);
+                 r_l *= p_l;
+                 L += beta * Le / HdPbrtMisAverage((r_u + r_l), lambda);
+             }
+diff --git a/src/pbrt/cpu/primitive.cpp b/src/pbrt/cpu/primitive.cpp
+index fcfcb48..85964d5 100644
+--- a/src/pbrt/cpu/primitive.cpp
++++ b/src/pbrt/cpu/primitive.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include <pbrt/cpu/aggregates.h>
+ #include <pbrt/interaction.h>
++#include <pbrt/lights.h>
+ #include <pbrt/materials.h>
+ #include <pbrt/shapes.h>
+ #include <pbrt/textures.h>
+@@ -129,6 +130,18 @@ pstd::optional<ShapeIntersection> SimplePrimitive::Intersect(const Ray &r,
+     return si;
+ }
+ 
++// hdPbrt (patch 47): a hit on a prototype's emitter becomes a hit on the
++// instance's light for that emissive shape (or no emitter without one).
++static void HdPbrtInstanceEmitter(SurfaceInteraction &intr, const Light *lights) {
++    if (!intr.areaLight)
++        return;
++    const DiffuseAreaLight *dl = Light(intr.areaLight).CastOrNullptr<DiffuseAreaLight>();
++    if (!dl || dl->hdpbrtSlot < 0)
++        return;
++    intr.hdpbrtEmitterTri = dl->hdpbrtTri;
++    intr.areaLight = lights ? lights[dl->hdpbrtSlot] : Light(nullptr);
++}
++
+ // TransformedPrimitive Method Definitions
+ pstd::optional<ShapeIntersection> TransformedPrimitive::Intersect(const Ray &r,
+                                                                   Float tMax) const {
+@@ -145,6 +158,7 @@ pstd::optional<ShapeIntersection> TransformedPrimitive::Intersect(const Ray &r,
+     if (hdpbrtInstanceId >= 0)
+         si->intr.hdpbrtInstanceId = hdpbrtInstanceId;
+     si->intr.hdpbrtLinkMask |= hdpbrtInstanceLinks;
++    HdPbrtInstanceEmitter(si->intr, hdpbrtLights);
+     return si;
+ }
+ 
+@@ -176,6 +190,7 @@ pstd::optional<ShapeIntersection> AnimatedPrimitive::Intersect(const Ray &r,
+     if (hdpbrtInstanceId >= 0)
+         si->intr.hdpbrtInstanceId = hdpbrtInstanceId;
+     si->intr.hdpbrtLinkMask |= hdpbrtInstanceLinks;
++    HdPbrtInstanceEmitter(si->intr, hdpbrtLights);
+     return si;
+ }
+ 
+@@ -222,6 +237,7 @@ pstd::optional<ShapeIntersection> MotionPrimitive::Intersect(const Ray &r,
+     if (hdpbrtInstanceId >= 0)
+         si->intr.hdpbrtInstanceId = hdpbrtInstanceId;
+     si->intr.hdpbrtLinkMask |= hdpbrtInstanceLinks;
++    HdPbrtInstanceEmitter(si->intr, hdpbrtLights);
+     return si;
+ }
+ 
+diff --git a/src/pbrt/cpu/primitive.h b/src/pbrt/cpu/primitive.h
+index a8ec7d6..f31d9db 100644
+--- a/src/pbrt/cpu/primitive.h
++++ b/src/pbrt/cpu/primitive.h
+@@ -115,6 +115,9 @@ class TransformedPrimitive {
+     // hdPbrt: light-linking membership of this instance, added to the
+     // prototype shapes' own (0 = none of its own).
+     void SetHdPbrtInstanceLinks(uint64_t m) { hdpbrtInstanceLinks = m; }
++    // hdPbrt (patch 47): this instance's lights, one per emissive shape of
++    // its definition (hits on prototype emitters use them).
++    void SetHdPbrtLights(const Light *l) { hdpbrtLights = l; }
+ 
+   private:
+     // TransformedPrimitive Private Members
+@@ -122,6 +125,7 @@ class TransformedPrimitive {
+     const Transform *renderFromPrimitive;
+     int hdpbrtInstanceId = -1;
+     uint64_t hdpbrtInstanceLinks = 0;
++    const Light *hdpbrtLights = nullptr;
+ };
+ 
+ // AnimatedPrimitive Definition
+@@ -139,6 +143,9 @@ class AnimatedPrimitive {
+     // hdPbrt: light-linking membership of this instance, added to the
+     // prototype shapes' own (0 = none of its own).
+     void SetHdPbrtInstanceLinks(uint64_t m) { hdpbrtInstanceLinks = m; }
++    // hdPbrt (patch 47): this instance's lights, one per emissive shape of
++    // its definition (hits on prototype emitters use them).
++    void SetHdPbrtLights(const Light *l) { hdpbrtLights = l; }
+ 
+   private:
+     // AnimatedPrimitive Private Members
+@@ -146,6 +153,7 @@ class AnimatedPrimitive {
+     AnimatedTransform renderFromPrimitive;
+     int hdpbrtInstanceId = -1;
+     uint64_t hdpbrtInstanceLinks = 0;
++    const Light *hdpbrtLights = nullptr;
+ };
+ 
+ // hdPbrt: MotionPrimitive Definition
+@@ -164,6 +172,9 @@ class MotionPrimitive {
+     // hdPbrt: light-linking membership of this instance, added to the
+     // prototype shapes' own (0 = none of its own).
+     void SetHdPbrtInstanceLinks(uint64_t m) { hdpbrtInstanceLinks = m; }
++    // hdPbrt (patch 47): this instance's lights, one per emissive shape of
++    // its definition (hits on prototype emitters use them).
++    void SetHdPbrtLights(const Light *l) { hdpbrtLights = l; }
+ 
+   private:
+     const AnimatedTransform &Segment(Float time) const;
+@@ -173,6 +184,7 @@ class MotionPrimitive {
+     std::vector<Float> times;
+     int hdpbrtInstanceId = -1;
+     uint64_t hdpbrtInstanceLinks = 0;
++    const Light *hdpbrtLights = nullptr;
+ };
+ 
+ }  // namespace pbrt
+diff --git a/src/pbrt/interaction.h b/src/pbrt/interaction.h
+index 198a77e..57a2137 100644
+--- a/src/pbrt/interaction.h
++++ b/src/pbrt/interaction.h
+@@ -268,6 +268,9 @@ class SurfaceInteraction : public Interaction {
+     uint64_t hdpbrtLinkMask = ~uint64_t(0);
+     // hdPbrt: the mesh's per-vertex primvars at the hit (hdpbrtprimvar textures).
+     HdPbrtPrimvarHit hdpbrtPrimvars;
++    // hdPbrt: on hits of an instanced emitter, the triangle index within its
++    // emissive shape (the instance's mesh light's pdf needs it).
++    int hdpbrtEmitterTri = -1;
+     Material material;
+     Light areaLight;
+     Vector3f dpdx, dpdy;
+diff --git a/src/pbrt/lights.cpp b/src/pbrt/lights.cpp
+index fbc1e89..6941d9d 100644
+--- a/src/pbrt/lights.cpp
++++ b/src/pbrt/lights.cpp
+@@ -807,8 +807,39 @@ PBRT_CPU_GPU pstd::optional<LightLiSample> DiffuseAreaLight::SampleLi(LightSampl
+                                                          Point2f u,
+                                                          SampledWavelengths lambda,
+                                                          bool allowIncompletePDF) const {
++    if (hdpbrtMesh) {
++        // hdPbrt mesh mode: a triangle by power, a point on it by area (in
++        // prototype space; uniform after the affine instance transform too).
++        Float pmf, ur;
++        const int k = hdpbrtMesh->alias.Sample(u[0], &pmf, &ur);
++        const DiffuseAreaLight *tl = hdpbrtMesh->lights[k];
++        pstd::optional<ShapeSample> ss =
++            tl->shape.Sample(Point2f(std::min<Float>(ur, OneMinusEpsilon), u[1]));
++        if (!ss || pmf == 0)
++            return {};
++        const Transform t = hdpbrtXform->At(ctx.time);
++        const Point3fi pi = t(ss->intr.pi);
++        const Normal3f nt = t(ss->intr.n);
++        const Float s = HdPbrtLightXform::AreaScale(t, ss->intr.n);
++        const Normal3f n = Normalize(nt);
++        Vector3f wi = Point3f(pi) - ctx.p();
++        const Float d2 = LengthSquared(wi);
++        if (d2 == 0 || s == 0)
++            return {};
++        wi /= std::sqrt(d2);
++        const Float cosL = AbsDot(n, -wi);
++        if (cosL == 0)
++            return {};
++        const Float pdf = pmf / (hdpbrtMesh->area[k] * s) * d2 / cosL;
++        SampledSpectrum Le = L(Point3f(pi), n, ss->intr.uv, -wi, lambda, &ss->hdpbrtPrimvars);
++        if (!Le)
++            return {};
++        Interaction intr(pi, n, ctx.time, ss->intr.uv);
++        intr.mediumInterface = &mediumInterface;
++        return LightLiSample(Le, wi, pdf, intr);
++    }
+     // Sample point on shape for _DiffuseAreaLight_
+-    ShapeSampleContext shapeCtx(ctx.pi, ctx.n, ctx.ns, 0 /* time */);
++    ShapeSampleContext shapeCtx(ctx.pi, ctx.n, ctx.ns, ctx.time);
+     pstd::optional<ShapeSample> ss = shape.Sample(shapeCtx, u);
+     if (!ss || ss->pdf == 0 || LengthSquared(ss->intr.p() - ctx.p()) == 0)
+         return {};
+@@ -830,10 +861,27 @@ PBRT_CPU_GPU pstd::optional<LightLiSample> DiffuseAreaLight::SampleLi(LightSampl
+ 
+ PBRT_CPU_GPU Float DiffuseAreaLight::PDF_Li(LightSampleContext ctx, Vector3f wi,
+                                bool allowIncompletePDF) const {
+-    ShapeSampleContext shapeCtx(ctx.pi, ctx.n, ctx.ns, 0 /* time */);
++    // (Mesh mode: needs the hit, HdPbrtMeshPDF; 0 here.)
++    if (hdpbrtMesh)
++        return 0;
++    ShapeSampleContext shapeCtx(ctx.pi, ctx.n, ctx.ns, ctx.time);
+     return shape.PDF(shapeCtx, wi);
+ }
+ 
++PBRT_CPU_GPU Float DiffuseAreaLight::HdPbrtMeshPDF(const LightSampleContext &ctx, Vector3f wi,
++                                                   const SurfaceInteraction &hit) const {
++    const int k = hit.hdpbrtEmitterTri;
++    if (!hdpbrtMesh || k < 0 || k >= int(hdpbrtMesh->area.size()))
++        return 0;
++    const Transform t = hdpbrtXform->At(hit.time);
++    const Float s = HdPbrtLightXform::AreaScale(t, hdpbrtMesh->normal[k]);
++    const Float d2 = DistanceSquared(ctx.p(), hit.p());
++    const Float cosL = AbsDot(hit.n, wi);
++    if (s == 0 || cosL == 0)
++        return 0;
++    return hdpbrtMesh->alias.PMF(k) / (hdpbrtMesh->area[k] * s) * d2 / cosL;
++}
++
+ void DiffuseAreaLight::SetHdPbrtTexture(SpectrumTexture tex) {
+     hdpbrtLTex = tex;
+     hdpbrtLMax = hdpbrtLAvg = 0;
+@@ -870,6 +918,17 @@ void DiffuseAreaLight::SetHdPbrtTexture(SpectrumTexture tex) {
+ }
+ 
+ SampledSpectrum DiffuseAreaLight::Phi(SampledWavelengths lambda) const {
++    if (hdpbrtMesh) {
++        // Sum over the triangles, scaled to the instance (at its first key).
++        const Transform t = hdpbrtXform->At(hdpbrtXform->times.empty()
++                                                ? Float(0)
++                                                : hdpbrtXform->times.front());
++        SampledSpectrum p(0.f);
++        for (size_t k = 0; k < hdpbrtMesh->lights.size(); ++k)
++            p += hdpbrtMesh->lights[k]->Phi(lambda) *
++                 HdPbrtLightXform::AreaScale(t, hdpbrtMesh->normal[k]);
++        return p;
++    }
+     SampledSpectrum L(0.f);
+     if (image) {
+         // Compute average light image emission
+@@ -891,6 +950,30 @@ SampledSpectrum DiffuseAreaLight::Phi(SampledWavelengths lambda) const {
+ }
+ 
+ pstd::optional<LightBounds> DiffuseAreaLight::Bounds() const {
++    if (hdpbrtMesh) {
++        const HdPbrtLightXform &x = *hdpbrtXform;
++        const Transform t = x.At(x.times.empty() ? Float(0) : x.times.front());
++        Float phi = 0;
++        for (size_t k = 0; k < hdpbrtMesh->lights.size(); ++k)
++            phi += hdpbrtMesh->phi[k] * HdPbrtLightXform::AreaScale(t, hdpbrtMesh->normal[k]);
++        // The normal cone through a static rotation / uniform scale; any
++        // other transform (or motion) may bend it: all directions.
++        DirectionCone cone = DirectionCone::EntireSphere();
++        if (x.segs.empty() && !hdpbrtMesh->cone.IsEmpty()) {
++            const SquareMatrix<4> &m = t.GetMatrix();
++            const Vector3f c0(m[0][0], m[1][0], m[2][0]), c1(m[0][1], m[1][1], m[2][1]),
++                c2(m[0][2], m[1][2], m[2][2]);
++            const Float l0 = Length(c0), l1 = Length(c1), l2 = Length(c2);
++            const Float tol = 1e-4f * std::max({l0, l1, l2});
++            if (std::abs(l0 - l1) < tol && std::abs(l1 - l2) < tol &&
++                std::abs(Dot(c0, c1)) < tol * l0 && std::abs(Dot(c1, c2)) < tol * l0 &&
++                std::abs(Dot(c0, c2)) < tol * l0)
++                cone = DirectionCone(Normalize(Vector3f(t(Normal3f(hdpbrtMesh->cone.w)))),
++                                     hdpbrtMesh->cone.cosTheta);
++        }
++        return LightBounds(x.MotionBounds(hdpbrtMesh->bounds), cone.w, phi, cone.cosTheta,
++                           std::cos(Pi / 2), hdpbrtMesh->twoSided);
++    }
+     // Compute _phi_ for diffuse area light bounds
+     Float phi = 0;
+     if (image) {
+@@ -916,6 +999,8 @@ pstd::optional<LightBounds> DiffuseAreaLight::Bounds() const {
+ PBRT_CPU_GPU pstd::optional<LightLeSample> DiffuseAreaLight::SampleLe(Point2f u1, Point2f u2,
+                                                          SampledWavelengths &lambda,
+                                                          Float time) const {
++    if (hdpbrtMesh)
++        return {};  // (hdPbrt mesh mode: light paths aren't supported)
+     // Sample a point on the area light's _Shape_
+     pstd::optional<ShapeSample> ss = shape.Sample(u1);
+     if (!ss)
+diff --git a/src/pbrt/lights.h b/src/pbrt/lights.h
+index 1da5562..cf3bfd3 100644
+--- a/src/pbrt/lights.h
++++ b/src/pbrt/lights.h
+@@ -86,9 +86,9 @@ class LightSampleContext {
+     LightSampleContext() = default;
+     PBRT_CPU_GPU
+     LightSampleContext(const SurfaceInteraction &si)
+-        : pi(si.pi), n(si.n), ns(si.shading.n) {}
++        : pi(si.pi), n(si.n), ns(si.shading.n), time(si.time) {}
+     PBRT_CPU_GPU
+-    LightSampleContext(const Interaction &intr) : pi(intr.pi) {}
++    LightSampleContext(const Interaction &intr) : pi(intr.pi), time(intr.time) {}
+     PBRT_CPU_GPU
+     LightSampleContext(Point3fi pi, Normal3f n, Normal3f ns) : pi(pi), n(n), ns(ns) {}
+ 
+@@ -98,6 +98,8 @@ class LightSampleContext {
+     // LightSampleContext Public Members
+     Point3fi pi;
+     Normal3f n, ns;
++    // hdPbrt: the time of the reference point (moving and deforming emitters).
++    Float time = 0;
+ };
+ 
+ // LightBounds Definition
+@@ -509,6 +511,55 @@ class GoniometricLight : public LightBase {
+     PiecewiseConstant2D distrib;
+ };
+ 
++// hdPbrt: instanced and moving mesh emitters (pbrt patch 47). An emissive
++// shape inside an object instance definition becomes one light per instance:
++// a DiffuseAreaLight in "mesh mode" that samples the prototype's triangles
++// (HdPbrtMeshEmitter, shared by all instances) through the instance's
++// transform at the reference point's time (HdPbrtLightXform).
++class DiffuseAreaLight;
++
++struct HdPbrtLightXform {
++    // Static (no segments), or keyed: segment k spans times[k]..times[k + 1].
++    Transform fixed;
++    std::vector<AnimatedTransform> segs;
++    std::vector<Float> times;
++    Transform At(Float t) const {
++        if (segs.empty())
++            return fixed;
++        size_t k = 0;
++        while (k + 1 < segs.size() && times[k + 1] <= t)
++            ++k;
++        return segs[k].Interpolate(t);
++    }
++    Bounds3f MotionBounds(const Bounds3f &b) const {
++        if (segs.empty())
++            return fixed(b);
++        Bounds3f r;
++        for (const AnimatedTransform &s : segs)
++            r = Union(r, s.MotionBounds(b));
++        return r;
++    }
++    // Area scale of a surface with unit normal n under t: |det M| |M^-T n|.
++    static Float AreaScale(const Transform &t, Normal3f n) {
++        const SquareMatrix<4> &m = t.GetMatrix();
++        SquareMatrix<3> m3(m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0],
++                           m[2][1], m[2][2]);
++        return std::abs(Determinant(m3)) * Length(Vector3f(t(n)));
++    }
++};
++
++struct HdPbrtMeshEmitter {
++    // Per triangle (prototype space): its own light (emission parameters,
++    // shape), area, unit geometric normal and bounds power.
++    std::vector<const DiffuseAreaLight *> lights;
++    std::vector<Float> area, phi;
++    std::vector<Normal3f> normal;
++    AliasTable alias{Allocator()};  // by power
++    Bounds3f bounds;
++    DirectionCone cone;
++    bool twoSided = false;
++};
++
+ // DiffuseAreaLight Definition
+ class DiffuseAreaLight : public LightBase {
+   public:
+@@ -547,6 +598,9 @@ class DiffuseAreaLight : public LightBase {
+     SampledSpectrum L(Point3f p, Normal3f n, Point2f uv, Vector3f w,
+                       const SampledWavelengths &lambda,
+                       const HdPbrtPrimvarHit *pv = nullptr) const {
++        // hdPbrt: mesh mode: every triangle has the same emission parameters.
++        if (hdpbrtMesh)
++            return hdpbrtMesh->lights[0]->L(p, n, uv, w, lambda, pv);
+         // Check for zero emitted radiance from point on area light
+         if (!twoSided && Dot(n, w) < 0)
+             return SampledSpectrum(0.f);
+@@ -592,6 +646,27 @@ class DiffuseAreaLight : public LightBase {
+     SpectrumTexture hdpbrtLTex;
+     Float hdpbrtLMax = 0, hdpbrtLAvg = 0;
+ 
++    // hdPbrt (patch 47): a prototype triangle's light carries its emitter
++    // slot (which emissive shape of the instance definition) and triangle
++    // index; instances replace it on hits by their own light for the slot.
++    int hdpbrtSlot = -1, hdpbrtTri = -1;
++    const Shape &HdPbrtShape() const { return shape; }
++    bool HdPbrtTwoSided() const { return twoSided; }
++    // Mesh mode (an instance's light for one emissive shape).
++    const HdPbrtMeshEmitter *hdpbrtMesh = nullptr;
++    const HdPbrtLightXform *hdpbrtXform = nullptr;
++    void SetHdPbrtMesh(const HdPbrtMeshEmitter *mesh, const HdPbrtLightXform *xform) {
++        hdpbrtMesh = mesh;
++        hdpbrtXform = xform;
++        hdpbrtSlot = hdpbrtTri = -1;
++    }
++    // Mesh mode: the solid-angle pdf of reaching triangle hit.hdpbrtEmitterTri
++    // at the hit point from ctx (the light's own PDF_Li can't tell which
++    // triangle a direction hits).
++    PBRT_CPU_GPU
++    Float HdPbrtMeshPDF(const LightSampleContext &ctx, Vector3f wi,
++                        const SurfaceInteraction &hit) const;
++
+     PBRT_CPU_GPU
+     pstd::optional<LightLiSample> SampleLi(LightSampleContext ctx, Point2f u,
+                                            SampledWavelengths lambda,
+@@ -944,6 +1019,17 @@ PBRT_CPU_GPU inline SampledSpectrum Light::L(Point3f p, Normal3f n, Point2f uv,
+     return Dispatch(l);
+ }
+ 
++// hdPbrt: the light pdf of a BSDF-sampled ray that hit emitter `light` at
++// `hit` (MIS). Mesh emitters (instanced / moving, patch 47) need the hit's
++// triangle; every other light uses PDF_Li.
++PBRT_CPU_GPU inline Float HdPbrtAreaPDF(Light light, const LightSampleContext &ctx,
++                                        Vector3f wi, const SurfaceInteraction &hit) {
++    if (const DiffuseAreaLight *dl = light.CastOrNullptr<DiffuseAreaLight>();
++        dl && dl->hdpbrtMesh)
++        return dl->HdPbrtMeshPDF(ctx, wi, hit);
++    return light.PDF_Li(ctx, wi, true);
++}
++
+ PBRT_CPU_GPU inline SampledSpectrum Light::Le(const Ray &ray,
+                                               const SampledWavelengths &lambda) const {
+     auto le = [&](auto ptr) { return ptr->Le(ray, lambda); };
+diff --git a/src/pbrt/scene.cpp b/src/pbrt/scene.cpp
+index 22eab1b..545c3ef 100644
+--- a/src/pbrt/scene.cpp
++++ b/src/pbrt/scene.cpp
+@@ -325,8 +325,8 @@ void BasicSceneBuilder::Shape(const std::string &name, ParsedParameterVector par
+         areaLightIndex = scene->AddAreaLight(SceneEntity(graphicsState.areaLightName,
+                                                          graphicsState.areaLightParams,
+                                                          graphicsState.areaLightLoc));
+-        if (activeInstanceDefinition)
+-            Warning(&loc, "Area lights not supported with object instancing");
++        // (hdPbrt, patch 47: area lights in instance definitions are
++        // instanced emitters, see CreateLights.)
+     }
+ 
+     if (CTMIsAnimated()) {
+@@ -1403,12 +1403,9 @@ std::vector<Light> BasicScene::CreateLights(
+ 
+     LOG_VERBOSE("Starting area lights");
+     std::vector<Light> lights;
+-    // Area Lights
+-    for (size_t i = 0; i < shapes.size(); ++i) {
+-        const auto &sh = shapes[i];
+-
+-        if (sh.lightIndex == -1)
+-            continue;
++    // Area Lights (hdPbrt: the per-shape part as a lambda, also used for the
++    // emissive shapes of instance definitions, patch 47)
++    auto makeAreaLights = [&](const ShapeSceneEntity &sh) -> pstd::vector<Light> * {
+ 
+         std::string materialName;
+         if (!sh.materialName.empty()) {
+@@ -1429,7 +1426,7 @@ std::vector<Light> BasicScene::CreateLights(
+         if (materialName == "none" || materialName == "") {
+             Warning(&sh.loc, "Ignoring area light specification for shape "
+                              "without a material.");
+-            continue;
++            return nullptr;
+         }
+ 
+         pstd::vector<pbrt::Shape> shapeObjects = Shape::Create(
+@@ -1462,15 +1459,106 @@ std::vector<Light> BasicScene::CreateLights(
+                 mi, ps, alphaTex, &areaLightEntity.loc, alloc);
+             if (area && hdpbrtLTex && area.Is<DiffuseAreaLight>())
+                 area.Cast<DiffuseAreaLight>()->SetHdPbrtTexture(hdpbrtLTex);
+-            if (area) {
+-                lights.push_back(area);
++            if (area)
+                 shapeLights->push_back(area);
+-            }
+         }
+ 
++        return shapeLights;
++    };
++    for (size_t i = 0; i < shapes.size(); ++i) {
++        const auto &sh = shapes[i];
++        if (sh.lightIndex == -1)
++            continue;
++        pstd::vector<Light> *shapeLights = makeAreaLights(sh);
++        if (!shapeLights)
++            continue;
++        lights.insert(lights.end(), shapeLights->begin(), shapeLights->end());
+         (*shapeIndexToAreaLights)[i] = shapeLights;
+     }
+ 
++    // hdPbrt (patch 47): instanced emitters. Each emissive shape of an
++    // instance definition gets triangle lights in prototype space (not lights
++    // of the scene: they mark the prototype's hits) and a shared mesh table;
++    // each instance gets one mesh-mode light per such shape, sampled through
++    // its transform.
++    {
++        std::map<InternedString, std::vector<HdPbrtMeshEmitter *>> definitionEmitters;
++        for (auto &def : instanceDefinitions) {
++            std::vector<HdPbrtMeshEmitter *> slots;
++            const std::vector<ShapeSceneEntity> &dshapes = def.second->shapes;
++            for (size_t i = 0; i < dshapes.size(); ++i) {
++                if (dshapes[i].lightIndex == -1)
++                    continue;
++                pstd::vector<Light> *tl = makeAreaLights(dshapes[i]);
++                if (!tl || tl->empty())
++                    continue;
++                HdPbrtMeshEmitter *m = alloc.new_object<HdPbrtMeshEmitter>();
++                const int slot = int(slots.size());
++                for (size_t k = 0; k < tl->size(); ++k) {
++                    DiffuseAreaLight *dl = (*tl)[k].Cast<DiffuseAreaLight>();
++                    dl->hdpbrtSlot = slot;
++                    dl->hdpbrtTri = int(k);
++                    pstd::optional<LightBounds> lb = dl->Bounds();
++                    pstd::optional<ShapeSample> ss = dl->HdPbrtShape().Sample(Point2f(0.5f, 0.5f));
++                    const Float area = dl->HdPbrtShape().Area();
++                    m->lights.push_back(dl);
++                    m->area.push_back(area);
++                    m->phi.push_back(lb ? lb->phi : 0);
++                    m->normal.push_back(ss ? Normalize(ss->intr.n) : Normal3f(0, 0, 1));
++                    m->bounds = Union(m->bounds, dl->HdPbrtShape().Bounds());
++                    m->cone = Union(m->cone, dl->HdPbrtShape().NormalBounds());
++                    m->twoSided = dl->HdPbrtTwoSided();
++                }
++                std::vector<Float> w(m->phi.begin(), m->phi.end());
++                Float sum = 0;
++                for (Float &x : w)
++                    sum += x = std::max<Float>(x, 0);
++                if (sum <= 0)
++                    for (size_t k = 0; k < w.size(); ++k)
++                        w[k] = m->area[k];
++                m->alias = AliasTable(w, alloc);
++                hdpbrtDefinitionLights[def.first][int(i)] = tl;
++                slots.push_back(m);
++            }
++            if (!slots.empty())
++                definitionEmitters[def.first] = std::move(slots);
++        }
++        hdpbrtInstanceLights.assign(instances.size(), nullptr);
++        size_t nInstanceLights = 0;
++        for (size_t i = 0; i < instances.size(); ++i) {
++            const InstanceSceneEntity &inst = instances[i];
++            auto it = definitionEmitters.find(inst.name);
++            if (it == definitionEmitters.end())
++                continue;
++            HdPbrtLightXform *x = alloc.new_object<HdPbrtLightXform>();
++            if (inst.renderFromInstanceKeys) {
++                const std::vector<Transform> &k = *inst.renderFromInstanceKeys;
++                for (size_t j = 0; j + 1 < k.size(); ++j)
++                    x->segs.push_back(AnimatedTransform(k[j], inst.keyTimes[j], k[j + 1],
++                                                        inst.keyTimes[j + 1]));
++                x->times = inst.keyTimes;
++            } else if (inst.renderFromInstance) {
++                x->fixed = *inst.renderFromInstance;
++            } else {
++                x->segs.push_back(*inst.renderFromInstanceAnim);
++                x->times = {inst.renderFromInstanceAnim->startTime,
++                            inst.renderFromInstanceAnim->endTime};
++            }
++            Light *arr = alloc.allocate_object<Light>(it->second.size());
++            for (size_t j = 0; j < it->second.size(); ++j) {
++                DiffuseAreaLight *l =
++                    alloc.new_object<DiffuseAreaLight>(*it->second[j]->lights[0]);
++                l->SetHdPbrtMesh(it->second[j], x);
++                arr[j] = l;
++                lights.push_back(l);
++                ++nInstanceLights;
++            }
++            hdpbrtInstanceLights[i] = arr;
++        }
++        if (nInstanceLights)
++            LOG_VERBOSE("hdPbrt: %d instanced emitter lights", int(nInstanceLights));
++    }
++
+     LOG_VERBOSE("Finished area lights");
+ 
+     LOG_VERBOSE("Starting to consume non-area light futures");
+@@ -1517,8 +1605,12 @@ Primitive BasicScene::CreateAggregate(
+     };
+ 
+     // Non-animated shapes
++    // (hdPbrt: the area lights by shape index are a parameter, so that
++    // instance definitions use their own, patch 47.)
+     auto CreatePrimitivesForShapes =
+-        [&](std::vector<ShapeSceneEntity> &shapes) -> std::vector<Primitive> {
++        [&](std::vector<ShapeSceneEntity> &shapes,
++            const std::map<int, pstd::vector<Light> *> &shapeIndexToAreaLights)
++        -> std::vector<Primitive> {
+         // Parallelize Shape::Create calls, which will in turn
+         // parallelize PLY file loading, etc...
+         pstd::vector<pstd::vector<pbrt::Shape>> shapeVectors(shapes.size());
+@@ -1586,7 +1678,7 @@ Primitive BasicScene::CreateAggregate(
+     };
+ 
+     LOG_VERBOSE("Starting shapes");
+-    std::vector<Primitive> primitives = CreatePrimitivesForShapes(shapes);
++    std::vector<Primitive> primitives = CreatePrimitivesForShapes(shapes, shapeIndexToAreaLights);
+ 
+     shapes.clear();
+     shapes.shrink_to_fit();
+@@ -1685,7 +1777,12 @@ Primitive BasicScene::CreateAggregate(
+         auto &inst = *instanceDefinitionIterators[i];
+ 
+         std::vector<Primitive> instancePrimitives =
+-            CreatePrimitivesForShapes(inst.second->shapes);
++            CreatePrimitivesForShapes(inst.second->shapes, [&]() {
++                auto it = hdpbrtDefinitionLights.find(inst.first);
++                return it == hdpbrtDefinitionLights.end()
++                           ? std::map<int, pstd::vector<Light> *>()
++                           : it->second;
++            }());
+         std::vector<Primitive> movingInstancePrimitives =
+             CreatePrimitivesForAnimatedShapes(inst.second->animatedShapes);
+         instancePrimitives.insert(instancePrimitives.end(),
+@@ -1711,7 +1808,12 @@ Primitive BasicScene::CreateAggregate(
+     this->instanceDefinitions.clear();
+ 
+     // Instances
+-    for (const auto &inst : instances) {
++    for (size_t instIndex = 0; instIndex < instances.size(); ++instIndex) {
++        const auto &inst = instances[instIndex];
++        // hdPbrt (patch 47): the instance's emitter lights, if any.
++        const Light *instLights = instIndex < hdpbrtInstanceLights.size()
++                                      ? hdpbrtInstanceLights[instIndex]
++                                      : nullptr;
+         auto iter = instanceDefinitions.find(inst.name);
+         if (iter == instanceDefinitions.end())
+             ErrorExit(&inst.loc, "%s: object instance not defined", inst.name);
+@@ -1725,6 +1827,7 @@ Primitive BasicScene::CreateAggregate(
+                 iter->second, std::move(*inst.renderFromInstanceKeys), inst.keyTimes);
+             mp->SetHdPbrtInstanceId(inst.hdpbrtInstanceId);
+             mp->SetHdPbrtInstanceLinks(inst.hdpbrtInstanceLinks);
++            mp->SetHdPbrtLights(instLights);
+             primitives.push_back(mp);
+             delete inst.renderFromInstanceKeys;
+         } else if (inst.renderFromInstance) {
+@@ -1732,12 +1835,14 @@ Primitive BasicScene::CreateAggregate(
+                 new TransformedPrimitive(iter->second, inst.renderFromInstance);
+             tp->SetHdPbrtInstanceId(inst.hdpbrtInstanceId);
+             tp->SetHdPbrtInstanceLinks(inst.hdpbrtInstanceLinks);
++            tp->SetHdPbrtLights(instLights);
+             primitives.push_back(tp);
+         } else {
+             AnimatedPrimitive *ap =
+                 new AnimatedPrimitive(iter->second, *inst.renderFromInstanceAnim);
+             ap->SetHdPbrtInstanceId(inst.hdpbrtInstanceId);
+             ap->SetHdPbrtInstanceLinks(inst.hdpbrtInstanceLinks);
++            ap->SetHdPbrtLights(instLights);
+             primitives.push_back(ap);
+             delete inst.renderFromInstanceAnim;
+         }
+diff --git a/src/pbrt/scene.h b/src/pbrt/scene.h
+index fc67441..91829c9 100644
+--- a/src/pbrt/scene.h
++++ b/src/pbrt/scene.h
+@@ -341,6 +341,12 @@ class BasicScene {
+     std::vector<ShapeSceneEntity> shapes;
+     std::vector<AnimatedShapeSceneEntity> animatedShapes;
+     std::vector<InstanceSceneEntity> instances;
++    // hdPbrt (patch 47): instanced emitters, made by CreateLights for
++    // CreateAggregate: per definition, its emissive shapes' triangle lights
++    // (by shape index), and per instance (instances[i]) its lights, one per
++    // emissive shape of its definition (or null).
++    std::map<InternedString, std::map<int, pstd::vector<Light> *>> hdpbrtDefinitionLights;
++    std::vector<const Light *> hdpbrtInstanceLights;
+     std::map<InternedString, InstanceDefinitionSceneEntity *> instanceDefinitions;
+ 
+   private:
+-- 
+2.43.0
+

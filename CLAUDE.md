@@ -11,7 +11,7 @@ Full design and gotchas: `docs/BUILD_NOTES.md` (the same file as `~/dev/pbrt_hyd
 
 - `~/dev/pbrt_hydra/`: the working tree.
   - `hdPbrt/`: this repo (delegate source, `blender/hydra_pbrt` add-on, patches, docs, tests).
-  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (46 commits, the same as `patches/`;
+  - `src/pbrt-v4`: pbrt-v4 at `20e41fd` plus branch `hdpbrt` (47 commits, the same as `patches/`;
     regenerate from this repo with `git -C ../src/pbrt-v4 format-patch -q 20e41fd -o "$PWD/patches"`;
     a relative `-o` lands inside the pbrt checkout).
   - `src/OpenUSD-26.08`, `src/oneTBB-2022.3.0`, `src/usd-blender-generated`: headers for
@@ -216,6 +216,24 @@ protocol. The final image comes from the PFM pbrt writes. The pbrt patches are:
    sampling (`Phi`, `Bounds`): mean / max of the texture at 8 points of the shape x 3
    wavelengths (`SetHdPbrtTexture`, floor 1e-3 so it stays sampled). Triangles only carry
    primvars (meshes; hdPbrt only makes meshes emit).
+47. Instanced and moving emitters. An AreaLightSource inside ObjectBegin is kept (pbrt warned
+   and dropped it). `BasicScene::CreateLights` (per-shape part now the `makeAreaLights` lambda)
+   gives each emissive shape of a definition triangle lights in prototype space (not scene
+   lights; `hdpbrtSlot` / `hdpbrtTri` mark them) and a shared `HdPbrtMeshEmitter` (per triangle:
+   light, area, unit normal, bounds power; alias table by power; bounds, normal cone), and each
+   instance one `DiffuseAreaLight` per emissive shape in mesh mode (`SetHdPbrtMesh`, a copy of
+   the first triangle light for the emission parameters) with `HdPbrtLightXform` (static,
+   ActiveTransform or N keys). Mesh mode: `SampleLi` picks a triangle by power, a point by area
+   in prototype space, transforms it at `ctx.time`; pdf = P(tri) / (A x areaScale) x d^2 / cos
+   (areaScale = |det M| |M^-T n|); `Phi`/`Bounds` sum the triangles scaled to the instance
+   (normal cone kept only for static similarity transforms). Hits: Transformed/Animated/
+   MotionPrimitive swap a prototype light for the instance's (`HdPbrtInstanceEmitter`,
+   `SetHdPbrtLights`, arrays in `BasicScene::hdpbrtInstanceLights` by instance index) and set
+   `SurfaceInteraction::hdpbrtEmitterTri`; path and volpath use `HdPbrtAreaPDF(light, ctx, wi,
+   hit)` for the MIS pdf (mesh mode can't answer PDF_Li(ctx, wi)). `LightSampleContext::time`
+   (from the interaction): area lights sample deforming shapes at the right time too.
+   `CreatePrimitivesForShapes` takes the area-light map, definitions use their own. Not for
+   SampleLe (light-path integrators) or AnimatedShape area lights inside definitions.
 
 ## Done in the 2026-11-22 session
 
@@ -569,8 +587,19 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   constant or the texture says so and writes `"rgb L" [1 1 1] "string hdpbrtltexture"`.
   Checks: the inputs scene's four emission spheres equal their constants exactly at A and B
   (camera hits and the light they cast); pbrt-only: a quad lit by a white-primvar texture equals
-  "rgb L" [1 1 1] pixel for pixel. Emissive meshes only (pbrt can't instance area lights).
+  "rgb L" [1 1 1] pixel for pixel. Emissive meshes only (instanced ones since patch 47).
   Materials run45 34/8/0 identical, usdlux 326/328.
+- Instanced and moving emitters (2026-11-28, pbrt patch 47; plan: thousands of instances and
+  motion blur). `HdPbrtGeom::Write` writes the AreaLightSource inside ObjectBegin for
+  instanced prototypes, and a moving emitter (two keys: ActiveTransform, or N keys) as a
+  one-instance object; pbrt stopped with "Animated area lights are not supported" before
+  (blurred renders with a moving emissive mesh failed). Checks (`tests/instanced_lights/
+  run_instanced_lights.sh`): pbrt-only pairs agree within 0.1% (instance vs plain,
+  rotated / non-uniformly scaled instances vs pre-transformed meshes, ActiveTransform and N-key
+  motion vs the average of 16 static renders, primvar emission instanced); hdPbrt
+  PointInstancer of 100 / 10k emissive quads vs separate meshes: means within 0.02%, noise
+  vs a 1024 spp reference the same (0.141 vs 0.140); 100k instances render in ~4 s, pbrt peak
+  RSS 219 MB (10k: 44 MB instanced vs 76 MB as meshes).
 - Per-object dicing (2026-11-27, hdPbrt only): constant primvars `pbrt:dicingRate` /
   `pbrt_dicingRate` (pixels, over the render setting), `karma:object:dicingquality` (divides
   the rate, min 0.01; Karma's meaning: 2 = twice as fine) and `pbrt:dicingMaxTriangles` /
@@ -615,7 +644,7 @@ workflow with specularColor 0, or ior 1) must be pbrt `diffuse`, not coateddiffu
   (a rotateY orbit follows its arc; Houdini's viewport does this too). Between keys,
   `HdPbrt_InterpolateXform` decomposes (slerp), instance quaternions slerp. More than two
   transform keys need an ObjectInstance, so a moving non-instanced mesh is written as a
-  one-instance object (except emissive ones: pbrt can't instance area lights, two keys).
+  one-instance object (emissive ones too since patch 47, as are their two-key motions).
   `tests/curved_scene.usda` + `tests/render_settings.py` (renders with renderer settings;
   reads pbrt's PFM from HDPBRT_TMPDIR). `docs/images/curved_motion.png`: 2 vs 9 samples.
 - Deformation blur (done 2026-11-22, pbrt patch 5): a mesh samples `points` over +-1 frame at

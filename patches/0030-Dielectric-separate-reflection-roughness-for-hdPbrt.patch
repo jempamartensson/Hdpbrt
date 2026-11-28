@@ -1,7 +1,7 @@
 From a7ff1b64a92cd34a1a115e47127e47ec2140e6fd Mon Sep 17 00:00:00 2001
 From: jempa <jempamartensson@gmail.com>
 Date: Wed, 25 Nov 2026 07:28:39 +0100
-Subject: [PATCH 30/46] Dielectric: separate reflection roughness (for hdPbrt)
+Subject: [PATCH 30/47] Dielectric: separate reflection roughness (for hdPbrt)
 
 "hdpbrtreflectionroughness" / "hdpbrtreflection{u,v}roughness": the
 reflection lobe gets its own GGX distribution, the transmission keeps

@@ -592,33 +592,36 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
                HdPbrt_Matrix(worldFromObject) + "\n";
     };
     os << "# " << prim.GetId().GetString() << "\n";
+    // The emitter (pbrt patch 46: a varying emission's texture replaces L,
+    // which still sets the color space's normalization). Instanced and moving
+    // emitters are object instances (pbrt patch 47).
+    std::string areaLight;
+    if (emissive) {
+        const bool tex = !mat.emissionTexture.empty();
+        areaLight = "AreaLightSource \"diffuse\" \"rgb L\" " +
+                    HdPbrt_Rgb(tex ? GfVec3f(1.f) : mat.emission);
+        if (tex)
+            areaLight += " \"string hdpbrtltexture\" " + HdPbrt_Quote(mat.emissionTexture);
+        areaLight += "\n  ";
+    }
     if (!_instanced) {
         std::string motionAttr;
-        // Area lights can't be instanced in pbrt: emissive meshes get two keys.
-        const std::vector<GfMatrix4d> keys =
-            emissive && nx > 2 ? std::vector<GfMatrix4d>{xf.front(), xf.back()} : xf;
-        const std::vector<float> keyTimes =
-            emissive && nx > 2 ? std::vector<float>{xTimes.front(), xTimes.back()} : xTimes;
-        const std::string xform = _MotionTransform(keys, keyTimes, &motionAttr);
-        if (motionAttr.empty()) {
+        const std::string xform = _MotionTransform(xf, xTimes, &motionAttr);
+        // pbrt has no animated area lights outside instances: a moving
+        // emitter is a one-instance object (its light follows the instance).
+        const bool animated = xform.rfind("ActiveTransform", 0) == 0;
+        if (motionAttr.empty() && !(emissive && animated)) {
             os << "AttributeBegin\n  " << xform << "\n  " << matLine;
-            if (emissive) {
-                // A varying emission (pbrt patch 46): the texture replaces L
-                // (L still sets the color space's normalization).
-                const bool tex = !mat.emissionTexture.empty();
-                os << "  AreaLightSource \"diffuse\" \"rgb L\" "
-                   << HdPbrt_Rgb(tex ? GfVec3f(1.f) : mat.emission);
-                if (tex)
-                    os << " \"string hdpbrtltexture\" " << HdPbrt_Quote(mat.emissionTexture);
-                os << "\n";
-            }
+            if (emissive)
+                os << "  " << areaLight;
             os << "  " << shapes << "AttributeEnd\n";
         } else {
             // N-key transform motion only exists for object instances.
             std::string name = "hdpbrt_obj_" + std::to_string(ctx.objectCounter++);
             os << "ObjectBegin " << HdPbrt_Quote(name) << "\n  Identity\n  " << matLine << "  "
-               << diceShapes(keys.front()) << "ObjectEnd\nAttributeBegin " << motionAttr
-               << " ObjectInstance " << HdPbrt_Quote(name) << " AttributeEnd\n";
+               << areaLight << diceShapes(xf.front()) << "ObjectEnd\nAttributeBegin "
+               << (motionAttr.empty() ? xform : motionAttr) << " ObjectInstance "
+               << HdPbrt_Quote(name) << " AttributeEnd\n";
         }
         ++ctx.numMeshes;
     } else {
@@ -636,7 +639,7 @@ void HdPbrtGeom::Write(std::ostream &os, HdRenderIndex &index,
             }
         }
         os << "ObjectBegin " << HdPbrt_Quote(name) << "\n  Identity\n  " << matLine << "  "
-           << diceShapes(nearest) << "ObjectEnd\n";
+           << areaLight << diceShapes(nearest) << "ObjectEnd\n";
         // hdpbrtinstanceid: the instance index Hydra expects in the instanceId
         // AOV (flattened over nested instancers, see HdPbrtInstancer).
         std::vector<GfMatrix4d> keys(nx);
